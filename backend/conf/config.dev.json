@@ -1,0 +1,17 @@
+{
+  "http_addr": ":8080",
+  "database_url": "postgres://boulder_frame:change-for-local@postgres:5432/boulder_frame?sslmode=disable",
+  "redis_url": "redis://redis:6379/0",
+  "s3_endpoint": "http://objectstore:9000",
+  "s3_presign_endpoint": "http://localhost:9000",
+  "s3_region": "us-east-1",
+  "s3_bucket": "boulder-frame",
+  "s3_access_key": "boulder-frame-local",
+  "s3_secret_key": "change-for-local-s3",
+  "s3_use_path_style": true,
+  "signed_url_ttl": "15m",
+  "max_upload_bytes": 2147483648,
+  "pipeline_version": "dev",
+  "model_version": "unset-until-pinned",
+  "development_owner": "development-owner"
+}

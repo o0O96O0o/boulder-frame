@@ -1,0 +1,14 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-assets",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Expiration": {
+        "Days": __ASSET_RETENTION_DAYS__
+      }
+    }
+  ]
+}

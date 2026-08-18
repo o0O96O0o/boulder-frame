@@ -1,0 +1,9 @@
+{
+  "pipeline_version": "dev",
+  "model_version": "unset-until-pinned",
+  "scratch_root": "/work",
+  "ffprobe_bin": "ffprobe",
+  "ffmpeg_bin": "ffmpeg",
+  "lease_seconds": 300,
+  "retain_debug_artifacts": false
+}

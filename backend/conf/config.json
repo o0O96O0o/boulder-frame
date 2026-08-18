@@ -1,0 +1,17 @@
+{
+  "http_addr": ":8080",
+  "database_url": "${DATABASE_URL}",
+  "redis_url": "${REDIS_URL}",
+  "s3_endpoint": "${S3_ENDPOINT}",
+  "s3_presign_endpoint": "${S3_PRESIGN_ENDPOINT}",
+  "s3_region": "${S3_REGION}",
+  "s3_bucket": "${S3_BUCKET}",
+  "s3_access_key": "${S3_ACCESS_KEY}",
+  "s3_secret_key": "${S3_SECRET_KEY}",
+  "s3_use_path_style": true,
+  "signed_url_ttl": "15m",
+  "max_upload_bytes": 2147483648,
+  "pipeline_version": "${PIPELINE_VERSION}",
+  "model_version": "${MODEL_VERSION}",
+  "development_owner": "deployment"
+}

@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+
+compose() {
+  docker compose --env-file infra/.env -f infra/compose.yaml "$@"
+}
+
+case "${1:-}" in
+  start) exec compose up --build ;;
+  start-detached) exec compose up --build -d ;;
+  migrate) exec compose run --rm backend migrate up ;;
+  status) exec compose ps ;;
+  logs) shift; exec compose logs -f "$@" ;;
+  backup-db)
+    mkdir -p infra/backups
+    exec sh -c 'compose() { docker compose --env-file infra/.env -f infra/compose.yaml "$@"; }; compose exec -T postgres sh -c '\''pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"'\''' > "infra/backups/postgres-$(date +%Y%m%dT%H%M%S).sql"
+    ;;
+  restore-db)
+    test "$#" = 2 || { echo "usage: $0 restore-db BACKUP.sql" >&2; exit 64; }
+    exec sh -c 'compose() { docker compose --env-file infra/.env -f infra/compose.yaml "$@"; }; compose exec -T postgres sh -c '\''psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'\''' < "$2"
+    ;;
+  stop) exec compose down ;;
+  reset) exec compose down -v ;;
+  *)
+    echo "usage: $0 {start|start-detached|migrate|status|logs|backup-db|restore-db|stop|reset}" >&2
+    exit 64
+    ;;
+esac

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=75.8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "boulder-frame-worker"
+version = "0.1.0"
+description = "Offline Boulder Frame media worker foundation"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+boulder-frame-worker = "boulder_frame_worker.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]

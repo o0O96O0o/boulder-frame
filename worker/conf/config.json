@@ -1,0 +1,9 @@
+{
+  "pipeline_version": "${PIPELINE_VERSION}",
+  "model_version": "${MODEL_VERSION}",
+  "scratch_root": "/work",
+  "ffprobe_bin": "ffprobe",
+  "ffmpeg_bin": "ffmpeg",
+  "lease_seconds": 300,
+  "retain_debug_artifacts": false
+}
