@@ -60,18 +60,20 @@ class JobConfiguration:
 
 @dataclass(frozen=True, slots=True)
 class JobTask:
-    """The queue payload must contain exactly one durable job identifier."""
+    """The queue payload carries the durable job ID and originating trace ID."""
 
     job_id: UUID
+    trace_id: str = ""
 
     @classmethod
     def from_payload(cls, payload: object) -> JobTask:
-        if not isinstance(payload, dict) or set(payload) != {"job_id"}:
+        if not isinstance(payload, dict) or set(payload) != {"job_id", "trace_id"}:
             raise terminal(ErrorCode.INVALID_TASK, "Worker task payload is invalid.")
         value = payload["job_id"]
-        if not isinstance(value, str):
+        trace_id = payload["trace_id"]
+        if not isinstance(value, str) or not isinstance(trace_id, str) or not trace_id:
             raise terminal(ErrorCode.INVALID_TASK, "Worker task payload is invalid.")
         try:
-            return cls(job_id=UUID(value))
+            return cls(job_id=UUID(value), trace_id=str(UUID(trace_id)))
         except ValueError as error:
             raise terminal(ErrorCode.INVALID_TASK, "Worker task payload is invalid.") from error

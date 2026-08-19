@@ -2,7 +2,7 @@
 
 ## Goal
 
-Implement the offline Boulder Frame MVP as four independently testable Compose services: a browser frontend, a Go API, a Python processing worker, and self-hosted infrastructure for PostgreSQL, Redis, S3-compatible storage, and online HTTPS routing.
+Implement the offline Boulder Frame MVP as Compose services for a browser frontend, Go API, Python processing worker, and online HTTPS routing, using externally managed PostgreSQL, Redis, and S3-compatible storage.
 
 This plan turns [offline-reframing-mvp.md](offline-reframing-mvp.md) into an executable implementation sequence. It does not expand the MVP to real-time processing, native capture, multi-athlete tracking, equipment detection, super-resolution, or variable-frame-rate input.
 
@@ -15,8 +15,8 @@ Implemented baseline interfaces include:
 - API routes under `/api/v1` for projects, signed source uploads, upload confirmation, jobs, artifacts, and signed downloads.
 - PostgreSQL migrations for projects, assets, processing jobs, and job artifacts.
 - Immutable job configuration with target selection, output settings, pipeline version, model version, and planner identifier.
-- Worker media validation for MP4/H.264/AAC, constant frame rate, rotation metadata, target-coordinate mapping, crop geometry, and deterministic planner behavior.
-- Local Compose direct-upload support through `S3_PRESIGN_ENDPOINT=http://localhost:9000` and MinIO CORS configuration.
+- Worker media validation for MP4 or QuickTime MOV, H.264/HEVC video, AAC audio, constant frame rate, rotation metadata, target-coordinate mapping, crop geometry, and deterministic planner behavior.
+- Direct-upload support through the shared external S3-compatible store and its CORS configuration.
 
 ## Task Tree
 
@@ -42,22 +42,22 @@ Implemented baseline interfaces include:
       - Verification: A manifest validator catches missing files, unsupported fixture metadata, and invalid normalized coordinates.
   - Infrastructure service
     - **I1.1 Implement local Compose topology.**
-      - Outcome: One command starts frontend, backend, worker, PostgreSQL, Redis, and S3-compatible object storage on a private Compose network.
+      - Outcome: One command starts frontend, backend, and worker configured to reach externally managed PostgreSQL, Redis, and S3-compatible object storage.
       - Ownership: Platform owner.
       - Dependencies: S0.2.
-      - Implementation/reuse: Add `infra/compose.yaml`, `.env.example`, service Dockerfiles, health checks, named volumes, and only the local frontend/API ports. Use MinIO through its S3 API and initialize the private bucket idempotently. Keep application source bind mounts limited to local development.
-      - Verification: `docker compose config` succeeds with the template environment; services become healthy; API can connect to all dependencies; bucket initialization can run repeatedly.
+      - Implementation/reuse: Add `infra/compose.yaml`, `.env.example`, service Dockerfiles, health checks, named volumes, and only the local frontend/API ports. Use externally managed PostgreSQL, Redis, and S3-compatible storage through their standard protocols; provision credentials, bucket CORS, and lifecycle rules outside Compose. Keep application source bind mounts limited to local development.
+      - Verification: `docker compose config` succeeds with the template environment; services become healthy; API can connect to all dependencies; external bucket provisioning is documented and repeatable.
     - **I1.2 Implement online Compose override and Caddy routing.**
       - Outcome: A self-hosted Linux host can run versioned images behind HTTPS without publishing internal service ports.
       - Ownership: Platform owner.
       - Dependencies: I1.1, B1.1, F1.1.
       - Implementation/reuse: Add `infra/compose.online.yaml` and Caddy configuration with an `online` profile, restart policies, resource limits, persistent Caddy volumes, and health-based dependencies. Use explicit image tags or Git revisions. Do not add authentication by implication; mark external access blocked until auth is implemented.
-      - Verification: `docker compose ... config`, online startup, HTTPS health request, internal-only database/Redis/object-store ports, and restart recovery pass on a Linux host.
+      - Verification: `docker compose ... config`, online startup, HTTPS health request, external dependency connectivity, and restart recovery pass on a Linux host.
     - **I1.3 Add operational commands and secret boundaries.**
-      - Outcome: Developers can migrate, inspect, update, back up, and reset local data without confusing destructive local operations with online maintenance.
+      - Outcome: Developers can migrate, inspect, update, and reset local Compose data without confusing it with externally managed service operations.
       - Ownership: Platform owner.
       - Dependencies: I1.1, I1.2, B2.1.
-      - Implementation/reuse: Document and script Compose commands from `docs/dev/development.md`. Keep credentials in `infra/.env`, use generated online secrets, and provide PostgreSQL-consistent dump/restore guidance plus object-storage retention configuration.
+      - Implementation/reuse: Document and script Compose commands from `docs/dev/development.md`. Keep credentials in `infra/.env`, use externally provisioned secrets, and document database backup/restore ownership plus object-storage retention configuration.
       - Verification: A clean local setup follows the documented commands; no secret file is tracked; online documentation explicitly avoids `down -v`.
   - Go backend service
       - **B1.1 Implement API process, configuration, and health endpoints.**
@@ -98,7 +98,7 @@ Implemented baseline interfaces include:
       - Implementation/reuse: Use the `asynq` payload contract containing only the job UUID; load configuration from PostgreSQL. Implement leases/heartbeats or equivalent retry-safe claims, transition guards, transient retry classification, and terminal error recording. A restarted worker must resume or safely retry without duplicate output artifacts.
       - Verification: Worker integration tests cover duplicate delivery, crash/retry, invalid transition rejection, transient storage failure, and terminal media failure.
     - **W2.1 Implement source validation and timestamp normalization boundary.**
-      - Outcome: The worker accepts supported constant-frame-rate H.264/AAC MP4 input and rejects unsupported or variable-frame-rate media with a user-safe error.
+      - Outcome: The worker accepts supported constant-frame-rate H.264/AAC MP4 or QuickTime MOV input, including HEVC video when FFmpeg supports it, and rejects unsupported or variable-frame-rate media with a user-safe error.
       - Ownership: Media/CV worker owner.
       - Dependencies: W1.1, I1.1.
       - Implementation/reuse: Download to a job-scoped temporary directory, inspect with pinned `ffprobe`, validate stream/container/codec/dimensions/duration/frame timing, normalize display rotation, and establish the analysis/output timestamp map. Preserve source audio metadata for rendering.
@@ -131,14 +131,14 @@ Implemented baseline interfaces include:
       - Outcome: Operators can see stage progress and timings while temporary files and failed artifacts are cleaned safely.
       - Ownership: Worker owner.
       - Dependencies: W2.1, W3.1, W4.1, W5.1, W6.1.
-      - Implementation/reuse: Persist coarse progress at stage boundaries and bounded intervals. Emit job ID, stage, duration, pipeline/model versions, and structured internal error code. Delete job-scoped scratch data in a finally path and retain only explicitly configured debug artifacts.
+      - Implementation/reuse: Persist coarse progress at stage boundaries and bounded intervals. Emit job ID, stage, duration, pipeline/model versions, structured internal error code, and the originating `trace-id` for task request/response logs. Delete job-scoped scratch data in a finally path and retain only explicitly configured debug artifacts.
       - Verification: Progress monotonicity, timing presence, secret redaction, cleanup on success/failure, and interrupted-job recovery tests pass.
   - Frontend service
     - **F1.1 Implement application shell and typed API client.**
       - Outcome: The frontend runs in local Compose and uses one typed client for the documented API resources and errors.
       - Ownership: Frontend owner.
       - Dependencies: S0.1, B1.1.
-      - Implementation/reuse: Use Vite, React, and TypeScript. Read frontend settings from `frontend/conf/config.json` or `frontend/conf/config.dev.json`, represent loading/empty/error/terminal states explicitly, and keep signed upload/download URLs out of persistent browser state.
+      - Implementation/reuse: Use Vite, React, and TypeScript. Read frontend settings from `frontend/conf/config.json` or `frontend/conf/config.dev.json`, represent loading/empty/error/terminal states explicitly, propagate `X-Trace-ID` across API/direct-upload requests, and keep signed upload/download URLs out of persistent browser state and structured logs.
       - Verification: Type checks, API-client contract tests, API unavailable state, and responsive desktop/mobile smoke tests pass.
     - **F2.1 Implement project creation and signed source upload.**
       - Outcome: A user can create a project, request an upload URL, upload bytes directly to object storage, and confirm the upload through the API.
@@ -163,8 +163,8 @@ Implemented baseline interfaces include:
       - Outcome: The complete upload-to-job-to-artifact lifecycle is verified against Compose dependencies.
       - Ownership: Backend and worker owners.
       - Dependencies: B3.1, B4.1, B5.1, W1.1, W6.1.
-      - Implementation/reuse: Use disposable PostgreSQL, Redis, and object-store resources. Assert durable state transitions, task idempotency, transient retry, terminal failure, output artifact linkage, and signed download authorization.
-      - Verification: Test suite passes from a clean Compose environment and leaves no required state outside declared volumes.
+      - Implementation/reuse: Use disposable external PostgreSQL, Redis, and object-store test resources. Assert durable state transitions, task idempotency, transient retry, terminal failure, output artifact linkage, and signed download authorization.
+      - Verification: Test suite passes from a clean environment and leaves no required state outside its declared test resources.
     - **Q1.2 Implement media and planner fixture tests.**
       - Outcome: CV and media behavior is regression-tested independently from HTTP concerns.
       - Ownership: Worker/CV owner.

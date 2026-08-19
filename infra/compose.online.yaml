@@ -9,7 +9,7 @@ services:
     environment:
       API_BASE_URL: /
       WEB_BASE_URL: https://${CADDY_DOMAIN}
-    command: ["/bin/sh", "-ec", "npm install && npm run dev -- --host 0.0.0.0 --port 5173 --mode production"]
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173", "--mode", "production"]
     deploy:
       resources:
         limits:
@@ -48,37 +48,6 @@ services:
         limits:
           cpus: "4.00"
           memory: 6G
-
-  postgres:
-    profiles: ["online"]
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "1.00"
-          memory: 1G
-
-  redis:
-    profiles: ["online"]
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "0.50"
-          memory: 512M
-
-  objectstore:
-    profiles: ["online"]
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "1.00"
-          memory: 2G
-    ports: !reset []
-
-  objectstore-init:
-    profiles: ["online"]
 
   caddy:
     profiles: ["online"]

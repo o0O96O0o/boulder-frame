@@ -23,7 +23,9 @@ This document is the authoritative implementation specification, including the p
 - 4K input is the recommended source resolution.
 - One intended athlete.
 - Constant-frame-rate video with a supported FFmpeg decode path.
-- H.264/AAC MP4 is the initial supported interchange format.
+- H.264/AAC MP4 and QuickTime MOV sources are supported. HEVC/H.265 video in MOV is
+  accepted when the worker's FFmpeg build can decode it; browser preview support depends on
+  the browser codec (Safari on macOS is the recommended preview path for HEVC).
 
 ### Output
 
@@ -150,7 +152,7 @@ The external API is REST over JSON. Exact route/version syntax can be selected d
   "project_id": "project_uuid",
   "kind": "source",
   "upload_state": "pending|uploaded|invalid",
-  "storage_key": "private/source/project_uuid/asset_uuid.mp4",
+  "storage_key": "private/source/project_uuid/asset_uuid.mov",
   "width": 3840,
   "height": 2160,
   "frame_rate": 60,
@@ -320,7 +322,7 @@ The planner must be behind an interface that accepts per-frame measurements/conf
 - Fixture tests for selection association, pose-coordinate transformation, short tracking gaps, reacquisition, and lost-track behavior.
 - Media integration tests for dimensions, aspect ratio, codec, duration tolerance, audio preservation, and playable output.
 - API/worker integration tests for immutable job configuration, state transitions, idempotent enqueueing, transient retry behavior, and failed-job cleanup.
-- Browser end-to-end test for a short fixture video from upload through output download.
+- Browser end-to-end test for a short MP4 or MOV fixture video from upload through output download.
 - CI formatting, type checks, test execution, and `git diff --check`.
 
 ### Evaluation set

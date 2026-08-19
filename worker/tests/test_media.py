@@ -25,7 +25,7 @@ def probe_payload() -> dict[str, object]:
     }
 
 
-def test_valid_cfr_mp4_metadata_includes_rotation() -> None:
+def test_valid_cfr_quicktime_metadata_includes_rotation() -> None:
     metadata = metadata_from_ffprobe(probe_payload())
 
     assert (metadata.width, metadata.height, metadata.duration_ms) == (3840, 2160, 42000)
@@ -36,14 +36,19 @@ def test_valid_cfr_mp4_metadata_includes_rotation() -> None:
     assert metadata.audio_codec == "aac"
 
 
+def test_hevc_quicktime_metadata_is_supported() -> None:
+    data = probe_payload()
+    data["streams"][0]["codec_name"] = "hevc"  # type: ignore[index]
+
+    metadata = metadata_from_ffprobe(data)
+
+    assert metadata.video_codec == "hevc"
+
+
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
         (lambda data: data["streams"].pop(0), ErrorCode.MISSING_VIDEO_STREAM),
-        (
-            lambda data: data["streams"][0].update(codec_name="hevc"),
-            ErrorCode.UNSUPPORTED_VIDEO_CODEC,
-        ),
         (
             lambda data: data["streams"][0].update(avg_frame_rate="30000/1001"),
             ErrorCode.VARIABLE_FRAME_RATE,

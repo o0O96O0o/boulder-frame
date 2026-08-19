@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .config import WorkerConfig
 from .errors import ErrorCode, WorkerError, terminal
+from .logging import configure_logging
 from .protocol import JobTask
 from .state import JobRecord, JobRepository, JobState, fail, transition, utc_now
 
@@ -36,6 +37,7 @@ class Worker:
         self.config = config
         self.repository = repository
         self.worker_id = worker_id or str(uuid4())
+        self.logger = configure_logging()
 
     def process(
         self,
@@ -45,10 +47,24 @@ class Worker:
         rendering: StageHandler,
         uploading: StageHandler,
     ) -> bool:
+        trace_id = task.trace_id or "unknown"
+        request_body = {"job_id": str(task.job_id), "trace_id": trace_id}
+        self.logger.info(
+            "task request",
+            extra={"trace_id": trace_id, "request_body": request_body, "job_id": str(task.job_id)},
+        )
         record = self.repository.claim(
             task.job_id, self.worker_id, self.config.lease_seconds, utc_now()
         )
         if record is None:
+            self.logger.info(
+                "task response",
+                extra={
+                    "trace_id": trace_id,
+                    "response_body": {"claimed": False},
+                    "job_id": str(task.job_id),
+                },
+            )
             return False
         try:
             with job_scratch(
@@ -69,15 +85,74 @@ class Worker:
                     if record.state is not state:
                         record = transition(record, state, progress)
                         self.repository.update(record)
+                    self.logger.info(
+                        "stage request",
+                        extra={
+                            "trace_id": trace_id,
+                            "request_body": {"job_id": str(task.job_id), "state": state.value},
+                            "job_id": str(task.job_id),
+                            "stage": state.value,
+                            "progress": progress,
+                            "pipeline_version": self.config.pipeline_version,
+                            "model_version": self.config.model_version,
+                        },
+                    )
                     handler(record, scratch)
+                    self.logger.info(
+                        "stage response",
+                        extra={
+                            "trace_id": trace_id,
+                            "response_body": {"state": state.value, "progress": progress},
+                            "job_id": str(task.job_id),
+                            "stage": state.value,
+                            "progress": progress,
+                            "pipeline_version": self.config.pipeline_version,
+                            "model_version": self.config.model_version,
+                        },
+                    )
                 record = transition(record, JobState.COMPLETED, 100)
                 self.repository.update(record)
+            self.logger.info(
+                "task response",
+                extra={
+                    "trace_id": trace_id,
+                    "response_body": {"state": "completed"},
+                    "job_id": str(task.job_id),
+                },
+            )
         except WorkerError as error:
             if error.transient:
+                self.logger.warning(
+                    "task response",
+                    extra={
+                        "trace_id": trace_id,
+                        "response_body": {"state": "retry"},
+                        "job_id": str(task.job_id),
+                        "error_code": error.code.value,
+                    },
+                )
                 raise
             self.repository.update(fail(record, error))
+            self.logger.info(
+                "task response",
+                extra={
+                    "trace_id": trace_id,
+                    "response_body": {"state": "failed"},
+                    "job_id": str(task.job_id),
+                    "error_code": error.code.value,
+                },
+            )
         except Exception:
             self.repository.update(
                 fail(record, terminal(ErrorCode.INTERNAL, "Processing could not be completed."))
+            )
+            self.logger.error(
+                "task response",
+                extra={
+                    "trace_id": trace_id,
+                    "response_body": {"state": "failed"},
+                    "job_id": str(task.job_id),
+                    "error_code": ErrorCode.INTERNAL.value,
+                },
             )
         return True

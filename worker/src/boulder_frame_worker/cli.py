@@ -9,6 +9,7 @@ import time
 from collections.abc import Sequence
 
 from .config import ConfigError, WorkerConfig
+from .logging import configure_logging
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
@@ -23,6 +24,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "--config", default="/workspace/worker/conf/config.json", help="JSON configuration path"
     )
     options = parser.parse_args(arguments)
+    logger = configure_logging()
     try:
         config = WorkerConfig.from_file(options.config)
     except ConfigError as error:
@@ -40,6 +42,19 @@ def main(arguments: Sequence[str] | None = None) -> int:
             {"pipeline_version": config.pipeline_version, "capabilities": capabilities},
             sort_keys=True,
         )
+    )
+    logger.info(
+        "worker capability response",
+        extra={
+            "trace_id": "unknown",
+            "request_body": {"check": options.check, "serve": options.serve},
+            "response_body": {
+                "pipeline_version": config.pipeline_version,
+                "capabilities": capabilities,
+            },
+            "pipeline_version": config.pipeline_version,
+            "model_version": config.model_version,
+        },
     )
     if options.serve:
         print("Queue/database adapter is not configured; worker is idle.", flush=True)

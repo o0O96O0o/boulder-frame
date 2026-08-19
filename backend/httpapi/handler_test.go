@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -105,6 +107,26 @@ func TestInvalidIDsAreRejected(t *testing.T) {
 	h.Router().ServeHTTP(rec, req)
 	if rec.Code != 400 {
 		t.Fatalf("status %d", rec.Code)
+	}
+}
+
+func TestTraceIDAndStructuredBodiesAreLogged(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	h := &Handler{Repo: &fakeRepo{}, Logger: logger}
+	traceID := "00000000-0000-0000-0000-000000000042"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", strings.NewReader(`{"name":"demo"}`))
+	req.Header.Set("X-Trace-ID", traceID)
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("X-Trace-ID"); got != traceID {
+		t.Fatalf("trace header %q", got)
+	}
+	for _, want := range []string{`"trace-id":"` + traceID + `"`, `"request_body":{"name":"demo"}`, `"response_body":`} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("log does not contain %s: %s", want, logs.String())
+		}
 	}
 }
 

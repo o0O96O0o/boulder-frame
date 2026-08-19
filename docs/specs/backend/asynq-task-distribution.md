@@ -12,12 +12,12 @@ sequenceDiagram
     participant Redis
     participant Worker as Python worker
 
-    Browser->>API: POST /projects/{id}/jobs
+    Browser->>API: POST /projects/{id}/jobs + X-Trace-ID
     API->>PG: INSERT queued job + immutable config
-    API->>Redis: Enqueue job.process, TaskID=job UUID
+    API->>Redis: Enqueue job.process + trace_id, TaskID=job UUID
     Redis-->>API: task accepted or duplicate ID
     API-->>Browser: queued job resource
-    Redis->>Worker: deliver task payload
+    Redis->>Worker: deliver task payload + trace_id
     Worker->>PG: claim job and transition stages
     Worker->>PG: persist progress/errors/artifacts
 ```
@@ -30,10 +30,10 @@ The backend defines:
 const TaskProcessJob = "job.process"
 ```
 
-The payload is JSON containing only the durable job identifier:
+The payload is JSON containing the durable job identifier and the originating trace ID:
 
 ```json
-{"job_id":"job_uuid"}
+{"job_id":"job_uuid","trace_id":"trace_uuid"}
 ```
 
 The worker must load the complete immutable configuration from PostgreSQL using that ID. Do not put source URLs, credentials, large metadata, or mutable settings in the queue payload.
@@ -63,7 +63,7 @@ If publication fails, the API returns `503 queue_unavailable` and leaves the dur
 
 The worker-side contract is:
 
-1. Parse a payload with exactly one `job_id` field.
+1. Parse a payload with exactly `job_id` and `trace_id` fields.
 2. Load the job and source asset from PostgreSQL.
 3. Atomically claim an eligible job using a worker lease.
 4. Process stages in order: `validating`, `analyzing`, `rendering`, `uploading`.
@@ -81,12 +81,16 @@ The current Python CLI does not yet implement the Redis/asynq consumer. `--serve
 - Artifact inserts must be unique per `(job_id, kind)`.
 - State transitions must be guarded and monotonic.
 
+## Trace Logging
+
+The frontend sends a UUID in `X-Trace-ID` for every API and direct-upload request. The API validates or creates the ID, returns it in the same response header, and writes it to structured logs as the key `trace-id`. Job publication copies that ID into the queue payload, and the worker writes it to task request/response logs. Request and response bodies are logged in bounded, redacted form; signed URLs, credentials, and binary video contents are omitted.
+
 ## Operational Diagnostics
 
 When a job remains queued, inspect:
 
 ```sh
-docker compose --env-file infra/.env -f infra/compose.yaml logs backend redis worker
+docker compose --env-file infra/.env -f infra/compose.yaml logs backend worker
 ```
 
-Check the job row in PostgreSQL, the Redis queue, worker capability output, and the API `PIPELINE_VERSION`/`MODEL_VERSION`. Never log signed URLs or Redis credentials.
+Check the job row in external PostgreSQL, the external Redis queue, worker capability output, and the API `PIPELINE_VERSION`/`MODEL_VERSION`. Never log signed URLs or Redis credentials.

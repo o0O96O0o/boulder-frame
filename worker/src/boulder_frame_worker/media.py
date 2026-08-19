@@ -132,13 +132,16 @@ def _rotation(video: dict[str, Any]) -> int:
 def metadata_from_ffprobe(payload: dict[str, Any]) -> MediaMetadata:
     format_info = payload.get("format")
     format_name = format_info.get("format_name") if isinstance(format_info, dict) else None
-    if not isinstance(format_name, str) or "mp4" not in format_name.split(","):
-        raise terminal(ErrorCode.UNSUPPORTED_CONTAINER, "Only MP4 video files are supported.")
+    if not isinstance(format_name, str) or not {"mp4", "mov"}.intersection(format_name.split(",")):
+        raise terminal(
+            ErrorCode.UNSUPPORTED_CONTAINER,
+            "Only MP4 and QuickTime video files are supported.",
+        )
     video = _stream(payload, "video")
     if video is None:
         raise terminal(ErrorCode.MISSING_VIDEO_STREAM, "The source file has no video stream.")
-    if video.get("codec_name") != "h264":
-        raise terminal(ErrorCode.UNSUPPORTED_VIDEO_CODEC, "Only H.264 video is supported.")
+    if video.get("codec_name") not in {"h264", "hevc"}:
+        raise terminal(ErrorCode.UNSUPPORTED_VIDEO_CODEC, "Only H.264 or HEVC video is supported.")
     avg_rate = _fraction(video.get("avg_frame_rate"))
     real_rate = _fraction(video.get("r_frame_rate"))
     if avg_rate != real_rate:
@@ -163,7 +166,7 @@ def metadata_from_ffprobe(payload: dict[str, Any]) -> MediaMetadata:
         height=height,
         duration_ms=duration_ms,
         frame_rate=avg_rate,
-        video_codec="h264",
+        video_codec=str(video.get("codec_name")),
         audio_codec="aac" if audio is not None else None,
         rotation=_rotation(video),
         has_audio=audio is not None,

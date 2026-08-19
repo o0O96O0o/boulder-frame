@@ -12,6 +12,7 @@ import (
 	"github.com/boulder-frame/backend/queue"
 	"github.com/boulder-frame/backend/repository"
 	"github.com/boulder-frame/backend/storage"
+	"github.com/boulder-frame/backend/trace"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -30,7 +31,8 @@ type Handler struct {
 
 func (h *Handler) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(requestID)
+	r.Use(requestTrace)
+	r.Use(h.requestLog)
 	r.Use(cors)
 	r.Get("/healthz", h.health)
 	r.Get("/readyz", h.ready)
@@ -47,13 +49,30 @@ func (h *Handler) Router() http.Handler {
 	return r
 }
 
+func (h *Handler) requestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.Logger == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		started := time.Now()
+		requestBody := readRequestBody(r)
+		response := &responseRecorder{ResponseWriter: w}
+		next.ServeHTTP(response, r)
+		if response.status == 0 {
+			response.status = http.StatusOK
+		}
+		h.Logger.Info("http request", "trace-id", trace.ID(r.Context()), "method", r.Method, "path", r.URL.Path, "status", response.status, "duration_ms", time.Since(started).Milliseconds(), "request_body", requestBody, "response_body", sanitizeResponse(response.body.Bytes()))
+	})
+}
+
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Trace-ID")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
@@ -63,14 +82,12 @@ func cors(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-func requestID(next http.Handler) http.Handler {
+func requestTrace(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
-		if id == "" {
-			id = uuid.NewString()
-		}
-		w.Header().Set("X-Request-ID", id)
-		next.ServeHTTP(w, r)
+		id := trace.Normalize(r.Header.Get(trace.Header))
+		r.Header.Set(trace.Header, id)
+		w.Header().Set(trace.Header, id)
+		next.ServeHTTP(w, r.WithContext(trace.WithID(r.Context(), id)))
 	})
 }
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +113,9 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	x, err := h.Repo.CreateProject(r.Context(), strings.TrimSpace(req.Name), h.Owner)
 	if err != nil {
+		if h.Logger != nil {
+			h.Logger.Error("could not create project", "trace-id", trace.ID(r.Context()), "error", err)
+		}
 		writeError(w, 500, "internal_error", "could not create project")
 		return
 	}
@@ -119,11 +139,11 @@ func (h *Handler) uploadAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	var req uploadRequest
 	if !decode(r, &req) || !domain.ValidSourceFilename(req.Filename) || req.SizeBytes <= 0 || req.SizeBytes > h.MaxUploadBytes {
-		writeError(w, 400, "invalid_upload", "an MP4 file within the configured size limit is required")
+		writeError(w, 400, "invalid_upload", "an MP4 or MOV file within the configured size limit is required")
 		return
 	}
-	if req.ContentType != "video/mp4" {
-		writeError(w, 400, "invalid_upload", "content_type must be video/mp4")
+	if !domain.ValidSourceContentType(req.Filename, req.ContentType) {
+		writeError(w, 400, "invalid_upload", "content_type must be video/mp4 or video/quicktime")
 		return
 	}
 	assetID := uuid.New()

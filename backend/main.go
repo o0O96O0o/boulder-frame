@@ -45,7 +45,7 @@ func main() {
 		logger.Error("storage unavailable", "error", err)
 		os.Exit(1)
 	}
-	publisher, err := queue.NewAsynqPublisher(cfg.RedisURL)
+	publisher, err := queue.NewAsynqPublisher(cfg.RedisURL, logger)
 	if err != nil {
 		logger.Error("redis configuration invalid", "error", err)
 		os.Exit(1)

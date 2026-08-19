@@ -9,25 +9,17 @@ compose() {
 }
 
 case "${1:-}" in
-  pull) exec compose pull ;;
-  start) exec compose up -d ;;
+  pull) compose pull ;;
+  start) compose up -d ;;
   update)
     compose pull
-    exec compose up -d
+    compose up -d
     ;;
-  migrate) exec compose run --rm backend migrate up ;;
-  status) exec compose ps ;;
-  logs) shift; exec compose logs --since=10m "$@" ;;
-  backup-db)
-    mkdir -p infra/backups
-    exec sh -c 'compose() { docker compose --env-file infra/.env -f infra/compose.yaml -f infra/compose.online.yaml --profile online "$@"; }; compose exec -T postgres sh -c '\''pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"'\''' > "infra/backups/postgres-$(date +%Y%m%dT%H%M%S).sql"
-    ;;
-  restore-db)
-    test "$#" = 2 || { echo "usage: $0 restore-db BACKUP.sql" >&2; exit 64; }
-    exec sh -c 'compose() { docker compose --env-file infra/.env -f infra/compose.yaml -f infra/compose.online.yaml --profile online "$@"; }; compose exec -T postgres sh -c '\''psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'\''' < "$2"
-    ;;
+  migrate) compose run --rm backend migrate up ;;
+  status) compose ps ;;
+  logs) shift; compose logs --since=10m "$@" ;;
   *)
-    echo "usage: $0 {pull|start|update|migrate|status|logs|backup-db|restore-db}" >&2
+    echo "usage: $0 {pull|start|update|migrate|status|logs}" >&2
     echo "online environments intentionally do not provide a destructive reset command" >&2
     exit 64
     ;;

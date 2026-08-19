@@ -44,8 +44,8 @@ stateDiagram-v2
 
 `FFprobeAdapter` requires:
 
-- MP4 container
-- H.264 video
+- MP4 or QuickTime MOV container
+- H.264 or HEVC/H.265 video
 - Positive dimensions and duration
 - Valid positive `avg_frame_rate` and `r_frame_rate`
 - Equal average and real frame rates, otherwise `variable_frame_rate`

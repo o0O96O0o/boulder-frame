@@ -13,19 +13,19 @@ The architecture and service responsibilities are defined in [../architecture/of
 
 ## Service Topology
 
-Compose manages these application and infrastructure services:
+Compose manages the application services. PostgreSQL, Redis, and object storage are externally managed.
 
 | Service | Container responsibility | Persistent data |
 | --- | --- | --- |
 | `frontend` | Vite/React web application and development reverse-proxy entrypoint | None; source is bind-mounted locally or built into the image online. |
 | `backend` | Go HTTP API, PostgreSQL access, signed object URLs, and `asynq` dispatch | None; all durable state is externalized. |
 | `worker` | Python CV pipeline, tracking, crop planning, FFmpeg rendering, and artifact upload | Temporary processing workspace only; jobs must be restart-safe. |
-| `postgres` | Application metadata and job state | `postgres-data` volume. |
-| `redis` | `asynq` queue and transient coordination | `redis-data` volume is optional and must not be treated as the source of job truth. |
-| `objectstore` | S3-compatible source, output, and debug artifact storage | `objectstore-data` volume. |
 | `caddy` | Online-only HTTPS termination and routing | `caddy-data` and `caddy-config` volumes. |
 
-The initial implementation may use MinIO for `objectstore`. The API and worker must use the S3 API, not MinIO-specific APIs, so another S3-compatible store can replace it later.
+Source, output, and debug artifacts are stored in the external S3-compatible service at
+`http://srv1883301.hstgr.cloud:9000`. The API and worker use only the S3 API.
+PostgreSQL metadata is stored at `76.13.185.64:5432` and Redis/asynq coordination at
+`76.13.185.64:6379`.
 
 ```mermaid
 flowchart LR
@@ -71,7 +71,7 @@ The online host should be a supported 64-bit Linux machine with:
 - Docker Engine and the Compose v2 plugin.
 - A stable DNS name pointing to the host for HTTPS.
 - At least 8 GB RAM for the baseline stack; 16 GB or more is recommended for 4K processing.
-- Sufficient disk for PostgreSQL, object storage, temporary worker files, and backups.
+- Sufficient disk for temporary worker files and application-image cache.
 - Optional NVIDIA GPU and container toolkit for CV workloads after the worker image supports it.
 
 ## Environment Configuration
@@ -112,15 +112,12 @@ Required variables:
 COMPOSE_PROJECT_NAME=boulder-frame
 APP_ENV=local
 
-POSTGRES_DB=boulder_frame
-POSTGRES_USER=boulder_frame
-POSTGRES_PASSWORD=change-for-local
-DATABASE_URL=postgres://boulder_frame:change-for-local@postgres:5432/boulder_frame?sslmode=disable
+DATABASE_URL=postgres://dev:replace-with-postgres-password@76.13.185.64:5432/bf_dev?sslmode=disable
 
-REDIS_URL=redis://redis:6379/0
+REDIS_URL=redis://:replace-with-redis-password@76.13.185.64:6379/0
 
-S3_ENDPOINT=http://objectstore:9000
-S3_PRESIGN_ENDPOINT=http://localhost:9000
+S3_ENDPOINT=http://srv1883301.hstgr.cloud:9000
+S3_PRESIGN_ENDPOINT=http://srv1883301.hstgr.cloud:9000
 S3_REGION=us-east-1
 S3_BUCKET=boulder-frame
 S3_ACCESS_KEY=change-for-local
@@ -130,14 +127,19 @@ S3_FORCE_PATH_STYLE=true
 API_BASE_URL=http://localhost:8080
 WEB_BASE_URL=http://localhost:5173
 SIGNED_URL_TTL=15m
-ASSET_RETENTION_DAYS=7
 
 MODEL_VERSION=unset-until-pinned
 PIPELINE_VERSION=dev
 MAX_UPLOAD_BYTES=2147483648
 ```
 
-Online development must replace all passwords, access keys, and signing secrets with generated values. Online `DATABASE_URL`, `S3_ENDPOINT`, and public URLs must use the host's internal service names or HTTPS route as appropriate. Do not expose PostgreSQL, Redis, or object-store admin ports to the public network.
+Both development environments use the external store over HTTP. Set `S3_BUCKET`, `S3_ACCESS_KEY`,
+and `S3_SECRET_KEY` to its provisioned application credentials. Configure the external bucket's CORS
+policy for `http://localhost:5173` and the online web origin, and configure lifecycle retention there.
+Set `DATABASE_URL` and `REDIS_URL` to the externally managed services; percent-encode reserved
+characters in URL passwords. Restrict both remote services to application-host network access. HTTP and
+unencrypted database/Redis connections are appropriate only while these development services remain on a
+trusted network.
 
 ## Local Development
 
@@ -160,7 +162,9 @@ The expected local endpoints are:
 - Web app: `http://localhost:5173`
 - Go API: `http://localhost:8080`
 - API health: `http://localhost:8080/healthz`
-- MinIO/S3 API: `http://localhost:9000` for browser-direct signed uploads; the MinIO console remains internal-only.
+
+If a local HTTP proxy is configured, exclude these addresses from it before testing or opening the
+app. For example: `NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1`.
 
 ### Run migrations
 
@@ -180,7 +184,7 @@ docker compose --env-file infra/.env -f infra/compose.yaml logs -f backend
 docker compose --env-file infra/.env -f infra/compose.yaml logs -f worker
 ```
 
-Use service-specific logs for failures. The worker must log job ID, stage, progress, pipeline version, model version, and structured internal error code without logging signed URLs or credentials.
+Use service-specific logs for failures. Frontend, API, queue publication, and worker task boundaries emit structured request/response body logs with the shared `trace-id` key. The frontend/API use `X-Trace-ID`; the API copies the ID into the queue payload for the worker. Logs must omit signed URLs, credentials, and binary video contents. The worker must also log job ID, stage, progress, pipeline version, model version, and structured internal error code.
 
 ### Process a fixture
 
@@ -201,7 +205,8 @@ Stop without deleting data:
 docker compose --env-file infra/.env -f infra/compose.yaml down
 ```
 
-Reset all local metadata and assets. This is destructive and should only be used for disposable local data:
+Reset local Compose volumes. This is destructive and removes the worker scratch volume, but does not
+affect externally managed PostgreSQL, Redis, or object storage:
 
 ```sh
 docker compose --env-file infra/.env -f infra/compose.yaml down -v
@@ -214,9 +219,9 @@ docker compose --env-file infra/.env -f infra/compose.yaml down -v
 1. Provision a dedicated Linux host with Docker Engine and Compose v2.
 2. Create a non-root deploy user with access to Docker.
 3. Point a DNS name such as `dev.example.com` to the host.
-4. Configure the host firewall to allow only SSH, HTTP, and HTTPS. Keep PostgreSQL, Redis, S3, and worker ports on the Compose private network.
+4. Configure the host firewall to allow only SSH, HTTP, and HTTPS. Do not expose additional application container ports.
 5. Clone the repository into a controlled deployment directory.
-6. Create `infra/.env` from the template and fill it with generated online-only credentials.
+6. Create `infra/.env` from the template and fill it with externally provisioned service credentials.
 7. Configure the online Compose override and Caddy hostname before startup.
 
 The online host must have a persistent backup target separate from the host disk. A second local disk is not sufficient protection against host loss.
@@ -227,10 +232,10 @@ The Compose setup must provide an `online` profile or override that:
 
 - Uses built, versioned images instead of development bind mounts.
 - Runs the frontend behind Caddy with HTTPS.
-- Does not publish PostgreSQL, Redis, MinIO, or worker ports.
-- Mounts named volumes for PostgreSQL, object storage, Caddy state/configuration, and worker scratch space.
+- Does not publish worker ports.
+- Mounts named volumes for Caddy state/configuration and worker scratch space.
 - Uses restart policies for API, worker, infrastructure, and Caddy services.
-- Uses health checks and service dependency conditions so API and worker start only after required infrastructure is healthy.
+- Uses health checks so frontend and Caddy start only after the backend is healthy.
 - Sets resource limits appropriate for the host, especially worker concurrency and temporary disk usage.
 - Uses an explicit image tag or Git revision for every application image.
 
@@ -280,12 +285,15 @@ Do not run `down -v` on the online environment. Volume deletion is data loss.
 
 - Keep source, output, and debug assets in separate private prefixes or buckets.
 - Use signed URLs with a short expiry, default 15 minutes.
-- Configure lifecycle deletion for temporary debug assets and expired source/output assets according to `ASSET_RETENTION_DAYS`.
-- Do not expose the object-store console or S3 API directly to the public internet.
+- Configure lifecycle deletion for temporary debug assets and expired source/output assets in the external store.
+- Restrict the external bucket to the configured application credentials and browser CORS origins.
 
-### PostgreSQL
+### PostgreSQL and Redis
 
-Back up metadata daily at minimum for the online environment. Test restoration into a separate database before relying on the backup. PostgreSQL is the source of truth for job configuration, status, artifact references, and error metadata.
+Back up metadata daily at minimum using the database host's tooling. Test restoration into a separate
+database before relying on the backup. PostgreSQL is the source of truth for job configuration, status,
+artifact references, and error metadata. Redis is dispatch infrastructure and its persistence must not be
+treated as the durable record of a job.
 
 ### Object assets
 
@@ -299,7 +307,8 @@ List volumes before maintenance:
 docker volume ls --filter label=com.docker.compose.project=boulder-frame
 ```
 
-Back up or snapshot volumes using the host's approved backup tooling. Do not copy active database files as a substitute for a PostgreSQL-consistent dump.
+Back up or snapshot worker and Caddy volumes only when needed; database backups are owned by the external
+PostgreSQL host.
 
 ## Security Requirements
 
@@ -326,8 +335,8 @@ CPU processing is the baseline and must remain supported. GPU acceleration is an
 
 | Symptom | Checks |
 | --- | --- |
-| API cannot connect to PostgreSQL | Check `postgres` health, `DATABASE_URL` service name/port, and migration logs. |
-| Jobs remain queued | Check Redis health, `asynq` queue configuration, worker logs, and whether the worker can reach PostgreSQL/object storage. |
+| API cannot connect to PostgreSQL | Check the remote host firewall, `DATABASE_URL`, credentials, and migration logs. |
+| Jobs remain queued | Check remote Redis connectivity and credentials, `asynq` queue configuration, worker logs, and whether the worker can reach PostgreSQL/object storage. |
 | Upload succeeds but validation fails | Inspect FFmpeg/ffprobe output, source codec, frame-rate mode, rotation metadata, and object-store read permissions. |
 | Worker exits during rendering | Check temporary disk capacity, memory/VRAM, FFmpeg logs, and worker concurrency. |
 | Browser cannot call API online | Check Caddy routing, HTTPS certificate status, API CORS policy, and configured public base URLs. |

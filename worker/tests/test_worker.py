@@ -14,7 +14,7 @@ def worker_for(tmp_path: Path) -> tuple[Worker, InMemoryJobRepository, JobTask]:
     record = JobRecord(id=uuid4())
     repository = InMemoryJobRepository([record])
     worker = Worker(WorkerConfig("test", "unconfigured", tmp_path), repository, worker_id="worker")
-    return worker, repository, JobTask(record.id)
+    return worker, repository, JobTask(record.id, "00000000-0000-0000-0000-000000000042")
 
 
 def no_op(record: JobRecord, scratch: Path) -> None:

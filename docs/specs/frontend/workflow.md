@@ -19,14 +19,17 @@ The React state is local runtime state. Signed URLs are not persisted in browser
 ## Upload
 
 1. Create a project with `POST /api/v1/projects`.
-2. Validate local file type and configured maximum size.
+2. Validate a `.mp4` or `.mov` filename, supported MIME type, and configured maximum size. macOS
+   may report an empty MIME type for files downloaded from iCloud, so the client derives the
+   upload MIME type from the extension.
 3. Request an upload URL from the backend.
-4. Upload the MP4 directly with `XMLHttpRequest` so progress is available.
+4. Upload the MP4 or MOV directly with `XMLHttpRequest` so progress is available.
 5. Confirm the asset with `POST /api/v1/assets/{id}/complete`.
 
-The current UI accepts MP4 files and defaults to a 2 GiB limit from the `frontend` object in
-`frontend/conf/config.dev.json` or `frontend/conf/config.json`. Direct upload requires the local MinIO endpoint at
-`http://localhost:9000` and its configured CORS policy.
+The current UI accepts MP4 and QuickTime MOV files and defaults to a 2 GiB limit from the `frontend` object in
+`frontend/conf/config.dev.json` or `frontend/conf/config.json`. Direct upload uses the external
+S3-compatible endpoint in the signed URL; its bucket CORS policy must allow the active frontend
+origin and the `X-Trace-ID` request header.
 
 ## Athlete Selection
 
@@ -50,4 +53,4 @@ When completed, the UI requests `GET /api/v1/jobs/{id}/download` and opens the s
 
 ## API Client
 
-`frontend/src/api.ts` centralizes JSON requests, typed resource models, safe API errors, signed upload progress, and download URL retrieval. The API origin comes from the `api_base_url` JSON setting.
+`frontend/src/api.ts` centralizes JSON requests, typed resource models, safe API errors, signed upload progress, download URL retrieval, and per-request `X-Trace-ID` propagation. It emits structured request/response body logs using the same `trace-id` key; signed URLs and binary upload contents are omitted from logs. The API origin comes from the `api_base_url` JSON setting.

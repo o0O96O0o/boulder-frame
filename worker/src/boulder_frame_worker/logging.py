@@ -1,0 +1,45 @@
+"""Small dependency-free JSON logger for worker/queue boundary events."""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+from typing import Any
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        event: dict[str, Any] = {
+            "module": "worker",
+            "level": record.levelname.lower(),
+            "message": record.getMessage(),
+        }
+        for key in (
+            "trace_id",
+            "request_body",
+            "response_body",
+            "job_id",
+            "stage",
+            "progress",
+            "pipeline_version",
+            "model_version",
+            "error_code",
+        ):
+            if hasattr(record, key):
+                output_key = "trace-id" if key == "trace_id" else key
+                event[output_key] = getattr(record, key)
+        if record.exc_info:
+            event["error"] = "exception details omitted"
+        return json.dumps(event, sort_keys=True, default=str)
+
+
+def configure_logging() -> logging.Logger:
+    logger = logging.getLogger("boulder_frame_worker")
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(JsonFormatter())
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    return logger

@@ -29,16 +29,17 @@ The client sends:
 
 ```json
 {
-  "filename": "session.mp4",
-  "content_type": "video/mp4",
+  "filename": "session.mov",
+  "content_type": "video/quicktime",
   "size_bytes": 104857600
 }
 ```
 
-The API requires an `.mp4` filename, `video/mp4`, a positive size, and `size_bytes <= MAX_UPLOAD_BYTES`. It creates an object key without trusting the filename:
+The API requires an `.mp4`/`video/mp4` or `.mov`/`video/quicktime` pair, a positive size, and
+`size_bytes <= MAX_UPLOAD_BYTES`. It creates an object key without trusting the filename:
 
 ```text
-private/source/{project_uuid}/{asset_uuid}.mp4
+private/source/{project_uuid}/{asset_uuid}.mp4 or .mov
 ```
 
 The response contains the `asset`, `upload_url`, and `expires_in_seconds`. The browser uploads bytes directly to the signed URL. The API does not proxy 4K video.
@@ -90,6 +91,6 @@ Errors use this shape:
 
 Internal stack traces, credentials, signed URL query strings, and infrastructure details must not be returned.
 
-## CORS and Request IDs
+## CORS and Trace IDs
 
-The API accepts local browser origins `http://localhost:5173` and `http://127.0.0.1:5173`. Every response receives an `X-Request-ID`; an incoming value is preserved, otherwise the API creates a UUID. Online CORS/authentication policy must be tightened before external access.
+The API accepts local browser origins `http://localhost:5173` and `http://127.0.0.1:5173`. Every request carries an `X-Trace-ID`; the API preserves a valid UUID or creates one, returns it on the response, and logs it with the structured key `trace-id`. Request and response bodies are logged in bounded, redacted form. Online CORS/authentication policy must be tightened before external access.

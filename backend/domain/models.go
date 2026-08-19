@@ -117,8 +117,23 @@ func (c JobConfig) Hash() (string, error) {
 }
 func ValidSourceFilename(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.HasSuffix(lower, ".mp4")
+	return strings.HasSuffix(lower, ".mp4") || strings.HasSuffix(lower, ".mov")
+}
+func ValidSourceContentType(filename, contentType string) bool {
+	lower := strings.ToLower(filename)
+	switch {
+	case strings.HasSuffix(lower, ".mp4"):
+		return contentType == "video/mp4"
+	case strings.HasSuffix(lower, ".mov"):
+		return contentType == "video/quicktime"
+	default:
+		return false
+	}
 }
 func SourceStorageKey(project, asset uuid.UUID, filename string) string {
-	return fmt.Sprintf("private/source/%s/%s.mp4", project, asset)
+	extension := ".mp4"
+	if strings.HasSuffix(strings.ToLower(filename), ".mov") {
+		extension = ".mov"
+	}
+	return fmt.Sprintf("private/source/%s/%s%s", project, asset, extension)
 }
