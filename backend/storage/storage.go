@@ -14,7 +14,7 @@ type ObjectInfo struct {
 	ContentType string
 }
 type Store interface {
-	PresignUpload(context.Context, string, string, int64, time.Duration) (string, error)
+	PresignUpload(context.Context, string, string, time.Duration) (string, error)
 	PresignDownload(context.Context, string, time.Duration) (string, error)
 	Head(context.Context, string) (ObjectInfo, error)
 }
@@ -36,8 +36,9 @@ func NewS3Store(ctx context.Context, endpoint, presignEndpoint, region, bucket, 
 	presignClient := s3.NewFromConfig(cfg, func(o *s3.Options) { o.BaseEndpoint = aws.String(presignEndpoint); o.UsePathStyle = pathStyle })
 	return &S3Store{client: client, presign: s3.NewPresignClient(presignClient), bucket: bucket}, nil
 }
-func (s *S3Store) PresignUpload(ctx context.Context, key, contentType string, size int64, ttl time.Duration) (string, error) {
-	r, err := s.presign.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key), ContentType: aws.String(contentType), ContentLength: aws.Int64(size)}, s3.WithPresignExpires(ttl))
+func (s *S3Store) PresignUpload(ctx context.Context, key, contentType string, ttl time.Duration) (string, error) {
+	// Browsers cannot set Content-Length, so validate the exact size during completion instead.
+	r, err := s.presign.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key), ContentType: aws.String(contentType)}, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", err
 	}

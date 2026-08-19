@@ -10,7 +10,6 @@ The product should feel like an anticipating camera operator, not a basic auto-c
 
 - `docs/architecture/offline-reframing-mvp.md` is the implementation contract and contains the product rationale and algorithm decisions for the approved MVP.
 - `docs/architecture/service-implementation-plan.md` defines the service-by-service implementation sequence, interfaces, dependencies, and verification gates.
-- `docs/dev/development.md` defines local and self-hosted online Docker Compose development environments.
 - `docs/specs/README.md` indexes detailed root-to-submodule implementation specifications.
 - `docs/README.md` indexes project documentation.
 
@@ -52,3 +51,7 @@ Update the focused documentation and its index whenever an implementation decisi
 - Add automated tests for API/job transitions, tracking/planning behavior, output-media validation, and browser workflow where applicable.
 - Maintain a permitted fixture/evaluation manifest; keep private videos out of version control.
 - Before completing a feature, update relevant docs, validate internal links, and run available formatting, type, test, and `git diff --check` commands. If a command cannot run, state why.
+
+## Debug Conventions
+
+- To debug, you can actively inspect logs from containers (you have access to the host), and with credentials configured for different environments to query data/storage directly.

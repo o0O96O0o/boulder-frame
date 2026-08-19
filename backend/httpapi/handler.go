@@ -152,7 +152,7 @@ func (h *Handler) uploadAsset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "internal_error", "could not create asset")
 		return
 	}
-	url, err := h.Store.PresignUpload(r.Context(), asset.StorageKey, req.ContentType, req.SizeBytes, h.URLTTL)
+	url, err := h.Store.PresignUpload(r.Context(), asset.StorageKey, req.ContentType, h.URLTTL)
 	if err != nil {
 		writeError(w, 502, "storage_unavailable", "could not create upload URL")
 		return

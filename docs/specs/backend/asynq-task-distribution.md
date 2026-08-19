@@ -89,8 +89,4 @@ The frontend sends a UUID in `X-Trace-ID` for every API and direct-upload reques
 
 When a job remains queued, inspect:
 
-```sh
-docker compose --env-file infra/.env -f infra/compose.yaml logs backend worker
-```
-
-Check the job row in external PostgreSQL, the external Redis queue, worker capability output, and the API `PIPELINE_VERSION`/`MODEL_VERSION`. Never log signed URLs or Redis credentials.
+Check the job row in PostgreSQL, the Redis queue, worker capability output, and the API `PIPELINE_VERSION`/`MODEL_VERSION`. Never log signed URLs or Redis credentials.

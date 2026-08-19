@@ -29,7 +29,8 @@ The React state is local runtime state. Signed URLs are not persisted in browser
 The current UI accepts MP4 and QuickTime MOV files and defaults to a 2 GiB limit from the `frontend` object in
 `frontend/conf/config.dev.json` or `frontend/conf/config.json`. Direct upload uses the external
 S3-compatible endpoint in the signed URL; its bucket CORS policy must allow the active frontend
-origin and the `X-Trace-ID` request header.
+origin. The browser sends `Content-Type`; the backend verifies the exact object size when the client
+confirms the upload because browsers cannot set `Content-Length`.
 
 ## Athlete Selection
 

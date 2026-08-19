@@ -2,11 +2,10 @@
 
 ## Base URL
 
-The API is REST over JSON under `/api/v1`. Local Compose publishes it at `http://localhost:8080`;
-the browser uses `api_base_url` from `frontend/conf/config.json` or `frontend/conf/config.dev.json`
-to select the API origin.
+The API is REST over JSON under `/api/v1`. The browser uses `api_base_url` from
+`frontend/conf/config.json` or `frontend/conf/config.dev.json` to select the API origin.
 
-The initial implementation uses the fixed development owner `development-owner`. This is not authentication. Online external access remains blocked by Caddy until authorization is implemented.
+The initial implementation uses the fixed development owner `development-owner`. This is not authentication.
 
 ## Routes
 

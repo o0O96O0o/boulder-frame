@@ -15,8 +15,8 @@
 | `lease_seconds` | Job lease duration. | `300` |
 | `retain_debug_artifacts` | Keep scratch data for debugging. | `false` |
 
-The deployment config may interpolate `PIPELINE_VERSION` and `MODEL_VERSION` values supplied by
-Compose. The worker does not load `.env` files.
+The runtime config may interpolate `PIPELINE_VERSION` and `MODEL_VERSION` values. The worker does
+not load `.env` files.
 
 ## Job Scratch
 

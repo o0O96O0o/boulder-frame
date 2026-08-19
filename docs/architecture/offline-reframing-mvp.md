@@ -97,7 +97,6 @@ flowchart LR
 | Media | FFmpeg, OpenCV | FFmpeg handles decode, encode, audio, and validation; OpenCV is limited to frame-level utilities. |
 | First planner | Deterministic target-crop controller | Fast to validate visually and isolated behind a planner interface. |
 | Planned optimizer | CVXPY and OSQP | Replaces the controller only after evaluation data justifies a whole-shot constrained quadratic program. |
-| Local/online topology | Docker Compose | Runs the complete stack locally and on a self-hosted online development host; online HTTPS is handled by Caddy. |
 
 ## Service Boundaries
 
@@ -347,12 +346,12 @@ Track these measures per job and profile:
 - Configure an explicit retention/deletion policy before accepting external user videos.
 - Persist pipeline version, model identifier, and planner configuration with every job so outputs are reproducible.
 - Emit structured logs and per-stage timing for validation, analysis, rendering, upload, and failures.
-- Keep API and worker containers independently deployable and scalable; GPU workers are optional until benchmarked detection/pose/render workload requires them.
+- Keep API and worker independently deployable and scalable; GPU workers are optional until benchmarked detection/pose/render workload requires them.
 - Do not place long-running media work in the Go API process.
 
 ## Delivery Order
 
-1. Scaffold the Vite/React app, Go API, Python worker, Docker Compose development topology, database migrations, and object-store integration.
+1. Scaffold the Vite/React app, Go API, Python worker, database migrations, and object-store integration.
 2. Implement assets, signed uploads, project/job resources, immutable configuration, `asynq` dispatch, and job status polling.
 3. Implement source validation and a fixture-only FFmpeg render path end to end.
 4. Add initial target selection, detector association, pose ROI transformation, Kalman tracking, and confidence/lost-track states.

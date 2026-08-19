@@ -2,13 +2,13 @@
 
 ## Goal
 
-Implement the offline Boulder Frame MVP as Compose services for a browser frontend, Go API, Python processing worker, and online HTTPS routing, using externally managed PostgreSQL, Redis, and S3-compatible storage.
+Implement the offline Boulder Frame MVP as independently testable browser frontend, Go API, and Python processing worker services, using PostgreSQL, Redis, and S3-compatible object storage through application contracts.
 
 This plan turns [offline-reframing-mvp.md](offline-reframing-mvp.md) into an executable implementation sequence. It does not expand the MVP to real-time processing, native capture, multi-athlete tracking, equipment detection, super-resolution, or variable-frame-rate input.
 
 ## Implementation Status
 
-The repository now contains a tested foundation for the frontend, Go API, worker planning/media primitives, and Docker Compose topology. The Python worker process is currently an explicit idle service because the Redis/`asynq`, PostgreSQL, object-storage, detector, pose, and render orchestration adapters are not yet implemented. Jobs can be created and queued by the API, but processing does not complete until those worker adapters are added.
+The repository now contains a tested foundation for the frontend, Go API, and worker planning/media primitives. The Python worker process is currently an explicit idle service because the Redis/`asynq`, PostgreSQL, object-storage, detector, pose, and render orchestration adapters are not yet implemented. Jobs can be created and queued by the API, but processing does not complete until those worker adapters are added.
 
 Implemented baseline interfaces include:
 
@@ -28,37 +28,18 @@ Implemented baseline interfaces include:
       - Dependencies: None.
       - Implementation/reuse: Make PostgreSQL/API JSON names authoritative. Keep job configuration immutable JSON containing source asset ID, normalized target selection, output settings, pipeline version, model version, and planner configuration. Generate OpenAPI or equivalent API types only after the JSON contract is fixed; do not duplicate independently maintained enums.
       - Verification: Contract tests reject unknown enum values and confirm JSON serialization for every documented resource and terminal error shape.
-    - **S0.2 Scaffold repository modules and container build boundaries.**
-      - Outcome: `frontend/`, `backend/`, `worker/`, `infra/`, and `tests/` each have an explicit build/test entrypoint without one service importing another service's private code.
+    - **S0.2 Scaffold repository modules and service boundaries.**
+      - Outcome: `frontend/`, `backend/`, `worker/`, and `tests/` each have an explicit build/test entrypoint without one service importing another service's private code.
       - Ownership: Platform owner.
       - Dependencies: S0.1.
       - Implementation/reuse: Use Vite/React/TypeScript, Go with `chi` and `pgx`, and Python 3.12. Pin runtime and dependency versions. Keep shared behavior at HTTP, database, object-storage, and queue contracts rather than adding a shared-language package prematurely.
-      - Verification: Each container builds independently; backend, worker, and frontend smoke commands run in clean containers.
+      - Verification: Backend, worker, and frontend smoke commands run independently.
     - **S0.3 Establish fixture and evaluation manifests.**
       - Outcome: Tests can refer to permitted synthetic/licensed media without storing private videos in the repository.
       - Ownership: QA/CV owner.
       - Dependencies: None.
       - Implementation/reuse: Add manifest schemas for fixture media, expected ffprobe metadata, target selections, and annotated evaluation sequences covering stationary, lateral/sprint, jump or extended limb, occlusion, and lost-subject cases.
       - Verification: A manifest validator catches missing files, unsupported fixture metadata, and invalid normalized coordinates.
-  - Infrastructure service
-    - **I1.1 Implement local Compose topology.**
-      - Outcome: One command starts frontend, backend, and worker configured to reach externally managed PostgreSQL, Redis, and S3-compatible object storage.
-      - Ownership: Platform owner.
-      - Dependencies: S0.2.
-      - Implementation/reuse: Add `infra/compose.yaml`, `.env.example`, service Dockerfiles, health checks, named volumes, and only the local frontend/API ports. Use externally managed PostgreSQL, Redis, and S3-compatible storage through their standard protocols; provision credentials, bucket CORS, and lifecycle rules outside Compose. Keep application source bind mounts limited to local development.
-      - Verification: `docker compose config` succeeds with the template environment; services become healthy; API can connect to all dependencies; external bucket provisioning is documented and repeatable.
-    - **I1.2 Implement online Compose override and Caddy routing.**
-      - Outcome: A self-hosted Linux host can run versioned images behind HTTPS without publishing internal service ports.
-      - Ownership: Platform owner.
-      - Dependencies: I1.1, B1.1, F1.1.
-      - Implementation/reuse: Add `infra/compose.online.yaml` and Caddy configuration with an `online` profile, restart policies, resource limits, persistent Caddy volumes, and health-based dependencies. Use explicit image tags or Git revisions. Do not add authentication by implication; mark external access blocked until auth is implemented.
-      - Verification: `docker compose ... config`, online startup, HTTPS health request, external dependency connectivity, and restart recovery pass on a Linux host.
-    - **I1.3 Add operational commands and secret boundaries.**
-      - Outcome: Developers can migrate, inspect, update, and reset local Compose data without confusing it with externally managed service operations.
-      - Ownership: Platform owner.
-      - Dependencies: I1.1, I1.2, B2.1.
-      - Implementation/reuse: Document and script Compose commands from `docs/dev/development.md`. Keep credentials in `infra/.env`, use externally provisioned secrets, and document database backup/restore ownership plus object-storage retention configuration.
-      - Verification: A clean local setup follows the documented commands; no secret file is tracked; online documentation explicitly avoids `down -v`.
   - Go backend service
       - **B1.1 Implement API process, configuration, and health endpoints.**
       - Outcome: The Go service starts with validated JSON configuration, exposes liveness/readiness endpoints, and shuts down cleanly.
@@ -135,7 +116,7 @@ Implemented baseline interfaces include:
       - Verification: Progress monotonicity, timing presence, secret redaction, cleanup on success/failure, and interrupted-job recovery tests pass.
   - Frontend service
     - **F1.1 Implement application shell and typed API client.**
-      - Outcome: The frontend runs in local Compose and uses one typed client for the documented API resources and errors.
+      - Outcome: The frontend uses one typed client for the documented API resources and errors.
       - Ownership: Frontend owner.
       - Dependencies: S0.1, B1.1.
       - Implementation/reuse: Use Vite, React, and TypeScript. Read frontend settings from `frontend/conf/config.json` or `frontend/conf/config.dev.json`, represent loading/empty/error/terminal states explicitly, propagate `X-Trace-ID` across API/direct-upload requests, and keep signed upload/download URLs out of persistent browser state and structured logs.
@@ -160,7 +141,7 @@ Implemented baseline interfaces include:
       - Verification: Browser tests cover all states, polling errors, terminal failure, refresh/reload, duplicate start prevention, and successful download.
   - Cross-service quality gates
     - **Q1.1 Implement API/worker integration tests.**
-      - Outcome: The complete upload-to-job-to-artifact lifecycle is verified against Compose dependencies.
+      - Outcome: The complete upload-to-job-to-artifact lifecycle is verified against its declared dependencies.
       - Ownership: Backend and worker owners.
       - Dependencies: B3.1, B4.1, B5.1, W1.1, W6.1.
       - Implementation/reuse: Use disposable external PostgreSQL, Redis, and object-store test resources. Assert durable state transitions, task idempotency, transient retry, terminal failure, output artifact linkage, and signed download authorization.
@@ -175,17 +156,17 @@ Implemented baseline interfaces include:
       - Outcome: CI proves the documented user workflow and static quality gates.
       - Ownership: Platform and frontend owners.
       - Dependencies: F2.1, F4.1, Q1.1.
-      - Implementation/reuse: Add Playwright coverage for fixture upload through download and CI commands for Go formatting/tests, Python formatting/types/tests, frontend type/tests, Compose config validation, documentation link checks, and whitespace checks.
+      - Implementation/reuse: Add Playwright coverage for fixture upload through download and CI commands for Go formatting/tests, Python formatting/types/tests, frontend type/tests, documentation link checks, and whitespace checks.
       - Verification: CI passes on a clean checkout without private assets or credentials.
 
 ## Implementation Sequence
 
 1. Complete S0.1-S0.3, then choose and pin the detector/model versions with license evidence.
-2. Complete I1.1, B1.1, B2.1, and W1.1 so the stack can start and accept a durable queued job.
+2. Complete B1.1, B2.1, and W1.1 so the services can accept a durable queued job.
 3. Complete B3.1, B4.1, B5.1, F1.1, F2.1, F3.1, and F4.1 for the API/browser workflow.
 4. Complete W2.1 and W6.1 with a fixture-only pass-through/render path before adding CV complexity.
 5. Complete W3.1, W4.1, W5.1, and W7.1 for measurement, tracking, planning, rendering, and observability.
-6. Complete Q1.1-Q1.3 and I1.2-I1.3 before shared online testing.
+6. Complete Q1.1-Q1.3 before shared testing.
 7. Evaluate the deterministic planner before considering any deferred optimizer or capture capability.
 
 ## Architecture After Plan
@@ -217,10 +198,9 @@ flowchart LR
 ## Files to Modify
 
 - `docs/architecture/offline-reframing-mvp.md`: Keep the product contract and algorithm decisions authoritative; update only when this plan changes an approved behavior.
-- `docs/dev/development.md`: Add concrete Compose filenames, service commands, and environment variables as infrastructure files are implemented.
 - `docs/README.md`: Link this service implementation plan.
 - `README.md`: Add a concise implementation-status link when scaffolding begins.
-- `AGENTS.md`: Keep authoritative-document references aligned with architecture and development documentation.
+- `AGENTS.md`: Keep authoritative-document references aligned with the architecture and specification indexes.
 - `.agents/sessions/offline-reframing-mvp/plan.md`: Preserve as historical planning context; do not use it as the only implementation specification.
 
 ## New Files
@@ -229,10 +209,6 @@ flowchart LR
 - `frontend/*`: Vite/React/TypeScript application and browser tests.
 - `backend/*`: Go API, migrations, repositories, queue dispatch, and API tests.
 - `worker/*`: Python worker, media/CV/planner pipeline, and worker tests.
-- `infra/compose.yaml`: Local service topology and dependencies.
-- `infra/compose.online.yaml`: Online self-hosted override/profile.
-- `infra/.env.example`: Non-secret development configuration template.
-- `infra/Caddyfile`: Online routing and HTTPS configuration template.
 - `tests/fixtures/*`: Permitted small media fixtures and expected metadata.
 - `tests/evaluation/*`: Evaluation manifests, annotations, and metric expectations.
 

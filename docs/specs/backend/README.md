@@ -26,7 +26,7 @@ flowchart LR
 
 `backend/main.go` loads configuration, opens PostgreSQL, constructs the S3 client and presigner, constructs the asynq publisher, and starts the HTTP server. `GET /healthz` is process liveness. `GET /readyz` currently checks PostgreSQL only; Redis and object-storage readiness remain an operational gap.
 
-The container entrypoint supports:
+The service supports:
 
 ```sh
 go run .

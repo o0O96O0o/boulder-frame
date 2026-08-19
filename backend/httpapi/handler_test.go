@@ -65,7 +65,7 @@ func (f *fakeRepo) SetJobFailed(context.Context, uuid.UUID, string, string) erro
 
 type fakeStore struct{}
 
-func (fakeStore) PresignUpload(context.Context, string, string, int64, time.Duration) (string, error) {
+func (fakeStore) PresignUpload(context.Context, string, string, time.Duration) (string, error) {
 	return "https://upload.test", nil
 }
 func (fakeStore) PresignDownload(context.Context, string, time.Duration) (string, error) {

@@ -67,6 +67,11 @@ function parseBody(value: unknown): unknown {
   try { return sanitizeLogValue(JSON.parse(value)) } catch { return { omitted: true, reason: 'non_json_body' } }
 }
 
+function parseJson(value: string): unknown {
+  if (value.length === 0) return null
+  try { return JSON.parse(value) } catch { return null }
+}
+
 function logRequest(event: string, fields: Record<string, unknown>): void {
   console.info(JSON.stringify({ module: 'frontend', event, ...fields }))
 }
@@ -86,8 +91,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError('The API is unavailable. Check the service and try again.', 0)
   }
   const rawBody = await response.text()
-  const body = parseBody(rawBody) as { message?: string; error?: SafeError } | null
-  logRequest('http response', { 'trace-id': response.headers.get('X-Trace-ID') ?? id, status: response.status, response_body: body })
+  const body = parseJson(rawBody) as { message?: string; error?: SafeError } | null
+  logRequest('http response', { 'trace-id': response.headers.get('X-Trace-ID') ?? id, status: response.status, response_body: parseBody(rawBody) })
   if (!response.ok) throw new ApiError(body?.error?.message ?? body?.message ?? `Request failed (${response.status})`, response.status, body?.error?.code)
   return body as T
 }
@@ -117,7 +122,6 @@ export function uploadFile(url: string, file: File, onProgress: (value: number) 
     const id = traceId()
     xhr.open('PUT', url)
     xhr.setRequestHeader('Content-Type', sourceContentType(file))
-    xhr.setRequestHeader('X-Trace-ID', id)
     logRequest('upload request', { 'trace-id': id, method: 'PUT', path: '[SIGNED_URL]', request_body: { filename: file.name, content_type: sourceContentType(file), size_bytes: file.size } })
     xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)) }
     xhr.onerror = () => {
