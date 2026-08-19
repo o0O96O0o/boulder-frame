@@ -6,10 +6,11 @@ import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event, Thread
 from uuid import uuid4
 
 from .config import WorkerConfig
-from .errors import ErrorCode, WorkerError, terminal
+from .errors import ErrorCode, WorkerError, terminal, transient
 from .logging import configure_logging
 from .protocol import JobTask
 from .state import JobRecord, JobRepository, JobState, fail, transition, utc_now
@@ -66,6 +67,31 @@ class Worker:
                 },
             )
             return False
+        heartbeat_stop = Event()
+        heartbeat_failure: list[Exception] = []
+
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(self.config.heartbeat_seconds):
+                try:
+                    if not self.repository.renew(
+                        task.job_id, self.worker_id, self.config.lease_seconds
+                    ):
+                        heartbeat_failure.append(RuntimeError("job lease was lost"))
+                        return
+                except Exception as error:
+                    heartbeat_failure.append(error)
+                    return
+
+        heartbeat_thread = Thread(target=heartbeat, name=f"lease-{task.job_id}", daemon=True)
+        heartbeat_thread.start()
+
+        def ensure_lease() -> None:
+            if heartbeat_failure:
+                raise transient(
+                    ErrorCode.DATABASE_UNAVAILABLE,
+                    "Processing was temporarily interrupted.",
+                )
+
         try:
             with job_scratch(
                 self.config.scratch_root, str(task.job_id), self.config.retain_debug_artifacts
@@ -82,6 +108,7 @@ class Worker:
                         index for index, (state, _, _) in enumerate(stages) if state is record.state
                     )
                 for state, progress, handler in stages[start_at:]:
+                    ensure_lease()
                     if record.state is not state:
                         record = transition(record, state, progress)
                         self.repository.update(record)
@@ -98,6 +125,7 @@ class Worker:
                         },
                     )
                     handler(record, scratch)
+                    ensure_lease()
                     self.logger.info(
                         "stage response",
                         extra={
@@ -122,6 +150,11 @@ class Worker:
             )
         except WorkerError as error:
             if error.transient:
+                try:
+                    self.repository.release(task.job_id, self.worker_id)
+                except Exception:
+                    # Preserve the retry classification; lease expiry remains a recovery fallback.
+                    pass
                 self.logger.warning(
                     "task response",
                     extra={
@@ -143,9 +176,13 @@ class Worker:
                 },
             )
         except Exception:
-            self.repository.update(
-                fail(record, terminal(ErrorCode.INTERNAL, "Processing could not be completed."))
-            )
+            try:
+                self.repository.update(
+                    fail(record, terminal(ErrorCode.INTERNAL, "Processing could not be completed."))
+                )
+            except Exception:
+                self.repository.release(task.job_id, self.worker_id)
+                raise
             self.logger.error(
                 "task response",
                 extra={
@@ -155,4 +192,7 @@ class Worker:
                     "error_code": ErrorCode.INTERNAL.value,
                 },
             )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join()
         return True

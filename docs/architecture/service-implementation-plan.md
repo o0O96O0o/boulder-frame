@@ -8,13 +8,15 @@ This plan turns [offline-reframing-mvp.md](offline-reframing-mvp.md) into an exe
 
 ## Implementation Status
 
-The repository now contains a tested foundation for the frontend, Go API, worker planning/media primitives, and Docker Compose module startup. The Python worker process is currently an explicit idle service because the Redis/`asynq`, PostgreSQL, object-storage, detector, pose, and render orchestration adapters are not yet implemented. Jobs can be created and queued by the API, but processing does not complete until those worker adapters are added.
+The repository contains a tested frontend/API foundation, worker planning/media primitives, Docker Compose module startup, Redis Streams dispatch/consumption, and PostgreSQL worker leases. The connected worker currently has an intentional pipeline boundary: after it claims a queued job it records `model_unavailable`, because detector, pose, object-storage, and render orchestration are not implemented. This is a terminal, acknowledged failure, not an idle worker or a successful render.
 
 Implemented baseline interfaces include:
 
 - API routes under `/api/v1` for projects, signed source uploads, upload confirmation, jobs, artifacts, and signed downloads.
 - PostgreSQL migrations for projects, assets, processing jobs, and job artifacts.
+- Migration `002_worker_leases.sql` for lease owner/expiry fields, stage support, and efficient eligible-job claims.
 - Immutable job configuration with target selection, output settings, pipeline version, model version, and planner identifier.
+- Redis Streams handoff through stream `boulder-frame:jobs` and consumer group `boulder-frame:job-processors`; Redis pending recovery is paired with PostgreSQL lease authority.
 - Worker media validation for MP4 or QuickTime MOV, H.264/HEVC video, AAC audio, constant frame rate, rotation metadata, target-coordinate mapping, crop geometry, and deterministic planner behavior.
 - Direct-upload support through the shared external S3-compatible store and its CORS configuration.
 
@@ -63,7 +65,7 @@ Implemented baseline interfaces include:
       - Outcome: A completed source asset and valid target selection create exactly one durable job configuration and enqueue one idempotent task.
       - Ownership: Backend owner.
       - Dependencies: B2.1, B3.1, W1.1.
-      - Implementation/reuse: Implement `POST /api/v1/projects/{projectID}/jobs`. Validate source asset ownership/upload state, `frame_time_ms >= 0`, normalized coordinates in `[0,1]`, `16:9`/`9:16`, and four profiles. Snapshot `PIPELINE_VERSION`, `MODEL_VERSION`, and planner settings into configuration before enqueueing. Use the job UUID as the `asynq` task id and make enqueue/retry behavior transactionally safe.
+      - Implementation/reuse: Implement `POST /api/v1/projects/{projectID}/jobs`. Validate source asset ownership/upload state, `frame_time_ms >= 0`, normalized coordinates in `[0,1]`, `16:9`/`9:16`, and four profiles. Snapshot `PIPELINE_VERSION`, `MODEL_VERSION`, and planner settings into configuration before enqueueing. Append to Redis Stream `boulder-frame:jobs` using the job UUID as `task_id`; make duplicate publication/retry transactionally safe.
       - Verification: Integration tests prove configuration immutability, duplicate-submit behavior, enqueue failure handling, and no job creation from incomplete/invalid assets.
     - **B5.1 Implement job status, artifacts, and signed download endpoints.**
       - Outcome: The frontend can poll a complete job representation and obtain a short-lived download URL only for a completed authorized output.
@@ -76,7 +78,7 @@ Implemented baseline interfaces include:
       - Outcome: A Python worker consumes the backend's job task, claims the job idempotently, and records valid state/stage transitions.
       - Ownership: Worker owner.
       - Dependencies: S0.1, B2.1, B4.1.
-      - Implementation/reuse: Use the `asynq` payload contract containing only the job UUID; load configuration from PostgreSQL. Implement leases/heartbeats or equivalent retry-safe claims, transition guards, transient retry classification, and terminal error recording. A restarted worker must resume or safely retry without duplicate output artifacts.
+      - Implementation/reuse: Consume `boulder-frame:jobs` through group `boulder-frame:job-processors`. The entry has `type`, `task_id`, and `payload`; load configuration from PostgreSQL using the payload job UUID. PostgreSQL leases and guarded transitions are the authority for active ownership. Recover pending deliveries, heartbeat active entries/leases, classify transient failures, and acknowledge only terminal stream work. A restarted worker must resume or safely retry without duplicate output artifacts.
       - Verification: Worker integration tests cover duplicate delivery, crash/retry, invalid transition rejection, transient storage failure, and terminal media failure.
     - **W2.1 Implement source validation and timestamp normalization boundary.**
       - Outcome: The worker accepts supported constant-frame-rate H.264/AAC MP4 or QuickTime MOV input, including HEVC video when FFmpeg supports it, and rejects unsupported or variable-frame-rate media with a user-safe error.
@@ -181,7 +183,7 @@ flowchart LR
     U -->|source bytes| OBJ[(S3 object storage)]
     U -->|confirm asset + create job| API
     API --> DB[(PostgreSQL)]
-    API --> REDIS[(Redis / asynq)]
+    API --> REDIS[(Redis Streams)]
     REDIS --> WORKER[Python worker]
     WORKER -->|load immutable job| DB
     WORKER -->|read source| OBJ
@@ -198,7 +200,7 @@ flowchart LR
 ## Files to Modify
 
 - `docs/architecture/offline-reframing-mvp.md`: Keep the product contract and algorithm decisions authoritative; update only when this plan changes an approved behavior.
-- `docs/README.md`: Link this service implementation plan.
+- `docs/README.md`: Link this service implementation plan and identify copied Asynq material as historical reference.
 - `README.md`: Add a concise implementation-status link when scaffolding begins.
 - `AGENTS.md`: Keep authoritative-document references aligned with the architecture and specification indexes.
 - `.agents/sessions/offline-reframing-mvp/plan.md`: Preserve as historical planning context; do not use it as the only implementation specification.

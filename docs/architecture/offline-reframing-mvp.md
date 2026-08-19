@@ -67,7 +67,7 @@ flowchart LR
     A -->|signed upload URL| W
     W -->|source video| S[(S3-compatible object storage)]
     W -->|project settings and normalized target tap| A
-    A --> Q[(Redis + asynq)]
+    A --> Q[(Redis Streams)]
     Q --> K[Python CV and render worker]
     K -->|read source| S
     K --> D[FFmpeg decode]
@@ -87,7 +87,7 @@ flowchart LR
 | --- | --- | --- |
 | Web app | Vite, React, TypeScript | Minimal browser UI for uploads, subject selection, status, and download. |
 | API | Go, `chi`, `pgx` | Go is the primary application language; `pgx` provides direct PostgreSQL access. |
-| Background dispatch | `asynq`, Redis | Durable asynchronous handoff from the Go API to long-running work. |
+| Background dispatch | Redis Streams | Durable asynchronous handoff from the Go API to long-running work. The API writes `boulder-frame:jobs`; workers consume it through group `boulder-frame:job-processors`. |
 | Metadata | PostgreSQL | Stores projects, jobs, configurations, asset references, status, and errors. |
 | Video assets | S3-compatible object storage | Original 4K files, rendered MP4s, and optional debug artifacts stay outside service filesystems. |
 | CV/render worker | Python 3.12 | Required ecosystem for MediaPipe, ONNX Runtime, OpenCV, numerical processing, and the later optimizer. |
@@ -116,13 +116,13 @@ flowchart LR
 - Validates all requests and supported source constraints.
 - Creates signed object-store upload/download URLs.
 - Persists immutable processing configuration before enqueueing the job.
-- Enqueues one idempotent processing task using a job identifier.
+- Appends one idempotent processing task using the job identifier as `task_id`.
 - Exposes project, asset, job status, and output artifact metadata.
 - Does not call CV models, decode video, or render media.
 
 ### Python worker
 
-- Claims an enqueued job and moves it through valid states.
+- Consumes jobs through the Redis Streams consumer group, then atomically claims PostgreSQL lease authority before moving them through valid states.
 - Loads the immutable job configuration and source asset from PostgreSQL/object storage.
 - Normalizes source rotation and validates dimensions, codec, timing, and decodability.
 - Runs athlete measurement, tracking, crop planning, and rendering.
@@ -219,7 +219,7 @@ The target selection must use the displayed frame's normalized coordinates after
 
 | State | Meaning |
 | --- | --- |
-| `queued` | The API persisted the job and placed it in the queue. |
+| `queued` | The API persisted the job and appended it to the Redis Stream. |
 | `validating` | The worker is checking source media and selection viability. |
 | `analyzing` | Detection, pose, tracking, and crop planning are running. |
 | `rendering` | FFmpeg is creating the output video. |
@@ -238,7 +238,7 @@ The initial PostgreSQL schema has these durable entities:
 | --- | --- | --- |
 | `projects` | id, name, owner_id, created_at | `owner_id` may use the local development user until authentication exists. |
 | `assets` | id, project_id, kind, storage_key, upload_state, media metadata, created_at | `kind` is `source`, `output`, or `debug`. |
-| `processing_jobs` | id, project_id, source_asset_id, state, stage, progress, immutable configuration JSON, error code/message, timestamps | Stores pipeline and model versions in the configuration. |
+| `processing_jobs` | id, project_id, source_asset_id, state, stage, progress, immutable configuration JSON, error code/message, lease owner/expiry, timestamps | Stores pipeline and model versions in the configuration. Migration `002_worker_leases.sql` adds the worker lease fields and active-claim index. |
 | `job_artifacts` | id, job_id, asset_id, kind, created_at | Links completed output and optional debug artifacts. |
 
 Store only object keys and metadata in PostgreSQL. Do not store video bytes or per-frame measurements in relational rows. Optional visual-debug overlays and compact planner telemetry belong in object storage as job artifacts.
@@ -349,11 +349,13 @@ Track these measures per job and profile:
 - Emit structured logs and per-stage timing for validation, analysis, rendering, upload, and failures.
 - Keep API and worker independently deployable and scalable; GPU workers are optional until benchmarked detection/pose/render workload requires them.
 - Do not place long-running media work in the Go API process.
+- Redis Streams is transport, not processing authority: a worker may acknowledge a stream entry only after PostgreSQL records the terminal result. Pending entries are recovered by the consumer group; PostgreSQL leases prevent duplicate active processing.
+- The current connected worker intentionally has no detector/pose/render pipeline. It records `model_unavailable` after validation begins and acknowledges that terminal failure rather than claiming successful media processing.
 
 ## Delivery Order
 
 1. Scaffold the Vite/React app, Go API, Python worker, Docker Compose module startup, database migrations, and object-store integration.
-2. Implement assets, signed uploads, project/job resources, immutable configuration, `asynq` dispatch, and job status polling.
+2. Implement assets, signed uploads, project/job resources, immutable configuration, Redis Streams dispatch, and job status polling.
 3. Implement source validation and a fixture-only FFmpeg render path end to end.
 4. Add initial target selection, detector association, pose ROI transformation, Kalman tracking, and confidence/lost-track states.
 5. Add movement envelopes and deterministic crop planning.

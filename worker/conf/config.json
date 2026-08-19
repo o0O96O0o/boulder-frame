@@ -1,9 +1,14 @@
 {
   "pipeline_version": "${PIPELINE_VERSION}",
   "model_version": "${MODEL_VERSION}",
+  "database_url": "${DATABASE_URL}",
+  "redis_url": "${REDIS_URL}",
   "scratch_root": "/work",
   "ffprobe_bin": "ffprobe",
   "ffmpeg_bin": "ffmpeg",
   "lease_seconds": 300,
+  "heartbeat_seconds": 30,
+  "concurrency": 1,
+  "worker_id": "${WORKER_ID}",
   "retain_debug_artifacts": false
 }

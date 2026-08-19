@@ -33,6 +33,11 @@ published to the host.
 `REDIS_URL`, `S3_ENDPOINT`, `S3_PRESIGN_ENDPOINT`, and the related credentials to the externally
 managed services. Reserved characters in URL passwords must be percent-encoded.
 
+The worker also needs a stable `WORKER_ID`; optionally set a distinct `STREAM_CONSUMER` when its Redis
+consumer identity must differ. The API appends to `boulder-frame:jobs`; workers consume consumer group
+`boulder-frame:job-processors`. PostgreSQL leases, not Redis pending ownership, authorize active job
+state changes.
+
 The external object store owns bucket creation, credentials, CORS, lifecycle retention, and access
 policy. Keep source and output videos private by default.
 

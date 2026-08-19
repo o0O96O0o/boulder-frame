@@ -13,8 +13,15 @@ Copy the non-secret template and replace the external service values:
 cp .env.example .env
 ```
 
-Keep `.env` out of version control. Configure the external database, Redis/asynq queue, and
-object-storage bucket separately, including credentials, CORS, and retention policy.
+Keep `.env` out of version control. Configure the external database, Redis Streams transport, and
+object-storage bucket separately, including credentials, CORS, and retention policy. The API writes
+to stream `boulder-frame:jobs`; workers consume group `boulder-frame:job-processors`.
+
+The worker requires PostgreSQL and Redis URLs plus a stable `WORKER_ID`; `.env.example` provides a
+local value. Its stream settings include an optional `stream_consumer` override, read block interval,
+pending-entry reclaim idle time, heartbeat interval, and concurrency. Set unique consumer identities
+for concurrent worker processes. PostgreSQL remains the job-lease authority; Redis consumer-group
+pending state is only delivery coordination.
 
 ## Start Modules
 

@@ -4,7 +4,7 @@ These documents describe how the current implementation is structured at compone
 
 ```text
 docs/specs/
-├── backend/     Go API, persistence, signed storage URLs, and asynq dispatch
+├── backend/     Go API, persistence, signed storage URLs, and Redis Streams dispatch
 ├── worker/      Python worker runtime, media primitives, tracking, and planner
 ├── frontend/    Vite/React workflow and browser/API integration
 └── deploy/      Docker Compose startup for repository modules
@@ -14,7 +14,7 @@ The product boundary and algorithm contract remain authoritative in [../architec
 
 ## Component Specifications
 
-- [Backend](backend/README.md): Go process, API resources, PostgreSQL persistence, S3 URLs, and Redis/`asynq` task distribution.
+- [Backend](backend/README.md): Go process, API resources, PostgreSQL persistence, S3 URLs, and Redis Streams task distribution.
 - [Worker](worker/README.md): Python runtime, job state machine, media validation, measurement interfaces, and deterministic planner.
 - [Frontend](frontend/README.md): Browser workflow, direct upload, target selection, polling, and download.
 - [Compose](deploy/README.md): module container startup and external dependency configuration.
@@ -28,8 +28,8 @@ flowchart LR
     API -->|signed PUT URL| B
     B -->|source bytes| S3[(S3-compatible storage)]
     B -->|create immutable job| API
-    API -->|job.process with job ID| R[(Redis)]
-    R -->|asynq task| W[Python worker]
+    API -->|XADD job.process| R[(Redis Stream: boulder-frame:jobs)]
+    R -->|consumer group: boulder-frame:job-processors| W[Python worker]
     W -->|read source and write output| S3
     W -->|state, progress, artifacts| PG
     B -->|poll job| API
@@ -38,4 +38,4 @@ flowchart LR
 
 ## Current Boundary
 
-The Go API and frontend workflow are implemented. The Python worker currently provides the media, measurement, tracking, and planner foundation but runs in explicit idle mode because queue, database, storage, model, and full render orchestration adapters are not yet implemented. The specifications call out this distinction instead of describing planned adapters as existing behavior.
+The Go API, frontend workflow, Redis Streams transport, and PostgreSQL-backed worker lease boundary are implemented. The worker consumes and claims jobs, but the media/CV pipeline is intentionally unavailable: claimed jobs transition through `validating` to terminal `failed` with `model_unavailable`, then receive `XACK`. The specifications distinguish this active control plane from the unimplemented processing pipeline.

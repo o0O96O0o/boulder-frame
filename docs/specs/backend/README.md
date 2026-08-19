@@ -6,7 +6,7 @@ The backend is a Go HTTP process. It owns request validation, PostgreSQL metadat
 
 - [HTTP API](http-api.md): routes, request validation, response shapes, ownership checks, and lifecycle behavior.
 - [Persistence](persistence.md): PostgreSQL entities, constraints, immutable configuration, and repository responsibilities.
-- [Asynq Task Distribution](asynq-task-distribution.md): Redis queue configuration, task payload, idempotency, retry boundary, and worker handoff.
+- [Redis Streams Task Distribution](redis-streams-task-distribution.md): stream/group configuration, task payload, idempotency, pending recovery, lease authority, and worker handoff.
 
 ## Runtime Composition
 
@@ -18,13 +18,13 @@ flowchart LR
     REPO --> PG[(PostgreSQL)]
     H --> STORE[S3 store]
     STORE --> OBJ[(Object storage)]
-    H --> PUB[asynq publisher]
-    PUB --> REDIS[(Redis)]
+    H --> PUB[Redis Streams publisher]
+    PUB --> REDIS[(boulder-frame:jobs)]
 ```
 
 ## Startup
 
-`backend/main.go` loads configuration, opens PostgreSQL, constructs the S3 client and presigner, constructs the asynq publisher, and starts the HTTP server. `GET /healthz` is process liveness. `GET /readyz` currently checks PostgreSQL only; Redis and object-storage readiness remain an operational gap.
+`backend/main.go` loads configuration, opens PostgreSQL, constructs the S3 client and presigner, constructs the Redis Streams publisher, and starts the HTTP server. `GET /healthz` is process liveness. `GET /readyz` currently checks PostgreSQL only; Redis and object-storage readiness remain an operational gap.
 
 The service supports:
 
@@ -33,4 +33,4 @@ go run .
 go run . migrate up
 ```
 
-The migration command applies `backend/migrations/001_init.sql` and is idempotent.
+The migration command applies `backend/migrations/001_init.sql` and `backend/migrations/002_worker_leases.sql` in order and is idempotent.

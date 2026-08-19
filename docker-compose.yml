@@ -15,6 +15,7 @@ x-application-environment: &application-environment
   MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES}
   MODEL_VERSION: ${MODEL_VERSION}
   PIPELINE_VERSION: ${PIPELINE_VERSION}
+  WORKER_ID: ${WORKER_ID}
 
 services:
   frontend:

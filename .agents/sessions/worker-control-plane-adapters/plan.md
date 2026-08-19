@@ -9,16 +9,16 @@ Design decisions that apply to every task:
 - PostgreSQL is the durable source of truth. Redis acknowledges task delivery only; it must not determine job state.
 - The database lease and queue-delivery lease are independent. Every durable write must require the current database lease owner and a non-expired lease.
 - Do not implement source download, FFprobe validation, model inference, target association, tracking, crop planning, rendering, output upload, asset/artifact creation, or successful completion in this milestone.
-- Do not emulate `asynq` with a raw Redis list pop. The implementation must use a maintained, version-compatible consumer or an explicitly approved replacement transport.
+- The approved queue transport is Redis Streams with consumer groups. Do not retain or emulate the Asynq internal protocol.
 - Since the actual execution pipeline is not implemented, a claimed production job must transition to `validating` and then fail with the existing user-safe `model_unavailable` error. It must never be marked `completed` without an output asset.
 
 - Durable worker control plane
   - **W1.1 Queue transport compatibility decision**
-    - Outcome: Select and pin a Redis consumer that can safely consume the API's `github.com/hibiken/asynq` v0.25.1 tasks, or stop for an explicit architecture decision to replace asynq with a language-neutral transport.
+    - Outcome: Replace Asynq with a language-neutral Redis Streams consumer-group transport shared by Go and Python.
     - Ownership: Worker owner with backend review.
     - Dependencies: None.
-    - Implementation/reuse: Create a disposable Redis integration check driven by the existing Go publisher. Verify the candidate consumer handles the `job.process` task type, exact JSON payload, task ID, acknowledgement, retry, and task lease/heartbeat behavior. Do not write a partial compatibility implementation against asynq's internal Redis/protobuf/Lua protocol. If no maintained compatible Python client passes, present the replacement-transport decision before implementation rather than silently changing queue semantics.
-    - Verification: The compatibility test passes against the pinned Go asynq version, or a documented blocking decision records the rejected candidates and required API/documentation changes.
+    - Implementation/reuse: Use the maintained Go Redis client already present transitively in the backend module and pin the Python `redis` client. Publish `type`, `task_id`, and the exact JSON payload to a named stream; consume with a named group and consumer identity. Use `XACK` for terminal outcomes and pending-entry reclamation for abandoned deliveries. Keep PostgreSQL claim leases authoritative for idempotency.
+    - Verification: Go and Python contract tests assert stream field names, exact payload, consumer-group acknowledgement, pending-entry recovery, transient retry, and duplicate delivery behavior against Redis when available.
   - **W1.2 Migration runner and durable job lease schema**
     - Outcome: PostgreSQL can safely arbitrate ownership of an active worker and reject stale state/progress/error writes.
     - Ownership: Backend owner with worker review.
@@ -41,7 +41,7 @@ Design decisions that apply to every task:
     - Outcome: `boulder-frame-worker --serve` composes configured adapters, publishes accurate capabilities, and no longer sleeps indefinitely.
     - Ownership: Worker owner.
     - Dependencies: W1.3, W1.4.
-    - Implementation/reuse: Extend `WorkerConfig` and both config JSON files with required environment-backed database/Redis URLs, bounded concurrency, worker identity, and queue lease settings. Add the pinned runtime dependencies selected in W1.1. Replace the idle CLI loop with adapter startup, signal-aware draining, and resource cleanup. Keep the existing `Worker` stage orchestration injectable. Until the media/CV executor exists, compose an explicit unavailable executor that transitions the claimed job into `validating` and persists `model_unavailable` with a user-safe message; do not invoke later stages or create scratch/output artifacts. Report `queue_adapter` and `database_adapter` as true only after successful startup readiness.
+    - Implementation/reuse: Extend `WorkerConfig` and both config JSON files with required environment-backed database/Redis URLs, bounded concurrency, worker identity, stream/group settings, and lease settings. Pin the Redis and PostgreSQL Python dependencies. Replace the idle CLI loop with adapter startup, signal-aware draining, and resource cleanup. Keep the existing `Worker` stage orchestration injectable and renew database leases during long handlers. Until the media/CV executor exists, compose an explicit unavailable executor that transitions the claimed job into `validating` and persists `model_unavailable` with a user-safe message; do not invoke later stages or create scratch/output artifacts. Report capabilities only after successful adapter readiness.
     - Verification: CLI/config tests reject missing or invalid adapter settings; readiness reports actual capabilities; signal tests prove stop/drain/close behavior; an end-to-end queued job becomes a visible terminal `model_unavailable` failure rather than remaining queued; logs never contain credentials, signed URLs, or media bytes.
 - Contract and quality documentation
   - **D1.1 Update authoritative service contracts**
@@ -53,16 +53,16 @@ Design decisions that apply to every task:
 
 ## Architecture After Plan
 
-The Go API continues to persist a queued immutable job and publish its UUID-only task. The Python queue adapter receives the task using a verified compatible transport, while the PostgreSQL adapter atomically claims and leases the durable job. The adapter layer invokes the worker pipeline through an interface. For this scoped milestone, the only production executor persists a safe `model_unavailable` error after the `validating` transition because no source/media/CV/render/output pipeline exists yet. Future algorithm and storage work replaces that executor without changing queue payload, database claim, lease, or logging contracts.
+The Go API continues to persist a queued immutable job and publish a Redis Stream entry containing task metadata and the UUID/trace payload. The Python queue adapter consumes it through a Redis Streams consumer group, while the PostgreSQL adapter atomically claims and leases the durable job. The adapter layer invokes the worker pipeline through an interface. For this scoped milestone, the only production executor persists a safe `model_unavailable` error after the `validating` transition because no source/media/CV/render/output pipeline exists yet. Future algorithm and storage work replaces that executor without changing stream, database claim, lease, or logging contracts.
 
-Assumption: W1.1 finds a maintained Python consumer demonstrably compatible with the pinned asynq version. If it does not, implementation pauses for approval to replace asynq rather than shipping an undocumented Redis-protocol clone.
+Decision: Redis Streams is the approved language-neutral queue for this MVP. Existing Asynq-published entries are not protocol-compatible and must be requeued or discarded during local deployment migration; PostgreSQL remains the authority for whether a job is still eligible.
 
 ```mermaid
 flowchart LR
     B[Browser] -->|POST job| API[Go API]
     API -->|queued job and immutable config| PG[(PostgreSQL)]
-    API -->|job.process: job_id + trace_id| R[(Redis/asynq)]
-    R -->|verified compatible delivery| QA[Python queue adapter]
+    API -->|job.process stream entry| R[(Redis Streams)]
+    R -->|consumer group delivery| QA[Python queue adapter]
     QA -->|atomic claim and lease renewal| WR[Python PostgreSQL repository]
     WR --> PG
     QA --> W[Worker pipeline interface]
@@ -85,7 +85,7 @@ flowchart LR
 - `worker/tests/conftest.py`, `worker/tests/test_config.py`, `worker/tests/test_state.py`, `worker/tests/test_worker.py`: repair missing test imports and revise unit tests for the durable repository/pipeline contracts.
 - `docs/specs/worker/README.md`: replace the idle-worker status with the completed control-plane boundary and remaining pipeline limitations.
 - `docs/specs/worker/runtime-and-pipeline.md`: document configuration, lifecycle, leases, retry behavior, and unavailable-pipeline result.
-- `docs/specs/backend/asynq-task-distribution.md`: document the selected compatible consumer or approved transport, acknowledgement, and dual-lease contract.
+- `docs/specs/backend/redis-streams-task-distribution.md`: document the Redis Streams contract, acknowledgement, and dual-lease contract.
 - `docs/architecture/service-implementation-plan.md`: record W1.1 completion and retain W2-W7 as pending.
 
 ## New Files (if any)
@@ -101,7 +101,7 @@ flowchart LR
 
 ## Risks
 
-- Python has no native supported `asynq` client in this repository. A partial Redis consumer could corrupt task acknowledgement, scheduling, or retry behavior; W1.1 is a mandatory gate.
+- Existing Redis/Asynq queue entries cannot be consumed by the new Streams worker and require a deployment migration action.
 - `backend/main.go` currently executes only `001_init.sql`, so adding a migration without upgrading the runner would silently omit leases in existing databases.
 - The worker configuration currently substitutes environment variables but has no secret-redaction or connection validation logic; tests must ensure credentials never appear in logs/errors.
 - This milestone intentionally cannot produce output. Deploying it before media/CV/render work will change jobs from indefinitely queued to safe terminal `model_unavailable` failures.

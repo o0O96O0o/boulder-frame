@@ -9,4 +9,4 @@ The worker is a Python 3.12 process responsible for media validation, CV measure
 
 ## Current Status
 
-Implemented primitives include FFprobe validation, target coordinate mapping, ROI geometry, deterministic crop planning, state/lease semantics, and structured worker errors. The CLI currently exposes `--check` and an explicit idle `--serve` mode. Redis/asynq consumption, PostgreSQL/S3 adapters, detector/pose models, and full render orchestration are pending.
+Implemented control-plane components include Redis Streams consumption, PostgreSQL-backed claims/leases, pending-delivery recovery, and terminal acknowledgement, alongside FFprobe validation, target coordinate mapping, ROI geometry, deterministic crop planning, state/lease semantics, and structured worker errors. The CLI exposes `--check` and `--serve`. Detector/pose models, source/object storage, and full render orchestration remain unavailable; the current pipeline records terminal `model_unavailable` after claiming and validating a job.

@@ -28,7 +28,7 @@ Update the focused documentation and its index whenever an implementation decisi
 ## Architecture Rules
 
 - The Vite/React/TypeScript web app handles upload UI, athlete selection, job status, and download only.
-- The Go API owns validation, PostgreSQL metadata, signed object-store URLs, and Redis/`asynq` job dispatch.
+- The Go API owns validation, PostgreSQL metadata, signed object-store URLs, and Redis Streams job dispatch.
 - The Python worker owns MediaPipe/ONNX/OpenCV CV work, tracking, crop planning, and FFmpeg rendering.
 - Store video assets in S3-compatible object storage, not PostgreSQL or local service filesystems.
 - Keep immutable job configuration, pipeline version, model version, state, progress, and errors in PostgreSQL.

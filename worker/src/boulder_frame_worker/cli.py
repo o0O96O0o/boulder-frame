@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-import time
+import signal
 from collections.abc import Sequence
 
 from .config import ConfigError, WorkerConfig
 from .logging import configure_logging
+from .runtime import RuntimeUnavailable, compose_runtime
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
@@ -37,6 +38,20 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "queue_adapter": False,
         "database_adapter": False,
     }
+    runtime = None
+    if options.check or options.serve:
+        try:
+            runtime = compose_runtime(config)
+            runtime.ready()
+        except (ConfigError, RuntimeUnavailable) as error:
+            if options.serve:
+                print(f"Worker is unavailable: {error}", flush=True)
+                return 2
+        else:
+            capabilities.update(
+                queue_adapter=runtime.capabilities.queue_adapter,
+                database_adapter=runtime.capabilities.database_adapter,
+            )
     print(
         json.dumps(
             {"pipeline_version": config.pipeline_version, "capabilities": capabilities},
@@ -57,12 +72,21 @@ def main(arguments: Sequence[str] | None = None) -> int:
         },
     )
     if options.serve:
-        print("Queue/database adapter is not configured; worker is idle.", flush=True)
+        assert runtime is not None
+        previous_handlers = {
+            signal.SIGINT: signal.signal(signal.SIGINT, lambda *_: runtime.stop.set()),
+            signal.SIGTERM: signal.signal(signal.SIGTERM, lambda *_: runtime.stop.set()),
+        }
         try:
-            while True:
-                time.sleep(3600)
+            runtime.serve()
         except KeyboardInterrupt:
             return 0
+        finally:
+            for signal_number, handler in previous_handlers.items():
+                signal.signal(signal_number, handler)
+            runtime.close()
+    elif runtime is not None:
+        runtime.close()
     if not options.check:
         print("No queue/database adapter is configured; no jobs were consumed.")
     return 0

@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,7 +48,7 @@ func main() {
 		logger.Error("storage unavailable", "error", err)
 		os.Exit(1)
 	}
-	publisher, err := queue.NewAsynqPublisher(cfg.RedisURL, logger)
+	publisher, err := queue.NewRedisStreamsPublisher(cfg.RedisURL, logger)
 	if err != nil {
 		logger.Error("redis configuration invalid", "error", err)
 		os.Exit(1)
@@ -91,7 +94,7 @@ func hasArgument(args []string, expected string) bool {
 }
 
 func migrate(ctx context.Context, databaseURL string) error {
-	sqlBytes, err := os.ReadFile("migrations/001_init.sql")
+	paths, err := migrationPaths("migrations")
 	if err != nil {
 		return err
 	}
@@ -103,6 +106,63 @@ func migrate(ctx context.Context, databaseURL string) error {
 	if err := pool.Ping(ctx); err != nil {
 		return err
 	}
-	_, err = pool.Exec(ctx, string(sqlBytes))
-	return err
+	_, err = pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version text PRIMARY KEY,
+		applied_at timestamptz NOT NULL DEFAULT now()
+	)`)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if err := applyMigration(ctx, pool, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrationPaths(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		paths = append(paths, filepath.Join(dir, entry.Name()))
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func applyMigration(ctx context.Context, pool *pgxpool.Pool, path string) error {
+	sqlBytes, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	version := filepath.Base(path)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('boulder-frame-schema-migrations', 0))`); err != nil {
+		return err
+	}
+	var applied bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version=$1)`, version).Scan(&applied); err != nil {
+		return err
+	}
+	if applied {
+		return tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, string(sqlBytes)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

@@ -7,33 +7,55 @@ import (
 	"log/slog"
 
 	"github.com/boulder-frame/backend/trace"
-	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
 )
 
-const TaskProcessJob = "job.process"
+// These names are the language-neutral Go/Python Redis Streams contract.
+const (
+	// JobStream is the stream written by the Go API and read by Python.
+	JobStream = "boulder-frame:jobs"
+	// JobConsumerGroup is the shared Python consumer-group name.
+	JobConsumerGroup = "boulder-frame:job-processors"
+	TaskProcessJob   = "job.process"
+
+	StreamFieldType    = "type"
+	StreamFieldTaskID  = "task_id"
+	StreamFieldPayload = "payload"
+)
 
 type Publisher interface {
 	Publish(context.Context, string) error
 }
-type AsynqPublisher struct {
-	client *asynq.Client
+
+type RedisStreamsPublisher struct {
+	client *redis.Client
 	logger *slog.Logger
 }
 
-func NewAsynqPublisher(redisURL string, loggers ...*slog.Logger) (*AsynqPublisher, error) {
-	opt, err := asynq.ParseRedisURI(redisURL)
+func NewRedisStreamsPublisher(redisURL string, loggers ...*slog.Logger) (*RedisStreamsPublisher, error) {
+	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
 		return nil, err
+	}
+	if opt.Addr == "" {
+		return nil, errors.New("redis URL must include a host")
 	}
 	var logger *slog.Logger
 	if len(loggers) > 0 {
 		logger = loggers[0]
 	}
-	return &AsynqPublisher{client: asynq.NewClient(opt), logger: logger}, nil
+	return &RedisStreamsPublisher{client: redis.NewClient(opt), logger: logger}, nil
 }
-func (p *AsynqPublisher) Publish(ctx context.Context, jobID string) error {
+
+func (p *RedisStreamsPublisher) Publish(ctx context.Context, jobID string) error {
+	if jobID == "" {
+		return errors.New("job ID is required")
+	}
 	traceID := trace.ID(ctx)
-	payload := map[string]string{"job_id": jobID, "trace_id": traceID}
+	payload := struct {
+		JobID   string `json:"job_id"`
+		TraceID string `json:"trace_id"`
+	}{JobID: jobID, TraceID: traceID}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		if p.logger != nil {
@@ -44,13 +66,45 @@ func (p *AsynqPublisher) Publish(ctx context.Context, jobID string) error {
 	if p.logger != nil {
 		p.logger.Info("queue request", "trace-id", traceID, "request_body", payload)
 	}
-	_, err = p.client.EnqueueContext(ctx, asynq.NewTask(TaskProcessJob, body), asynq.TaskID(jobID), asynq.Queue("default"))
-	if errors.Is(err, asynq.ErrTaskIDConflict) {
-		err = nil
-	}
+	// Redis Streams have no native task ID uniqueness. WATCH reserves a stable
+	// per-job key and XADDs the entry in the same transaction, making retries
+	// and concurrent API requests idempotent for this publisher.
+	indexKey := JobStream + ":task:" + jobID
+	var streamID string
+	err = p.client.Watch(ctx, func(tx *redis.Tx) error {
+		_, getErr := tx.Get(ctx, indexKey).Result()
+		if getErr == nil {
+			return nil
+		}
+		if !errors.Is(getErr, redis.Nil) {
+			return getErr
+		}
+		commands, txErr := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			streamCommand := pipe.XAdd(ctx, &redis.XAddArgs{
+				Stream: JobStream,
+				Values: map[string]any{
+					StreamFieldType:    TaskProcessJob,
+					StreamFieldTaskID:  jobID,
+					StreamFieldPayload: string(body),
+				},
+			})
+			pipe.Set(ctx, indexKey, jobID, 0)
+			_ = streamCommand
+			return nil
+		})
+		if txErr != nil {
+			return txErr
+		}
+		if len(commands) == 0 {
+			return errors.New("redis publish transaction returned no commands")
+		}
+		streamID, _ = commands[0].(*redis.StringCmd).Result()
+		return nil
+	}, indexKey)
 	if p.logger != nil {
-		p.logger.LogAttrs(ctx, slog.LevelInfo, "queue response", slog.String("trace-id", traceID), slog.Any("response_body", map[string]any{"accepted": err == nil, "job_id": jobID}))
+		p.logger.LogAttrs(ctx, slog.LevelInfo, "queue response", slog.String("trace-id", traceID), slog.Any("response_body", map[string]any{"accepted": err == nil, "job_id": jobID, "stream_id": streamID}))
 	}
 	return err
 }
-func (p *AsynqPublisher) Close() error { return p.client.Close() }
+
+func (p *RedisStreamsPublisher) Close() error { return p.client.Close() }

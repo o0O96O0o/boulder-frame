@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -54,3 +55,33 @@ def test_worker_leaves_transient_error_for_queue_retry(tmp_path: Path) -> None:
 
     assert raised.value.transient
     assert repository.get(task.job_id).state is JobState.VALIDATING
+    assert repository.get(task.job_id).lease_owner is None
+
+
+def test_worker_heartbeats_database_lease_during_a_stage(tmp_path: Path) -> None:
+    class HeartbeatRepository(InMemoryJobRepository):
+        def __init__(self, records: list[JobRecord]) -> None:
+            super().__init__(records)
+            self.renewals = 0
+
+        def renew(self, job_id, worker_id, lease_seconds):
+            self.renewals += 1
+            return super().renew(job_id, worker_id, lease_seconds)
+
+    record = JobRecord(id=uuid4())
+    repository = HeartbeatRepository([record])
+    config = WorkerConfig(
+        "test",
+        "unconfigured",
+        tmp_path,
+        lease_seconds=2,
+        heartbeat_seconds=1,
+    )
+    worker = Worker(config, repository, worker_id="worker")
+    task = JobTask(record.id, "00000000-0000-0000-0000-000000000042")
+
+    def slow_stage(record: JobRecord, scratch: Path) -> None:
+        time.sleep(1.05)
+
+    assert worker.process(task, slow_stage, no_op, no_op, no_op)
+    assert repository.renewals >= 1

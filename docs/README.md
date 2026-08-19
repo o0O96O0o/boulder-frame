@@ -11,7 +11,7 @@
 
 ## References
 
-- [Asynq](ref/asynq/SOURCE.md): pinned upstream library and CLI usage reference for the Go task queue used by the API.
+- [Asynq Historical Reference](ref/asynq/SOURCE.md): copied upstream material retained for historical research; it is not the active API/worker queue implementation.
 - [Tailwind Plus UI Blocks](ref/tailwind/README.md): setup, integration, asset, and licensing notes for future frontend work.
 
 ## Component Specifications
