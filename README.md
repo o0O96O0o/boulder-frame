@@ -6,4 +6,4 @@ The first product is an offline, single-athlete reframing service. The approved 
 
 ## Status
 
-The frontend, Go API, and worker foundation are implemented. Detailed component specifications are indexed in [docs/specs/README.md](docs/specs/README.md). The Python worker's queue, database, storage, model, and full render adapters remain to be implemented before end-to-end processing is active.
+The frontend, Go API, worker foundation, and Docker Compose module startup are implemented. Detailed component specifications are indexed in [docs/specs/README.md](docs/specs/README.md). PostgreSQL, Redis, and object storage remain external dependencies; the Python worker's queue, database, storage, model, and full render adapters remain to be implemented before end-to-end processing is active.

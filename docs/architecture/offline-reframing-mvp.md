@@ -97,6 +97,7 @@ flowchart LR
 | Media | FFmpeg, OpenCV | FFmpeg handles decode, encode, audio, and validation; OpenCV is limited to frame-level utilities. |
 | First planner | Deterministic target-crop controller | Fast to validate visually and isolated behind a planner interface. |
 | Planned optimizer | CVXPY and OSQP | Replaces the controller only after evaluation data justifies a whole-shot constrained quadratic program. |
+| Module startup | Docker Compose | Starts the frontend, Go API, and Python worker; PostgreSQL, Redis, and object storage are external dependencies. |
 
 ## Service Boundaries
 
@@ -351,7 +352,7 @@ Track these measures per job and profile:
 
 ## Delivery Order
 
-1. Scaffold the Vite/React app, Go API, Python worker, database migrations, and object-store integration.
+1. Scaffold the Vite/React app, Go API, Python worker, Docker Compose module startup, database migrations, and object-store integration.
 2. Implement assets, signed uploads, project/job resources, immutable configuration, `asynq` dispatch, and job status polling.
 3. Implement source validation and a fixture-only FFmpeg render path end to end.
 4. Add initial target selection, detector association, pose ROI transformation, Kalman tracking, and confidence/lost-track states.

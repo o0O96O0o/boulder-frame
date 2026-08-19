@@ -6,7 +6,8 @@ These documents describe how the current implementation is structured at compone
 docs/specs/
 ├── backend/     Go API, persistence, signed storage URLs, and asynq dispatch
 ├── worker/      Python worker runtime, media primitives, tracking, and planner
-└── frontend/    Vite/React workflow and browser/API integration
+├── frontend/    Vite/React workflow and browser/API integration
+└── deploy/      Docker Compose startup for repository modules
 ```
 
 The product boundary and algorithm contract remain authoritative in [../architecture/offline-reframing-mvp.md](../architecture/offline-reframing-mvp.md). The implementation sequence is in [../architecture/service-implementation-plan.md](../architecture/service-implementation-plan.md).
@@ -16,6 +17,7 @@ The product boundary and algorithm contract remain authoritative in [../architec
 - [Backend](backend/README.md): Go process, API resources, PostgreSQL persistence, S3 URLs, and Redis/`asynq` task distribution.
 - [Worker](worker/README.md): Python runtime, job state machine, media validation, measurement interfaces, and deterministic planner.
 - [Frontend](frontend/README.md): Browser workflow, direct upload, target selection, polling, and download.
+- [Compose](deploy/README.md): module container startup and external dependency configuration.
 
 ## Cross-Service Flow
 

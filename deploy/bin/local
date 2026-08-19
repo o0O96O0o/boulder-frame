@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+
+compose() {
+  docker compose --env-file .env -f docker-compose.yml "$@"
+}
+
+case "${1:-}" in
+  start) compose up --build ;;
+  start-detached) compose up --build -d ;;
+  migrate) compose run --rm backend migrate up ;;
+  status) compose ps ;;
+  logs) shift; compose logs -f "$@" ;;
+  stop) exec compose down ;;
+  *)
+    echo "usage: $0 {start|start-detached|migrate|status|logs|stop}" >&2
+    exit 64
+    ;;
+esac

@@ -10,6 +10,7 @@ The product should feel like an anticipating camera operator, not a basic auto-c
 
 - `docs/architecture/offline-reframing-mvp.md` is the implementation contract and contains the product rationale and algorithm decisions for the approved MVP.
 - `docs/architecture/service-implementation-plan.md` defines the service-by-service implementation sequence, interfaces, dependencies, and verification gates.
+- `docs/dev/development.md` defines Docker Compose startup for repository modules and external dependency configuration.
 - `docs/specs/README.md` indexes detailed root-to-submodule implementation specifications.
 - `docs/README.md` indexes project documentation.
 

@@ -2,13 +2,13 @@
 
 ## Goal
 
-Implement the offline Boulder Frame MVP as independently testable browser frontend, Go API, and Python processing worker services, using PostgreSQL, Redis, and S3-compatible object storage through application contracts.
+Implement the offline Boulder Frame MVP as independently testable browser frontend, Go API, and Python processing worker services, with Docker Compose startup for those modules. PostgreSQL, Redis, and S3-compatible object storage remain external application dependencies.
 
 This plan turns [offline-reframing-mvp.md](offline-reframing-mvp.md) into an executable implementation sequence. It does not expand the MVP to real-time processing, native capture, multi-athlete tracking, equipment detection, super-resolution, or variable-frame-rate input.
 
 ## Implementation Status
 
-The repository now contains a tested foundation for the frontend, Go API, and worker planning/media primitives. The Python worker process is currently an explicit idle service because the Redis/`asynq`, PostgreSQL, object-storage, detector, pose, and render orchestration adapters are not yet implemented. Jobs can be created and queued by the API, but processing does not complete until those worker adapters are added.
+The repository now contains a tested foundation for the frontend, Go API, worker planning/media primitives, and Docker Compose module startup. The Python worker process is currently an explicit idle service because the Redis/`asynq`, PostgreSQL, object-storage, detector, pose, and render orchestration adapters are not yet implemented. Jobs can be created and queued by the API, but processing does not complete until those worker adapters are added.
 
 Implemented baseline interfaces include:
 
@@ -29,11 +29,11 @@ Implemented baseline interfaces include:
       - Implementation/reuse: Make PostgreSQL/API JSON names authoritative. Keep job configuration immutable JSON containing source asset ID, normalized target selection, output settings, pipeline version, model version, and planner configuration. Generate OpenAPI or equivalent API types only after the JSON contract is fixed; do not duplicate independently maintained enums.
       - Verification: Contract tests reject unknown enum values and confirm JSON serialization for every documented resource and terminal error shape.
     - **S0.2 Scaffold repository modules and service boundaries.**
-      - Outcome: `frontend/`, `backend/`, `worker/`, and `tests/` each have an explicit build/test entrypoint without one service importing another service's private code.
+      - Outcome: `frontend/`, `backend/`, `worker/`, `deploy/`, and `tests/` each have an explicit build/test entrypoint without one service importing another service's private code.
       - Ownership: Platform owner.
       - Dependencies: S0.1.
       - Implementation/reuse: Use Vite/React/TypeScript, Go with `chi` and `pgx`, and Python 3.12. Pin runtime and dependency versions. Keep shared behavior at HTTP, database, object-storage, and queue contracts rather than adding a shared-language package prematurely.
-      - Verification: Backend, worker, and frontend smoke commands run independently.
+      - Verification: Backend, worker, and frontend smoke commands run independently; Compose starts the three repository modules without provisioning external dependencies.
     - **S0.3 Establish fixture and evaluation manifests.**
       - Outcome: Tests can refer to permitted synthetic/licensed media without storing private videos in the repository.
       - Ownership: QA/CV owner.
@@ -209,6 +209,7 @@ flowchart LR
 - `frontend/*`: Vite/React/TypeScript application and browser tests.
 - `backend/*`: Go API, migrations, repositories, queue dispatch, and API tests.
 - `worker/*`: Python worker, media/CV/planner pipeline, and worker tests.
+- `docker-compose.yml` and `deploy/docker/*`: Docker Compose startup and module images; external dependencies are not provisioned here.
 - `tests/fixtures/*`: Permitted small media fixtures and expected metadata.
 - `tests/evaluation/*`: Evaluation manifests, annotations, and metric expectations.
 
