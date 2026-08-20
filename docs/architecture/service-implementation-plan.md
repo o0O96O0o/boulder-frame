@@ -8,7 +8,7 @@ This plan turns [offline-reframing-mvp.md](offline-reframing-mvp.md) into an exe
 
 ## Implementation Status
 
-The repository contains a tested frontend/API foundation, worker planning/media primitives, Docker Compose module startup, Redis Streams dispatch/consumption, and PostgreSQL worker leases. The connected worker currently has an intentional pipeline boundary: after it claims a queued job it records `model_unavailable`, because detector, pose, object-storage, and render orchestration are not implemented. This is a terminal, acknowledged failure, not an idle worker or a successful render.
+The repository contains a tested frontend/API foundation, worker planning/media primitives, Docker Compose module startup, Redis Streams dispatch/consumption, PostgreSQL worker leases, and a connected four-stage worker pipeline. The worker downloads and validates the source, analyzes/tracks/plans, renders and validates FFmpeg output, uploads and heads a deterministic object key, finalizes the output artifact under its lease, and only then completes/acknowledges. W0.1 pins an Apache-2.0-compatible ONNX SSD-MobilenetV1 detector and MediaPipe Pose Landmarker Full in the [worker model manifest](../specs/worker/models.md). Their files are neither bundled nor downloaded; a selected runtime verifies local provisioned files and loads the OpenCV reader before startup. The local `unset-until-pinned` sentinel normalizes to the safe `unconfigured` runtime, where matching jobs fail terminally with `model_unavailable`; missing configured baseline artifacts instead prevent worker startup. Before a stage handler or media/CV work runs, a claimed job must have immutable `configuration.model_version` equal to the active worker runtime version.
 
 Implemented baseline interfaces include:
 
@@ -96,8 +96,8 @@ Implemented baseline interfaces include:
       - Outcome: Each analysis frame has root, pose bounds, detector bounds, confidence/covariance, and tracked/reacquiring/lost state.
       - Ownership: CV worker owner.
       - Dependencies: W3.1.
-      - Implementation/reuse: Use a single-target Kalman filter with position, velocity, acceleration, and log scale. Correct with pose/detector measurements, run periodic full-frame correction, use a lightweight appearance signature only for reacquisition, interpolate only short validated gaps, reject robust outliers, and apply forward filtering plus backward smoothing over recorded measurements.
-      - Verification: Tests cover stable tracking, short gaps, occlusion, identity-preserving reacquisition, outliers, low confidence, and unrecoverable loss; no close crop is generated from invented measurements.
+      - Implementation/reuse: Use the current single-target filter with pose/detector measurements, bounded short-gap prediction, robust outlier rejection, and forward/backward smoothing over recorded measurements. Do not claim identity-preserving re-identification in this milestone; a nearby detection can be selected during fallback or reacquisition.
+      - Verification: Tests cover stable tracking, short gaps, occlusion, fallback selection, outliers, low confidence, and unrecoverable loss; no close crop is generated from invented measurements. Identity-preserving reacquisition remains a later model/tracker milestone.
     - **W5.1 Implement movement envelopes and deterministic crop planner.**
       - Outcome: The planner emits source-bounded crop rectangles for every output frame with profile padding, lead room, uncertainty margins, containment controls, and smooth motion.
       - Ownership: CV worker owner.

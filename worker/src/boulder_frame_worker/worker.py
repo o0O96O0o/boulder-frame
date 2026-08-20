@@ -13,6 +13,7 @@ from .config import WorkerConfig
 from .errors import ErrorCode, WorkerError, terminal, transient
 from .logging import configure_logging
 from .protocol import JobTask
+from .queue_adapter import DeliveryAction
 from .state import JobRecord, JobRepository, JobState, fail, transition, utc_now
 
 StageHandler = Callable[[JobRecord, Path], None]
@@ -21,6 +22,8 @@ StageHandler = Callable[[JobRecord, Path], None]
 @contextmanager
 def job_scratch(root: Path, job_id: str, retain: bool) -> Iterator[Path]:
     path = root / job_id
+    # A reclaimed delivery must reconstruct prerequisites, not reuse crash leftovers.
+    shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True, exist_ok=False)
     try:
         yield path
@@ -47,7 +50,7 @@ class Worker:
         analyzing: StageHandler,
         rendering: StageHandler,
         uploading: StageHandler,
-    ) -> bool:
+    ) -> DeliveryAction | bool:
         trace_id = task.trace_id or "unknown"
         request_body = {"job_id": str(task.job_id), "trace_id": trace_id}
         self.logger.info(
@@ -58,15 +61,40 @@ class Worker:
             task.job_id, self.worker_id, self.config.lease_seconds, utc_now()
         )
         if record is None:
+            state = self.repository.current_state(task.job_id)
             self.logger.info(
                 "task response",
                 extra={
                     "trace_id": trace_id,
-                    "response_body": {"claimed": False},
+                    "response_body": {"claimed": False, "state": state.value if state else None},
                     "job_id": str(task.job_id),
                 },
             )
+            if state is None or state in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}:
+                return DeliveryAction.ACK
             return False
+        if (
+            record.configuration is not None
+            and record.configuration.model_version != self.config.model_version
+        ):
+            if record.state is JobState.QUEUED:
+                record = transition(record, JobState.VALIDATING, 10)
+                self.repository.update(record)
+            error = terminal(
+                ErrorCode.MODEL_UNAVAILABLE,
+                "This job requires a different model version than this worker provides.",
+            )
+            self.repository.update(fail(record, error))
+            self.logger.info(
+                "task response",
+                extra={
+                    "trace_id": trace_id,
+                    "response_body": {"state": "failed"},
+                    "job_id": str(task.job_id),
+                    "error_code": error.code.value,
+                },
+            )
+            return True
         heartbeat_stop = Event()
         heartbeat_failure: list[Exception] = []
 

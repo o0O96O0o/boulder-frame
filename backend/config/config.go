@@ -27,6 +27,11 @@ type Config struct {
 	DevelopmentOwner  string
 }
 
+const (
+	localEnvUnconfiguredModelVersion = "unset-until-pinned"
+	unconfiguredModelVersion         = "unconfigured"
+)
+
 func Load(paths ...string) (Config, error) {
 	path := "conf/config.json"
 	if len(paths) > 0 && paths[0] != "" {
@@ -66,6 +71,9 @@ func Load(paths ...string) (Config, error) {
 		S3SecretKey: raw.S3SecretKey, S3UsePathStyle: raw.S3UsePathStyle,
 		PipelineVersion: raw.PipelineVersion, ModelVersion: raw.ModelVersion,
 		DevelopmentOwner: raw.DevelopmentOwner,
+	}
+	if c.ModelVersion == localEnvUnconfiguredModelVersion {
+		c.ModelVersion = unconfiguredModelVersion
 	}
 	if c.HTTPAddr == "" {
 		c.HTTPAddr = ":8080"

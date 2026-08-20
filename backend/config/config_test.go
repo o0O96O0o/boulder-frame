@@ -24,6 +24,17 @@ func TestLoadParsesOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadNormalizesLocalEnvUnconfiguredModelSentinel(t *testing.T) {
+	path := writeConfig(t, `{"database_url":"postgres://localhost/db","redis_url":"redis://localhost:6379","s3_endpoint":"http://localhost:9000","s3_presign_endpoint":"http://localhost:9000","s3_region":"us-east-1","s3_bucket":"boulder-frame","s3_access_key":"key","s3_secret_key":"secret","signed_url_ttl":"2m","max_upload_bytes":1234,"model_version":"unset-until-pinned"}`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ModelVersion != "unconfigured" {
+		t.Fatalf("ModelVersion = %q, want unconfigured", c.ModelVersion)
+	}
+}
+
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")

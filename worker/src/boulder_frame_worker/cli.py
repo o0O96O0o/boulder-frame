@@ -37,6 +37,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "pose_estimator": False,
         "queue_adapter": False,
         "database_adapter": False,
+        "storage_adapter": False,
     }
     runtime = None
     if options.check or options.serve:
@@ -51,6 +52,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             capabilities.update(
                 queue_adapter=runtime.capabilities.queue_adapter,
                 database_adapter=runtime.capabilities.database_adapter,
+                storage_adapter=runtime.capabilities.storage_adapter,
             )
     print(
         json.dumps(

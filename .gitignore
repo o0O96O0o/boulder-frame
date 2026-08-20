@@ -11,6 +11,8 @@ worker/.ruff_cache/
 worker/build/
 worker/src/*.egg-info/
 worker/.venv/
+worker/models/*.onnx
+worker/models/*.task
 
 backend/bin/
 

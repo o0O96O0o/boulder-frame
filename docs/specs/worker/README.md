@@ -5,8 +5,9 @@ The worker is a Python 3.12 process responsible for media validation, CV measure
 ## Documents
 
 - [Runtime and Pipeline](runtime-and-pipeline.md): configuration, task boundary, media validation, and current adapter status.
+- [Model Manifest](models.md): pinned detector and pose artifacts, licenses, checksums, runtime contracts, and operator provisioning.
 - [Measurements and Planner](measurements-and-planner.md): target association, coordinate systems, tracking interfaces, crop geometry, profiles, and fallback behavior.
 
 ## Current Status
 
-Implemented control-plane components include Redis Streams consumption, PostgreSQL-backed claims/leases, pending-delivery recovery, and terminal acknowledgement, alongside FFprobe validation, target coordinate mapping, ROI geometry, deterministic crop planning, state/lease semantics, and structured worker errors. The CLI exposes `--check` and `--serve`. Detector/pose models, source/object storage, and full render orchestration remain unavailable; the current pipeline records terminal `model_unavailable` after claiming and validating a job.
+Implemented worker components include Redis Streams consumption, PostgreSQL-backed claims/leases, pending-delivery recovery, and terminal acknowledgement, alongside source download, FFprobe validation, target coordinate mapping, ROI geometry, injectable raw observations, single-target tracking, deterministic crop planning, FFmpeg rendering/validation, deterministic upload/head, lease-guarded output finalization, state/lease semantics, and structured worker errors. The CLI exposes `--check` and `--serve`. The checked-in model manifest selects an ONNX SSD-MobilenetV1 detector and MediaPipe Pose Landmarker Full; after those exact local files verify and load, OpenCV streams rotation-normalized BGR CFR frames into analysis. No external weights are bundled or downloaded. The local `unset-until-pinned` sentinel is the safe `unconfigured` runtime state, where matching jobs fail with `model_unavailable`; configured W0.1 with missing artifacts fails startup, and provisioned W0.1 rejects immutable job model-version mismatches before stage handlers run.

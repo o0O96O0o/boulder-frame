@@ -91,7 +91,7 @@ flowchart LR
 | Metadata | PostgreSQL | Stores projects, jobs, configurations, asset references, status, and errors. |
 | Video assets | S3-compatible object storage | Original 4K files, rendered MP4s, and optional debug artifacts stay outside service filesystems. |
 | CV/render worker | Python 3.12 | Required ecosystem for MediaPipe, ONNX Runtime, OpenCV, numerical processing, and the later optimizer. |
-| Detection | Apache-2.0-compatible person detector through ONNX Runtime | Exact model remains a benchmark decision based on license, small-subject recall, and target hardware performance. |
+| Detection | ONNX SSD-MobilenetV1-12 through ONNX Runtime | W0.1 pinned artifact, license, checksum, and tensor contract are documented in the worker model manifest; future replacement requires a new immutable model version. |
 | Pose | MediaPipe Pose Landmarker Full | Returns body landmarks required for a pose-aware movement envelope. |
 | Tracking | Custom single-target Kalman filter | A selected-athlete MVP needs transparent tracking and confidence behavior, not a multi-object tracker. |
 | Media | FFmpeg, OpenCV | FFmpeg handles decode, encode, audio, and validation; OpenCV is limited to frame-level utilities. |
@@ -350,7 +350,8 @@ Track these measures per job and profile:
 - Keep API and worker independently deployable and scalable; GPU workers are optional until benchmarked detection/pose/render workload requires them.
 - Do not place long-running media work in the Go API process.
 - Redis Streams is transport, not processing authority: a worker may acknowledge a stream entry only after PostgreSQL records the terminal result. Pending entries are recovered by the consumer group; PostgreSQL leases prevent duplicate active processing.
-- The current connected worker intentionally has no detector/pose/render pipeline. It records `model_unavailable` after validation begins and acknowledges that terminal failure rather than claiming successful media processing.
+- `configuration.model_version` is immutable and must equal the active verified worker runtime version before a stage handler or any media/CV work runs; a mismatch is a terminal `model_unavailable` failure.
+- Local `MODEL_VERSION=unset-until-pinned` is normalized to the safe `unconfigured` state, where matching jobs fail terminally with `model_unavailable`. Configuring W0.1 without all verified local artifacts or required decoder dependencies is a startup failure; a provisioned W0.1 worker may process matching jobs.
 
 ## Delivery Order
 

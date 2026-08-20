@@ -6,7 +6,14 @@ from uuid import uuid4
 
 import pytest
 
-from boulder_frame_worker.repository import LeaseLostError, PostgresJobRepository, _record_from_row
+from boulder_frame_worker.repository import (
+    LeaseLostError,
+    OutputAsset,
+    OutputNotValidatedError,
+    PostgresJobRepository,
+    _record_from_row,
+    output_storage_key,
+)
 from boulder_frame_worker.state import JobStage, JobState
 
 
@@ -140,6 +147,48 @@ def test_release_clears_a_live_worker_lease() -> None:
     query, params = cursor.calls[0]
     assert "lease_owner = NULL" in query
     assert params[1] == "worker-a"
+
+
+def test_finalize_output_requires_validated_media_metadata() -> None:
+    with pytest.raises(OutputNotValidatedError, match="size"):
+        OutputAsset(0, "video/mp4", 1920, 1080, 30.0, 1000)
+    with pytest.raises(OutputNotValidatedError, match="video/mp4"):
+        OutputAsset(1, "video/quicktime", 1920, 1080, 30.0, 1000)
+
+
+def test_finalize_output_links_deterministic_asset_and_unique_artifact() -> None:
+    asset_id = uuid4()
+    cursor = FakeCursor([(asset_id,)])
+    repo, connection = repository(cursor)
+    record = _record_from_row(_row("uploading", "uploading", "worker-a"))
+    assert record.source_asset is not None
+
+    result = repo.finalize_output(record, OutputAsset(123, "video/mp4", 1920, 1080, 30.0, 1000))
+
+    query, params = cursor.calls[0]
+    assert result == asset_id
+    assert "lease_owner = %s" in query
+    assert "lease_expires_at > now()" in query
+    assert "ON CONFLICT (storage_key) DO UPDATE" in query
+    assert "ON CONFLICT (job_id, kind) DO UPDATE" in query
+    assert params[3] == output_storage_key(record.source_asset.project_id, record.id)
+    assert connection.committed and connection.closed
+
+
+def test_finalize_output_rejects_stale_lease_without_writing_asset() -> None:
+    cursor = FakeCursor([None])
+    repo, _ = repository(cursor)
+    record = _record_from_row(_row("uploading", "uploading", "worker-a"))
+
+    with pytest.raises(LeaseLostError):
+        repo.finalize_output(record, OutputAsset(123, "video/mp4", 1920, 1080, 30.0, 1000))
+
+
+def test_output_storage_key_is_deterministic_per_project_and_job() -> None:
+    project_id = uuid4()
+    job_id = uuid4()
+
+    assert output_storage_key(project_id, job_id) == f"private/output/{project_id}/{job_id}.mp4"
 
 
 def _row(state: str, stage: str, owner: str) -> tuple[object, ...]:

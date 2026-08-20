@@ -7,7 +7,8 @@ import pytest
 from boulder_frame_worker.config import WorkerConfig
 from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal, transient
 from boulder_frame_worker.protocol import JobTask
-from boulder_frame_worker.state import InMemoryJobRepository, JobRecord, JobState
+from boulder_frame_worker.queue_adapter import DeliveryAction
+from boulder_frame_worker.state import InMemoryJobRepository, JobConfiguration, JobRecord, JobState
 from boulder_frame_worker.worker import Worker
 
 
@@ -28,7 +29,16 @@ def test_worker_completes_and_removes_job_scratch(tmp_path: Path) -> None:
     assert worker.process(task, no_op, no_op, no_op, no_op)
     assert repository.get(task.job_id).state is JobState.COMPLETED
     assert not (tmp_path / str(task.job_id)).exists()
-    assert not worker.process(task, no_op, no_op, no_op, no_op)
+    assert worker.process(task, no_op, no_op, no_op, no_op) is DeliveryAction.ACK
+
+
+def test_worker_acknowledges_duplicate_missing_or_terminal_delivery(tmp_path: Path) -> None:
+    worker, repository, task = worker_for(tmp_path)
+
+    assert worker.process(task, no_op, no_op, no_op, no_op)
+    assert worker.process(task, no_op, no_op, no_op, no_op) is DeliveryAction.ACK
+    del repository.records[task.job_id]
+    assert worker.process(task, no_op, no_op, no_op, no_op) is DeliveryAction.ACK
 
 
 def test_worker_records_terminal_stage_error(tmp_path: Path) -> None:
@@ -44,6 +54,57 @@ def test_worker_records_terminal_stage_error(tmp_path: Path) -> None:
     assert record.error.code is ErrorCode.INVALID_MEDIA
 
 
+def test_worker_rejects_a_job_with_a_different_immutable_model_version(tmp_path: Path) -> None:
+    record = JobRecord(
+        id=uuid4(),
+        configuration=JobConfiguration(
+            uuid4(),
+            {},
+            {},
+            "test",
+            "another-model",
+            {},
+        ),
+    )
+    repository = InMemoryJobRepository([record])
+    worker = Worker(WorkerConfig("test", "active-model", tmp_path), repository, worker_id="worker")
+    task = JobTask(record.id, "00000000-0000-0000-0000-000000000042")
+    invoked: list[JobState] = []
+
+    def unexpected_stage(record: JobRecord, scratch: Path) -> None:
+        del scratch
+        invoked.append(record.state)
+
+    assert worker.process(
+        task, unexpected_stage, unexpected_stage, unexpected_stage, unexpected_stage
+    )
+    failed = repository.get(task.job_id)
+    assert failed.state is JobState.FAILED
+    assert failed.error is not None and failed.error.code is ErrorCode.MODEL_UNAVAILABLE
+    assert invoked == []
+
+
+@pytest.mark.parametrize("stage", ["analyzing", "rendering", "uploading"])
+def test_worker_records_terminal_error_from_each_later_stage(tmp_path: Path, stage: str) -> None:
+    worker, repository, task = worker_for(tmp_path)
+
+    def failed_stage(record: JobRecord, scratch: Path) -> None:
+        raise terminal(ErrorCode.INVALID_OUTPUT, "bad output")
+
+    handlers = {
+        "validating": no_op,
+        "analyzing": no_op,
+        "rendering": no_op,
+        "uploading": no_op,
+    }
+    handlers[stage] = failed_stage
+
+    assert worker.process(task, **handlers)
+    record = repository.get(task.job_id)
+    assert record.state is JobState.FAILED
+    assert record.error is not None and record.error.code is ErrorCode.INVALID_OUTPUT
+
+
 def test_worker_leaves_transient_error_for_queue_retry(tmp_path: Path) -> None:
     worker, repository, task = worker_for(tmp_path)
 
@@ -56,6 +117,18 @@ def test_worker_leaves_transient_error_for_queue_retry(tmp_path: Path) -> None:
     assert raised.value.transient
     assert repository.get(task.job_id).state is JobState.VALIDATING
     assert repository.get(task.job_id).lease_owner is None
+
+
+def test_worker_reclaims_stale_scratch_before_retry(tmp_path: Path) -> None:
+    worker, repository, task = worker_for(tmp_path)
+    stale = tmp_path / str(task.job_id)
+    stale.mkdir()
+    (stale / "partial-output").write_text("stale")
+
+    assert worker.process(task, no_op, no_op, no_op, no_op)
+
+    assert repository.get(task.job_id).state is JobState.COMPLETED
+    assert not stale.exists()
 
 
 def test_worker_heartbeats_database_lease_during_a_stage(tmp_path: Path) -> None:

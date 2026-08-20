@@ -72,14 +72,16 @@ the PostgreSQL job row remains the source of truth if the stream and database te
 2. Parse a payload with exactly `job_id` and `trace_id` fields, and require `task_id == job_id`.
 3. Load the job and source asset from PostgreSQL.
 4. Atomically claim an eligible PostgreSQL job lease. A pending Stream entry alone never authorizes processing.
-5. Heartbeat the active Stream delivery with `XCLAIM` and renew the PostgreSQL lease while processing.
-6. Persist monotonic progress and terminal state using lease-guarded writes.
-7. Acknowledge with `XACK` only after PostgreSQL records a terminal state. For a transient failure, release the database lease and leave the entry pending for recovery.
+5. Compare immutable `configuration.model_version` with the worker's active runtime model version. A mismatch is a terminal `model_unavailable` failure before any stage handler or media/CV work runs.
+6. Heartbeat the active Stream delivery with `XCLAIM` and renew the PostgreSQL lease while processing.
+7. Persist monotonic progress and terminal state using lease-guarded writes.
+8. Acknowledge with `XACK` only after PostgreSQL records a terminal state. For a transient failure, release the database lease and leave the entry pending for recovery.
 
-The connected worker currently exercises this control plane but intentionally has no detector/pose/render
-pipeline. A claimed job transitions `queued -> validating -> failed` with error code
-`model_unavailable`, then receives `XACK`. It does not create scratch/output artifacts or report a
-completed render.
+`MODEL_VERSION=unset-until-pinned` in the local environment is normalized to `unconfigured` by both
+services. That intentional safe state starts the worker and lets a matching job reach terminal
+`model_unavailable`. The W0.1 baseline starts only after its configured local artifacts and decoder
+dependencies verify/load; missing or invalid configured artifacts prevent consumption by failing worker
+startup. A provisioned baseline can process only jobs whose immutable model version matches it.
 
 ## Retry and Idempotency Rules
 

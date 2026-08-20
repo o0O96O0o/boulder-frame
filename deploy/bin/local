@@ -14,7 +14,7 @@ case "${1:-}" in
   migrate) compose run --rm backend migrate up ;;
   status) compose ps ;;
   logs) shift; compose logs -f "$@" ;;
-  stop) exec compose down ;;
+  stop) compose down ;;
   *)
     echo "usage: $0 {start|start-detached|migrate|status|logs|stop}" >&2
     exit 64

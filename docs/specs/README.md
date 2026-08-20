@@ -38,4 +38,4 @@ flowchart LR
 
 ## Current Boundary
 
-The Go API, frontend workflow, Redis Streams transport, and PostgreSQL-backed worker lease boundary are implemented. The worker consumes and claims jobs, but the media/CV pipeline is intentionally unavailable: claimed jobs transition through `validating` to terminal `failed` with `model_unavailable`, then receive `XACK`. The specifications distinguish this active control plane from the unimplemented processing pipeline.
+The Go API, frontend workflow, Redis Streams transport, PostgreSQL-backed worker leases, and the four-stage media/CV pipeline are implemented. The local `MODEL_VERSION=unset-until-pinned` sentinel is normalized by API and worker configuration to `unconfigured`: that safe worker state consumes only matching jobs, which terminally fail with `model_unavailable` instead of producing output. The selected W0.1 baseline operates only after its local artifacts verify and decoder/model adapters load; missing or invalid configured artifacts prevent worker startup. A running worker terminally rejects a claimed job before pipeline work when immutable `configuration.model_version` differs from its active runtime version.

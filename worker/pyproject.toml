@@ -8,6 +8,11 @@ version = "0.1.0"
 description = "Offline Boulder Frame media worker foundation"
 requires-python = ">=3.12"
 dependencies = [
+    "boto3==1.35.99",
+    "mediapipe==0.10.32",
+    "numpy==1.26.4",
+    "onnxruntime==1.22.0",
+    "opencv-python-headless==4.10.0.84",
     "psycopg[binary]==3.2.10",
     "redis==5.2.1",
 ]

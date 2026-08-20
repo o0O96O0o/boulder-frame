@@ -2,70 +2,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Event
+from typing import cast
 
-from .config import WorkerConfig
-from .errors import ErrorCode, terminal
-from .protocol import JobTask
+from .config import UNCONFIGURED_MODEL_VERSION, WorkerConfig
+from .frame_reader import FrameReaderUnavailable, OpenCVFrameReader
+from .measurement import PersonDetector, PoseEstimator
+from .media import FFmpegRenderer, FFprobeAdapter
+from .models import (
+    MODEL_VERSION,
+    MediaPipePoseLandmarkerFull,
+    ModelVerificationError,
+    OnnxSsdMobileNetV1Detector,
+)
+from .pipeline import FrameReader, OutputFinalizer, PlannerFactory, ProcessingPipeline
+from .planner import DeterministicCropPlanner
 from .queue_adapter import (
-    DeliveryAction,
     QueueConsumerAdapter,
     QueueTransport,
     RedisStreamsTransport,
 )
 from .repository import PostgresJobRepository
-from .state import TERMINAL_STATES, JobRepository, JobState, fail, transition, utc_now
+from .state import JobRepository
+from .storage import S3Storage
+from .tracking import TargetTracker
+from .worker import Worker
 
 
 class RuntimeUnavailable(RuntimeError):
     """Configured worker adapters could not be constructed or verified."""
 
 
-class UnavailablePipeline:
-    """Marks claimed jobs unavailable without creating scratch or output artifacts."""
-
-    def __init__(
-        self, repository: JobRepository, lease_seconds: int, worker_id: str | None = None
-    ) -> None:
-        self.repository = repository
-        self.lease_seconds = lease_seconds
-        self.worker_id = worker_id or ""
-
-    def __call__(self, task: JobTask) -> DeliveryAction:
-        record = self.repository.claim(task.job_id, self.worker_id, self.lease_seconds, utc_now())
-        if record is None:
-            state = self.repository.current_state(task.job_id)
-            return (
-                DeliveryAction.ACK
-                if state is None or state in TERMINAL_STATES
-                else DeliveryAction.RETRY
-            )
-        try:
-            if record.state is JobState.QUEUED:
-                record = transition(record, JobState.VALIDATING, 10)
-                self.repository.update(record)
-            self.repository.update(
-                fail(
-                    record,
-                    terminal(
-                        ErrorCode.MODEL_UNAVAILABLE,
-                        "Video processing is temporarily unavailable.",
-                    ),
-                )
-            )
-        except Exception:
-            # A pending stream delivery will be reclaimed; release its DB claim first when possible.
-            try:
-                self.repository.release(task.job_id, self.worker_id)
-            except Exception:
-                pass
-            raise
-        return DeliveryAction.ACK
-
-
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
     queue_adapter: bool
     database_adapter: bool
+    storage_adapter: bool
 
 
 class WorkerRuntime:
@@ -74,25 +45,32 @@ class WorkerRuntime:
         config: WorkerConfig,
         consumer: QueueConsumerAdapter,
         repository: JobRepository,
+        storage: S3Storage,
         stop: Event | None = None,
     ) -> None:
         self.config = config
         self.consumer = consumer
         self.repository = repository
+        self.storage = storage
         self.stop = stop or Event()
-        self.capabilities = RuntimeCapabilities(queue_adapter=False, database_adapter=False)
+        self.capabilities = RuntimeCapabilities(
+            queue_adapter=False, database_adapter=False, storage_adapter=False
+        )
 
     def ready(self) -> None:
         try:
             ready = getattr(self.repository, "ready", None)
             if callable(ready):
                 ready()
+            self.storage.ready()
             self.consumer.ready()
         except Exception as error:
             raise RuntimeUnavailable(
-                "configured Redis Streams and PostgreSQL adapters are not ready"
+                "configured PostgreSQL, Redis Streams, and object storage adapters are not ready"
             ) from error
-        self.capabilities = RuntimeCapabilities(queue_adapter=True, database_adapter=True)
+        self.capabilities = RuntimeCapabilities(
+            queue_adapter=True, database_adapter=True, storage_adapter=True
+        )
 
     def serve(self) -> None:
         self.ready()
@@ -106,7 +84,15 @@ def compose_runtime(
     config: WorkerConfig,
     repository: JobRepository | None = None,
     transport: QueueTransport | None = None,
+    storage: S3Storage | None = None,
     stop: Event | None = None,
+    frame_reader: FrameReader | None = None,
+    detector: PersonDetector | None = None,
+    pose_estimator: PoseEstimator | None = None,
+    tracker: TargetTracker | None = None,
+    planner_factory: PlannerFactory | None = None,
+    inspector: FFprobeAdapter | None = None,
+    renderer: FFmpegRenderer | None = None,
 ) -> WorkerRuntime:
     config.validate_runtime()
     if repository is None:
@@ -129,8 +115,47 @@ def compose_runtime(
             config.stream_block_ms,
             config.heartbeat_seconds,
         )
+    if storage is None:
+        try:
+            storage = S3Storage.from_config(config)
+        except RuntimeError as error:
+            message = "boto3 is required for S3-compatible worker storage"
+            raise RuntimeUnavailable(message) from error
+    if config.model_version not in {UNCONFIGURED_MODEL_VERSION, MODEL_VERSION}:
+        raise RuntimeUnavailable(f"unsupported model_version: {config.model_version}")
+    if detector is None and pose_estimator is None and config.model_version == MODEL_VERSION:
+        try:
+            loaded_detector = OnnxSsdMobileNetV1Detector(config.model_dir)
+            loaded_pose_estimator = MediaPipePoseLandmarkerFull(config.model_dir)
+            loaded_frame_reader = frame_reader or OpenCVFrameReader()
+        except (FrameReaderUnavailable, ModelVerificationError) as error:
+            raise RuntimeUnavailable(
+                "configured model artifacts or decoder dependencies are unavailable"
+            ) from error
+        else:
+            detector = loaded_detector
+            pose_estimator = loaded_pose_estimator
+            frame_reader = loaded_frame_reader
+    pipeline = ProcessingPipeline(
+        storage,
+        cast(OutputFinalizer, repository),  # PostgresJobRepository owns guarded finalization.
+        inspector=inspector or FFprobeAdapter(config.ffprobe_bin),
+        renderer=renderer or FFmpegRenderer(config.ffmpeg_bin),
+        frame_reader=frame_reader,
+        detector=detector,
+        pose_estimator=pose_estimator,
+        tracker=tracker,
+        planner_factory=planner_factory or DeterministicCropPlanner,
+    )
+    worker = Worker(config, repository, config.worker_id)
     consumer = QueueConsumerAdapter(
         transport,
-        UnavailablePipeline(repository, config.lease_seconds, config.worker_id),
+        lambda task: worker.process(
+            task,
+            pipeline.validating,
+            pipeline.analyzing,
+            pipeline.rendering,
+            pipeline.uploading,
+        ),
     )
-    return WorkerRuntime(config, consumer, repository, stop)
+    return WorkerRuntime(config, consumer, repository, storage, stop)

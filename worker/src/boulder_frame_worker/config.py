@@ -15,6 +15,10 @@ class ConfigError(ValueError):
     pass
 
 
+UNCONFIGURED_MODEL_VERSION = "unconfigured"
+LOCAL_ENV_UNCONFIGURED_MODEL_VERSION = "unset-until-pinned"
+
+
 def _positive_int(value: str, name: str) -> int:
     try:
         parsed = int(value)
@@ -38,8 +42,16 @@ class WorkerConfig:
     pipeline_version: str
     model_version: str
     scratch_root: Path
+    model_dir: Path = Path("/models")
     database_url: str = ""
     redis_url: str = ""
+    s3_endpoint: str = ""
+    s3_presign_endpoint: str = ""
+    s3_region: str = "us-east-1"
+    s3_bucket: str = ""
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_use_path_style: bool = False
     ffprobe_bin: str = "ffprobe"
     ffmpeg_bin: str = "ffmpeg"
     lease_seconds: int = 300
@@ -57,7 +69,9 @@ class WorkerConfig:
     def from_mapping(cls, values: Mapping[str, object]) -> WorkerConfig:
         worker = values
         pipeline_version = str(worker.get("pipeline_version", "development")).strip()
-        model_version = str(worker.get("model_version", "unconfigured")).strip()
+        model_version = str(worker.get("model_version", UNCONFIGURED_MODEL_VERSION)).strip()
+        if model_version == LOCAL_ENV_UNCONFIGURED_MODEL_VERSION:
+            model_version = UNCONFIGURED_MODEL_VERSION
         if not pipeline_version:
             raise ConfigError("WORKER_PIPELINE_VERSION must not be empty")
         if not model_version:
@@ -81,8 +95,18 @@ class WorkerConfig:
             pipeline_version=pipeline_version,
             model_version=model_version,
             scratch_root=scratch_root,
+            model_dir=Path(worker.get("model_dir") or "/models"),
             database_url=str(worker.get("database_url", "")).strip(),
             redis_url=str(worker.get("redis_url", "")).strip(),
+            s3_endpoint=str(worker.get("s3_endpoint", "")).strip(),
+            s3_presign_endpoint=str(worker.get("s3_presign_endpoint", "")).strip(),
+            s3_region=str(worker.get("s3_region", "us-east-1")).strip(),
+            s3_bucket=str(worker.get("s3_bucket", "")).strip(),
+            s3_access_key=str(worker.get("s3_access_key", "")).strip(),
+            s3_secret_key=str(worker.get("s3_secret_key", "")).strip(),
+            s3_use_path_style=_boolean(
+                str(worker.get("s3_use_path_style", False)), "s3_use_path_style"
+            ),
             ffprobe_bin=str(worker.get("ffprobe_bin", "ffprobe")),
             ffmpeg_bin=str(worker.get("ffmpeg_bin", "ffmpeg")),
             lease_seconds=lease_seconds,
@@ -109,10 +133,27 @@ class WorkerConfig:
             raise ConfigError("database_url is required for --serve")
         if not self.redis_url:
             raise ConfigError("redis_url is required for --serve")
+        for name, value in {
+            "s3_endpoint": self.s3_endpoint,
+            "s3_presign_endpoint": self.s3_presign_endpoint,
+            "s3_region": self.s3_region,
+            "s3_bucket": self.s3_bucket,
+            "s3_access_key": self.s3_access_key,
+            "s3_secret_key": self.s3_secret_key,
+        }.items():
+            if not value:
+                raise ConfigError(f"{name} is required for --serve")
         if urlparse(self.database_url).scheme not in {"postgres", "postgresql"}:
             raise ConfigError("database_url must use postgres or postgresql")
         if urlparse(self.redis_url).scheme not in {"redis", "rediss"}:
             raise ConfigError("redis_url must use redis or rediss")
+        for name, value in {
+            "s3_endpoint": self.s3_endpoint,
+            "s3_presign_endpoint": self.s3_presign_endpoint,
+        }.items():
+            parsed = urlparse(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ConfigError(f"{name} must be an absolute HTTP URL")
         if not self.worker_id:
             raise ConfigError("worker_id is required for --serve")
         if self.stream_reclaim_idle_ms < self.lease_seconds * 1000:

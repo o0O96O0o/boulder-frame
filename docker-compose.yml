@@ -13,6 +13,7 @@ x-application-environment: &application-environment
   S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE}
   SIGNED_URL_TTL: ${SIGNED_URL_TTL}
   MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES}
+  MODEL_DIR: ${MODEL_DIR:-/models}
   MODEL_VERSION: ${MODEL_VERSION}
   PIPELINE_VERSION: ${PIPELINE_VERSION}
   WORKER_ID: ${WORKER_ID}
@@ -76,6 +77,7 @@ services:
     command: [ "boulder-frame-worker", "--config", "/workspace/worker/conf/config.dev.json", "--serve" ]
     volumes:
       - ./worker:/workspace/worker
+      - ./worker/models:/models:ro
       - worker-scratch:/work
     networks:
       - private

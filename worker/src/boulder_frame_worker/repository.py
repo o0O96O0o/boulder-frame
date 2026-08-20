@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -30,6 +31,28 @@ class Connection(Protocol):
 
 class LeaseLostError(RuntimeError):
     """Raised when a worker no longer owns a current database lease."""
+
+
+class OutputNotValidatedError(ValueError):
+    """Raised when finalization is requested without a verified media object."""
+
+
+@dataclass(frozen=True, slots=True)
+class OutputAsset:
+    size_bytes: int
+    content_type: str
+    width: int
+    height: int
+    frame_rate: float
+    duration_ms: int
+
+    def __post_init__(self) -> None:
+        if self.size_bytes <= 0:
+            raise OutputNotValidatedError("output asset size must be greater than zero")
+        if self.content_type != "video/mp4":
+            raise OutputNotValidatedError("output asset must be video/mp4")
+        if self.width <= 0 or self.height <= 0 or self.frame_rate <= 0 or self.duration_ms <= 0:
+            raise OutputNotValidatedError("output asset media metadata must be positive")
 
 
 class PostgresJobRepository:
@@ -87,6 +110,43 @@ class PostgresJobRepository:
         )
         if updated != 1:
             raise LeaseLostError("job state was changed, cancelled, or lease expired")
+
+    def finalize_output(self, record: JobRecord, output: OutputAsset) -> UUID:
+        """Link a verified deterministic output object while the current lease remains live."""
+        if record.lease_owner is None or record.source_asset is None:
+            raise LeaseLostError("output finalization requires a claimed job with a source asset")
+        if record.state is not JobState.UPLOADING:
+            raise ValueError("output finalization requires the uploading state")
+        storage_key = output_storage_key(record.source_asset.project_id, record.id)
+        connection = self._connection_factory()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                _FINALIZE_OUTPUT_SQL,
+                (
+                    record.id,
+                    record.source_asset.project_id,
+                    record.lease_owner,
+                    storage_key,
+                    output.content_type,
+                    output.size_bytes,
+                    output.width,
+                    output.height,
+                    output.frame_rate,
+                    output.duration_ms,
+                ),
+            )
+            row = cursor.fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+        if row is None:
+            raise LeaseLostError("job state was changed, cancelled, or lease expired")
+        return _uuid(row[0])
 
     def _returning(
         self, query: str, params: tuple[object, ...], *, missing_ok: bool
@@ -206,6 +266,53 @@ WHERE jobs.id = %s
     (jobs.state = 'uploading' AND requested.state IN ('uploading', 'completed', 'failed'))
   )
 """
+
+_FINALIZE_OUTPUT_SQL = """
+WITH owned_job AS (
+  SELECT id, project_id
+  FROM processing_jobs
+  WHERE id = %s
+    AND project_id = %s
+    AND state = 'uploading'
+    AND lease_owner = %s
+    AND lease_expires_at > now()
+), output_asset AS (
+  INSERT INTO assets (
+    project_id, kind, storage_key, upload_state, content_type, size_bytes,
+    width, height, frame_rate, duration_ms
+  )
+  SELECT project_id, 'output', %s, 'uploaded', %s, %s, %s, %s, %s, %s
+  FROM owned_job
+  ON CONFLICT (storage_key) DO UPDATE
+  SET content_type = EXCLUDED.content_type,
+      size_bytes = EXCLUDED.size_bytes,
+      width = EXCLUDED.width,
+      height = EXCLUDED.height,
+      frame_rate = EXCLUDED.frame_rate,
+      duration_ms = EXCLUDED.duration_ms
+  WHERE assets.project_id = EXCLUDED.project_id
+    AND assets.kind = 'output'
+    AND assets.upload_state = 'uploaded'
+  RETURNING id
+), output_artifact AS (
+  INSERT INTO job_artifacts (job_id, asset_id, kind)
+  SELECT owned_job.id, output_asset.id, 'output'
+  FROM owned_job
+  JOIN output_asset ON true
+  ON CONFLICT (job_id, kind) DO UPDATE
+  SET asset_id = EXCLUDED.asset_id
+  RETURNING asset_id
+)
+UPDATE processing_jobs AS jobs
+SET output_asset_id = output_artifact.asset_id
+FROM owned_job, output_artifact
+WHERE jobs.id = owned_job.id
+RETURNING output_artifact.asset_id
+"""
+
+
+def output_storage_key(project_id: UUID, job_id: UUID) -> str:
+    return f"private/output/{project_id}/{job_id}.mp4"
 
 
 def _record_from_row(row: tuple[Any, ...]) -> JobRecord:
