@@ -211,7 +211,7 @@ class Worker:
             except Exception:
                 self.repository.release(task.job_id, self.worker_id)
                 raise
-            self.logger.error(
+            self.logger.exception(
                 "task response",
                 extra={
                     "trace_id": trace_id,

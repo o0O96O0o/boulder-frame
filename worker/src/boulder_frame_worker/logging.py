@@ -30,7 +30,11 @@ class JsonFormatter(logging.Formatter):
                 output_key = "trace-id" if key == "trace_id" else key
                 event[output_key] = getattr(record, key)
         if record.exc_info:
-            event["error"] = "exception details omitted"
+            error_type, error, _ = record.exc_info
+            event["error"] = {
+                "message": str(error),
+                "type": error_type.__name__ if error_type is not None else "UnknownError",
+            }
         return json.dumps(event, sort_keys=True, default=str)
 
 
