@@ -44,6 +44,16 @@ def test_low_confidence_and_lost_track_widen_framing() -> None:
     assert lost.height == 2160
 
 
+def test_consecutive_lost_frames_do_not_expand_beyond_the_full_frame() -> None:
+    planner = DeterministicCropPlanner(3840, 2160, AspectRatio.LANDSCAPE, FramingProfile.BALANCED)
+
+    crops = planner.plan(
+        [FrameMeasurement(None, None, 0, lost=True), FrameMeasurement(None, None, 0, lost=True)]
+    )
+
+    assert [(crop.width, crop.height) for crop in crops] == [(3840, 2160), (3840, 2160)]
+
+
 def test_directional_lead_moves_crop_in_velocity_direction() -> None:
     planner = DeterministicCropPlanner(3840, 2160, AspectRatio.LANDSCAPE, FramingProfile.BALANCED)
     still, moving = planner.plan([measurement(), measurement(velocity=Point(200, 0))])

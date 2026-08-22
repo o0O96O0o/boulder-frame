@@ -151,7 +151,8 @@ class DeterministicCropPlanner:
             if previous is None:
                 crop = desired
             elif measurement.lost or measurement.confidence < self.config.high_confidence:
-                crop = self._rate_limited(previous, desired, self.config.max_zoom_out_factor)
+                # Low-confidence observations may widen immediately but must never zoom in.
+                crop = self._rate_limited(previous, desired, 1.0)
                 stable_frames = 0
             else:
                 stable_frames += 1
@@ -240,7 +241,7 @@ class DeterministicCropPlanner:
 
     def _rate_limited(self, previous: CropRect, desired: CropRect, zoom_factor: float) -> CropRect:
         # A larger height is a zoom out, so it may move by a larger factor than a zoom in.
-        if desired.height > previous.height:
+        if desired.height >= previous.height:
             height = min(desired.height, previous.height * self.config.max_zoom_out_factor)
         else:
             height = max(desired.height, previous.height * zoom_factor)
