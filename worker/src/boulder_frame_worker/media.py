@@ -27,6 +27,7 @@ class MediaMetadata:
     rotation: int
     has_audio: bool
     video_duration: Fraction | None = None
+    audio_stream_index: int | None = None
 
     @property
     def display_dimensions(self) -> tuple[int, int]:
@@ -126,6 +127,25 @@ def _stream(payload: dict[str, Any], codec_type: str) -> dict[str, Any] | None:
     )
 
 
+def _audio_stream(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, int | None]:
+    streams = payload.get("streams")
+    if not isinstance(streams, list):
+        return None, None
+    for index, item in enumerate(streams):
+        if isinstance(item, dict) and item.get("codec_type") == "audio":
+            if item.get("codec_name") == "aac":
+                stream_index = item.get("index", index)
+                if isinstance(stream_index, int) and stream_index >= 0:
+                    return item, stream_index
+                raise terminal(ErrorCode.INVALID_MEDIA, "Video audio stream metadata is invalid.")
+            if item.get("codec_name") != "none":
+                raise terminal(
+                    ErrorCode.UNSUPPORTED_AUDIO_CODEC,
+                    "Only AAC audio is supported when audio is present.",
+                )
+    return None, None
+
+
 def _fraction(value: object) -> Fraction:
     if not isinstance(value, str) or value in {"0/0", "N/A"}:
         raise terminal(ErrorCode.INVALID_MEDIA, "Video frame rate is invalid.")
@@ -197,11 +217,7 @@ def metadata_from_ffprobe(payload: dict[str, Any]) -> MediaMetadata:
         raise terminal(ErrorCode.INVALID_MEDIA, "Video dimensions are invalid.")
     video_duration = _video_duration(video)
     duration_ms = round(video_duration * 1000)
-    audio = _stream(payload, "audio")
-    if audio is not None and audio.get("codec_name") != "aac":
-        raise terminal(
-            ErrorCode.UNSUPPORTED_AUDIO_CODEC, "Only AAC audio is supported when audio is present."
-        )
+    audio, audio_stream_index = _audio_stream(payload)
     return MediaMetadata(
         width=width,
         height=height,
@@ -212,6 +228,7 @@ def metadata_from_ffprobe(payload: dict[str, Any]) -> MediaMetadata:
         rotation=_rotation(video),
         has_audio=audio is not None,
         video_duration=video_duration,
+        audio_stream_index=audio_stream_index,
     )
 
 
@@ -294,7 +311,17 @@ class FFmpegRenderer:
         self.binary = binary
         self.runner = runner or SubprocessRunner()
 
-    def render(self, source: Path, destination: Path, filter_script: Path, fps: Fraction) -> None:
+    def render(
+        self,
+        source: Path,
+        destination: Path,
+        filter_script: Path,
+        fps: Fraction,
+        audio_stream_index: int | None = None,
+    ) -> None:
+        audio_mapping = (
+            ["-map", f"0:{audio_stream_index}"] if audio_stream_index is not None else []
+        )
         try:
             self.runner.run(
                 [
@@ -307,8 +334,7 @@ class FFmpegRenderer:
                     str(filter_script),
                     "-map",
                     "0:v:0",
-                    "-map",
-                    "0:a?",
+                    *audio_mapping,
                     "-r",
                     str(fps),
                     "-c:v",
@@ -376,7 +402,13 @@ class FFmpegRenderer:
             )
         filter_script = destination.with_suffix(".ffscript")
         write_crop_path_filter(filter_script, crop_path, source_metadata, aspect_ratio)
-        self.render(source, destination, filter_script, source_metadata.frame_rate)
+        self.render(
+            source,
+            destination,
+            filter_script,
+            source_metadata.frame_rate,
+            source_metadata.audio_stream_index,
+        )
         try:
             output_metadata = inspector.inspect(destination)
         except WorkerError as error:

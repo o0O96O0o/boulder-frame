@@ -50,6 +50,7 @@ def test_valid_cfr_quicktime_metadata_includes_rotation() -> None:
     assert metadata.display_dimensions == (2160, 3840)
     assert metadata.frame_for_time_ms(500) == 30
     assert metadata.audio_codec == "aac"
+    assert metadata.audio_stream_index == 1
 
 
 def test_hevc_quicktime_metadata_is_supported() -> None:
@@ -59,6 +60,44 @@ def test_hevc_quicktime_metadata_is_supported() -> None:
     metadata = metadata_from_ffprobe(data)
 
     assert metadata.video_codec == "hevc"
+
+
+def test_aac_stream_is_selected_without_mapping_codec_none_tracks() -> None:
+    data = probe_payload()
+    data["streams"] = [
+        data["streams"][0],  # type: ignore[index]
+        {"index": 1, "codec_type": "audio", "codec_name": "none"},
+        {"index": 2, "codec_type": "data", "codec_name": "mebx"},
+        {"index": 3, "codec_type": "audio", "codec_name": "aac"},
+    ]
+
+    metadata = metadata_from_ffprobe(data)
+
+    assert metadata.has_audio
+    assert metadata.audio_stream_index == 3
+
+
+def test_renderer_maps_only_the_validated_aac_stream() -> None:
+    class CapturingRunner:
+        def __init__(self) -> None:
+            self.arguments: list[str] = []
+
+        def run(self, arguments: list[str]) -> str:
+            self.arguments = arguments
+            return ""
+
+    runner = CapturingRunner()
+    FFmpegRenderer(runner=runner).render(
+        Path("source.mp4"),
+        Path("output.mp4"),
+        Path("crop.ffscript"),
+        Fraction(30, 1),
+        audio_stream_index=3,
+    )
+
+    assert ["-map", "0:v:0", "-map", "0:3"] == runner.arguments[
+        runner.arguments.index("-map") : runner.arguments.index("-r")
+    ]
 
 
 def test_video_timing_is_used_when_container_duration_includes_longer_audio() -> None:

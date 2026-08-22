@@ -97,6 +97,10 @@ remains completion authority. Retried finalization reuses the same logical outpu
 - Equal average and real frame rates, otherwise `variable_frame_rate`
 - AAC audio when an audio stream exists
 
+When a source contains action-camera metadata or non-decodable `codec_name=none` sidecar tracks,
+the worker ignores those tracks and maps only the validated AAC stream by its absolute input-stream
+index. Other decodable audio codecs remain unsupported.
+
 Rotation metadata is read from stream tags or side data. `display_dimensions` swaps width and height for 90/270-degree rotation. The renderer adapter is responsible for applying normalization; the current foundation does not yet implement the complete rotation-aware render pipeline.
 
 ## Errors
@@ -134,7 +138,7 @@ immutable CFR metadata. No model weights are downloaded or inferred from configu
 
 ## Rendering Boundary
 
-`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The crop script uses a balanced per-frame decision tree, avoiding FFmpeg expression-parser nesting limits while preserving exact source-frame crop selection. It maps video and optional audio, encodes H.264/AAC, and uses `+faststart`. `validate_output` checks output dimensions and codecs. `ProcessingPipeline` generates the crop-path filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
+`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The crop script uses a balanced per-frame decision tree, avoiding FFmpeg expression-parser nesting limits while preserving exact source-frame crop selection. It maps video and the single validated AAC input stream, encodes H.264/AAC, and uses `+faststart`. `validate_output` checks output dimensions and codecs. `ProcessingPipeline` generates the crop-path filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
 
 ```mermaid
 flowchart LR
