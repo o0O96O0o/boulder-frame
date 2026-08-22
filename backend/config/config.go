@@ -25,6 +25,7 @@ type Config struct {
 	PipelineVersion   string
 	ModelVersion      string
 	DevelopmentOwner  string
+	WebBaseURL        string
 }
 
 const (
@@ -59,6 +60,7 @@ func Load(paths ...string) (Config, error) {
 		PipelineVersion   string `json:"pipeline_version"`
 		ModelVersion      string `json:"model_version"`
 		DevelopmentOwner  string `json:"development_owner"`
+		WebBaseURL        string `json:"web_base_url"`
 	}
 	contents = []byte(os.Expand(string(contents), os.Getenv))
 	if err := json.Unmarshal(contents, &raw); err != nil {
@@ -70,7 +72,7 @@ func Load(paths ...string) (Config, error) {
 		S3Region: raw.S3Region, S3Bucket: raw.S3Bucket, S3AccessKey: raw.S3AccessKey,
 		S3SecretKey: raw.S3SecretKey, S3UsePathStyle: raw.S3UsePathStyle,
 		PipelineVersion: raw.PipelineVersion, ModelVersion: raw.ModelVersion,
-		DevelopmentOwner: raw.DevelopmentOwner,
+		DevelopmentOwner: raw.DevelopmentOwner, WebBaseURL: raw.WebBaseURL,
 	}
 	if c.ModelVersion == localEnvUnconfiguredModelVersion {
 		c.ModelVersion = unconfiguredModelVersion

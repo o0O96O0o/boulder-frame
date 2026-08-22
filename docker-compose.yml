@@ -31,7 +31,7 @@ services:
       - ./frontend:/workspace/frontend
       - frontend-node-modules:/workspace/frontend/node_modules
     ports:
-      - "127.0.0.1:5173:5173"
+      - "5173:5173"
     networks:
       - private
       - edge
@@ -57,10 +57,12 @@ services:
     volumes:
       - ./backend:/workspace/backend
     ports:
-      - "127.0.0.1:8080:8080"
+      - "8080:8080"
     networks:
       - private
       - edge
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: [ "CMD-SHELL", "curl --fail --silent http://127.0.0.1:8080/healthz" ]
       interval: 10s
@@ -82,6 +84,8 @@ services:
       - worker-scratch:/work
     networks:
       - private
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: [ "CMD", "python", "-c", "import os; os.kill(1, 0)" ]
       interval: 10s

@@ -54,7 +54,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer publisher.Close()
-	h := &httpapi.Handler{Repo: repo, Store: store, Queue: publisher, Owner: cfg.DevelopmentOwner, URLTTL: cfg.URLTTL, MaxUploadBytes: cfg.MaxUploadBytes, PipelineVersion: cfg.PipelineVersion, ModelVersion: cfg.ModelVersion, Logger: logger}
+	h := &httpapi.Handler{Repo: repo, Store: store, Queue: publisher, Owner: cfg.DevelopmentOwner, URLTTL: cfg.URLTTL, MaxUploadBytes: cfg.MaxUploadBytes, PipelineVersion: cfg.PipelineVersion, ModelVersion: cfg.ModelVersion, WebBaseURL: cfg.WebBaseURL, Logger: logger}
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: h.Router(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		logger.Info("api listening", "addr", cfg.HTTPAddr)

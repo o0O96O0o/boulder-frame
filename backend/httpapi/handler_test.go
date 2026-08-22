@@ -100,6 +100,17 @@ func TestHealthAndReadiness(t *testing.T) {
 	}
 }
 
+func TestCORSAllowsConfiguredWebOrigin(t *testing.T) {
+	h := &Handler{Repo: &fakeRepo{}, WebBaseURL: "http://76.13.185.64:5173"}
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/projects", nil)
+	req.Header.Set("Origin", h.WebBaseURL)
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent || rec.Header().Get("Access-Control-Allow-Origin") != h.WebBaseURL {
+		t.Fatalf("status %d allow-origin %q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
 func TestInvalidIDsAreRejected(t *testing.T) {
 	h := &Handler{Repo: &fakeRepo{}}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/nope", nil)

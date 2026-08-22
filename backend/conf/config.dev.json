@@ -13,5 +13,6 @@
   "max_upload_bytes": 2147483648,
   "pipeline_version": "${PIPELINE_VERSION}",
   "model_version": "${MODEL_VERSION}",
+  "web_base_url": "${WEB_BASE_URL}",
   "development_owner": "development-owner"
 }

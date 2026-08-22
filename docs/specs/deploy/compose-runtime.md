@@ -4,8 +4,8 @@
 
 | Service | Role | Local host exposure |
 | --- | --- | --- |
-| `frontend` | Vite development server | `127.0.0.1:5173` |
-| `backend` | Go API | `127.0.0.1:8080` |
+| `frontend` | Vite development server | `0.0.0.0:5173` |
+| `backend` | Go API | `0.0.0.0:8080` |
 | `worker` | Python worker process | None |
 
 Compose starts these repository modules only. PostgreSQL, Redis, and S3-compatible object storage
@@ -27,11 +27,19 @@ flowchart LR
 The frontend waits for a healthy backend. The worker remains on the private network and is not
 published to the host.
 
+Set `WEB_BASE_URL` and `API_BASE_URL` to reachable browser-facing URLs. The frontend embeds
+`API_BASE_URL`; the API permits `WEB_BASE_URL` as its CORS origin. The bound ports have no TLS or
+authentication and must only be exposed on a trusted network.
+
 ## Configuration
 
 `.env.example` documents the values passed into module configuration. Set `DATABASE_URL`,
 `REDIS_URL`, `S3_ENDPOINT`, `S3_PRESIGN_ENDPOINT`, and the related credentials to the externally
 managed services. Reserved characters in URL passwords must be percent-encoded.
+
+For dependencies published on the Docker host, use `host.docker.internal` instead of `localhost` in
+the connection URLs. The backend and worker map that hostname to Docker's host gateway; `localhost`
+inside either container resolves to itself.
 
 The worker also needs a stable `WORKER_ID`; optionally set a distinct `STREAM_CONSUMER` when its Redis
 consumer identity must differ. The API appends to `boulder-frame:jobs`; workers consume consumer group

@@ -17,6 +17,12 @@ Keep `.env` out of version control. Configure the external database, Redis Strea
 object-storage bucket separately, including credentials, CORS, and retention policy. The API writes
 to stream `boulder-frame:jobs`; workers consume group `boulder-frame:job-processors`.
 
+When those dependencies run on the Docker host, containers must use
+`host.docker.internal` rather than `localhost` in their URLs. For example, use
+`postgres://user:password@host.docker.internal:5432/database?sslmode=disable`. Compose maps that
+name to Docker's host gateway for the backend and worker. `localhost` from either container refers
+to that container, not the host.
+
 The worker requires PostgreSQL and Redis URLs plus a stable `WORKER_ID`; `.env.example` provides a
 local value. Its stream settings include an optional `stream_consumer` override, read block interval,
 pending-entry reclaim idle time, heartbeat interval, and concurrency. Set unique consumer identities
@@ -40,11 +46,15 @@ docker compose up --build -d
 The worker is built as `linux/amd64`, including on Apple Silicon hosts. The pinned MediaPipe wheel
 does not support Linux ARM64; Docker/Podman must have x86_64 emulation available.
 
-The local endpoints are:
+The application binds to all host interfaces for trusted-network access. With the configured values
+from `.env`, the endpoints are:
 
-- Web app: `http://localhost:5173`
-- Go API: `http://localhost:8080`
-- API health: `http://localhost:8080/healthz`
+- Web app: `${WEB_BASE_URL}`
+- Go API: `${API_BASE_URL}`
+- API health: `${API_BASE_URL}/healthz`
+
+Allow TCP ports `5173` and `8080` through the host firewall for remote access. This Compose setup
+does not provide TLS or authentication; use it only on a trusted network.
 
 Run migrations explicitly against the configured external PostgreSQL database:
 

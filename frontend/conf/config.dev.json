@@ -1,4 +1,4 @@
 {
-  "api_base_url": "http://localhost:8080",
+  "api_base_url": "${API_BASE_URL}",
   "max_upload_bytes": 2147483648
 }
