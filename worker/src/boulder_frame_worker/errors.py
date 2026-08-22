@@ -31,13 +31,14 @@ class WorkerError(Exception):
     code: ErrorCode
     message: str
     transient: bool = False
+    diagnostic: str | None = None
 
     def __str__(self) -> str:
         return self.message
 
 
-def terminal(code: ErrorCode, message: str) -> WorkerError:
-    return WorkerError(code=code, message=message, transient=False)
+def terminal(code: ErrorCode, message: str, diagnostic: str | None = None) -> WorkerError:
+    return WorkerError(code=code, message=message, transient=False, diagnostic=diagnostic)
 
 
 def transient(code: ErrorCode, message: str) -> WorkerError:

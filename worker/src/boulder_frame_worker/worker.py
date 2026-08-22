@@ -190,6 +190,7 @@ class Worker:
                         "response_body": {"state": "retry"},
                         "job_id": str(task.job_id),
                         "error_code": error.code.value,
+                        "diagnostic": error.diagnostic,
                     },
                 )
                 raise
@@ -201,6 +202,7 @@ class Worker:
                     "response_body": {"state": "failed"},
                     "job_id": str(task.job_id),
                     "error_code": error.code.value,
+                    "diagnostic": error.diagnostic,
                 },
             )
         except Exception:

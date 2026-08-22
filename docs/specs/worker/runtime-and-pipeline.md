@@ -134,7 +134,7 @@ immutable CFR metadata. No model weights are downloaded or inferred from configu
 
 ## Rendering Boundary
 
-`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The crop script uses a balanced per-frame decision tree, avoiding FFmpeg expression-parser nesting limits while preserving exact source-frame crop selection. It maps video and optional audio, encodes H.264/AAC, and uses `+faststart`. `validate_output` checks output dimensions and codecs. `ProcessingPipeline` generates the crop-path filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease.
+`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The crop script uses a balanced per-frame decision tree, avoiding FFmpeg expression-parser nesting limits while preserving exact source-frame crop selection. It maps video and optional audio, encodes H.264/AAC, and uses `+faststart`. `validate_output` checks output dimensions and codecs. `ProcessingPipeline` generates the crop-path filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
 
 ```mermaid
 flowchart LR

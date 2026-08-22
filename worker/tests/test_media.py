@@ -180,6 +180,26 @@ def test_long_crop_path_filter_is_accepted_by_ffmpeg(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
 
 
+def test_renderer_preserves_bounded_ffmpeg_diagnostics() -> None:
+    class FailingRunner:
+        def run(self, arguments: list[str]) -> str:
+            del arguments
+            raise WorkerError(
+                ErrorCode.INVALID_MEDIA,
+                "Video media could not be inspected.",
+                diagnostic="FFmpeg failed while configuring crop.",
+            )
+
+    with pytest.raises(WorkerError) as raised:
+        FFmpegRenderer(runner=FailingRunner()).render(
+            Path("source.mp4"), Path("output.mp4"), Path("crop.ffscript"), Fraction(30, 1)
+        )
+
+    assert raised.value.code is ErrorCode.RENDER_UNAVAILABLE
+    assert raised.value.message == "Video rendering could not be completed."
+    assert raised.value.diagnostic == "FFmpeg failed while configuring crop."
+
+
 @pytest.mark.parametrize(
     ("aspect_ratio", "with_audio", "audio_duration"),
     [

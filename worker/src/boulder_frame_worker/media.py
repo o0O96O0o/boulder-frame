@@ -57,6 +57,15 @@ class CommandRunner(Protocol):
     def run(self, arguments: list[str]) -> str: ...
 
 
+def _command_diagnostic(stderr: str | None) -> str | None:
+    if not stderr:
+        return None
+    # FFmpeg can echo an entire generated filter expression in an error. Keep the
+    # useful final diagnostics without allowing one failed job to flood logs.
+    lines = [line.replace("\x00", "")[-512:] for line in stderr.splitlines() if line.strip()]
+    return "\n".join(lines[-16:])[-4096:] or None
+
+
 class SubprocessRunner:
     def run(self, arguments: list[str]) -> str:
         try:
@@ -67,7 +76,9 @@ class SubprocessRunner:
             ) from error
         except subprocess.CalledProcessError as error:
             raise terminal(
-                ErrorCode.INVALID_MEDIA, "Video media could not be inspected."
+                ErrorCode.INVALID_MEDIA,
+                "Video media could not be inspected.",
+                diagnostic=_command_diagnostic(error.stderr),
             ) from error
         return completed.stdout
 
@@ -322,7 +333,9 @@ class FFmpegRenderer:
             )
         except WorkerError as error:
             raise terminal(
-                ErrorCode.RENDER_UNAVAILABLE, "Video rendering could not be completed."
+                ErrorCode.RENDER_UNAVAILABLE,
+                "Video rendering could not be completed.",
+                diagnostic=error.diagnostic,
             ) from error
 
     def decode(self, output: Path) -> None:

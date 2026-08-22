@@ -25,6 +25,7 @@ class JsonFormatter(logging.Formatter):
             "pipeline_version",
             "model_version",
             "error_code",
+            "diagnostic",
         ):
             if hasattr(record, key):
                 output_key = "trace-id" if key == "trace_id" else key
