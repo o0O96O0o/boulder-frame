@@ -5,7 +5,7 @@ RUN apk add --no-cache curl
 WORKDIR /workspace/backend
 COPY backend/go.mod backend/go.sum ./
 
-RUN GOPROXY=https://goproxy.cn,direct go mod download
+RUN go mod download
 COPY backend/ ./
 COPY deploy/docker/backend-entrypoint.sh /usr/local/bin/backend-entrypoint
 
