@@ -123,7 +123,7 @@ class MediaPipePoseLandmarkerFull:
             from mediapipe.tasks.python import vision
         except ImportError as error:
             raise ModelVerificationError(
-                "mediapipe==0.10.32 is required for Pose Landmarker Full"
+                "mediapipe==0.10.18 is required for Pose Landmarker Full"
             ) from error
         model_path = POSE_LANDMARKER_FULL.verify(model_dir)
         options = vision.PoseLandmarkerOptions(

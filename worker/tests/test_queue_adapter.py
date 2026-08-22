@@ -4,6 +4,7 @@ from threading import Event
 from uuid import uuid4
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from boulder_frame_worker.errors import ErrorCode, transient
 from boulder_frame_worker.queue_adapter import (
@@ -146,6 +147,29 @@ def test_redis_stream_transport_preserves_contract_and_reclaims_pending_entry() 
     assert redis.acks == [("jobs", "workers", ("1710000000000-0",))]
     transport.heartbeat(delivery.entry_id)
     assert redis.claim_heartbeats == [("jobs", "workers", "worker-1", 0, ["1710000000000-0"])]
+
+
+def test_redis_stream_transport_recovers_after_server_closes_connection() -> None:
+    stop = Event()
+
+    class FlakyRedis(FakeRedis):
+        def __init__(self) -> None:
+            super().__init__()
+            self.claim_attempts = 0
+
+        def xautoclaim(self, name, groupname, consumername, min_idle_time, start_id, count):
+            self.claim_attempts += 1
+            if self.claim_attempts == 1:
+                raise RedisConnectionError("Connection closed by server")
+            stop.set()
+            return "0-0", [], []
+
+    redis = FlakyRedis()
+    transport = RedisStreamsTransport(redis, "jobs", "workers", "worker-1", 100, 1, 1)
+
+    transport.serve(lambda delivery: DeliveryAction.ACK, stop, 1)
+
+    assert redis.claim_attempts == 2
 
 
 def test_queue_adapter_keeps_unclaimed_job_pending() -> None:

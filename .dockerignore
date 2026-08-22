@@ -1,3 +1,10 @@
 frontend/node_modules
 frontend/dist
 frontend/.vite
+
+worker/.venv
+worker/.pytest_cache
+worker/.ruff_cache
+worker/build
+worker/models
+worker/src/*.egg-info

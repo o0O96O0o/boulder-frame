@@ -9,10 +9,14 @@ from threading import Event, Thread
 from typing import Protocol
 from uuid import UUID
 
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 from .errors import WorkerError
 from .protocol import JobTask
 
 TASK_PROCESS_JOB = "job.process"
+REDIS_CONNECTION_ERRORS = (RedisConnectionError, RedisTimeoutError, TimeoutError)
 
 
 class DeliveryAction(StrEnum):
@@ -157,9 +161,15 @@ class RedisStreamsTransport:
                 active = {future for future in active if not future.done()}
                 capacity = concurrency - len(active)
                 if capacity > 0 and not stop.is_set():
-                    deliveries = self._reclaim(capacity)
-                    if not deliveries:
-                        deliveries = self._read(capacity)
+                    try:
+                        deliveries = self._reclaim(capacity)
+                        if not deliveries:
+                            deliveries = self._read(capacity)
+                    except REDIS_CONNECTION_ERRORS:
+                        # Redis clients reconnect on the next command after a dropped socket.
+                        if stop.wait(1.0):
+                            break
+                        continue
                     active.update(
                         pool.submit(self._handle, handler, delivery) for delivery in deliveries
                     )

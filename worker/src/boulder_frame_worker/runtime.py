@@ -107,7 +107,7 @@ def compose_runtime(
         except ImportError as error:
             raise RuntimeUnavailable("redis is required for Redis Streams worker access") from error
         transport = RedisStreamsTransport(
-            Redis.from_url(config.redis_url),
+            Redis.from_url(config.redis_url, health_check_interval=30),
             config.stream_name,
             config.stream_group,
             config.stream_consumer,

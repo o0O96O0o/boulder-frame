@@ -69,7 +69,9 @@ threshold. During an active handler, `XCLAIM` resets the pending idle timer and 
 renewal keeps the execution claim live. PostgreSQL lease owner/expiry is the authority for state,
 progress, error, and artifact writes; Redis pending ownership never replaces it. On transient failure,
 the worker releases its PostgreSQL lease and leaves the entry pending. It calls `XACK` only after the
-terminal job state is persisted.
+terminal job state is persisted. Redis connection and timeout failures during polling are treated as
+transient transport failures: the worker waits briefly for the client to reconnect and resumes polling
+without terminating the process. Startup readiness still fails if Redis cannot be reached.
 
 ## Object Storage And Output Finalization
 

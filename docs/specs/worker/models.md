@@ -67,7 +67,7 @@ additional unverified pose conversion.
 | Size | 9,398,198 bytes |
 | SHA-256 | `5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1` |
 | Weight license | [Apache-2.0, BlazePose GHUM 3D Model Card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20BlazePose%20GHUM%203D.pdf) |
-| Runtime source/license | [MediaPipe `v0.10.32` Apache-2.0 license](https://github.com/google-ai-edge/mediapipe/blob/v0.10.32/LICENSE) |
+| Runtime source/license | [MediaPipe `v0.10.18` Apache-2.0 license](https://github.com/google-ai-edge/mediapipe/blob/v0.10.18/LICENSE) |
 | Published task reference | [Google Pose Landmarker models](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker#models) |
 
 The adapter creates `PoseLandmarker` in image mode with `num_poses=1`, receives a contiguous RGB HWC ROI,
@@ -84,7 +84,8 @@ the worker tracker is the authority.
 | Dependency | Pin | License evidence | Use |
 | --- | --- | --- | --- |
 | `onnxruntime` | `1.22.0` | [PyPI metadata](https://pypi.org/project/onnxruntime/1.22.0/) reports MIT; [source license](https://github.com/microsoft/onnxruntime/blob/v1.22.0/LICENSE) is MIT | CPU ONNX inference |
-| `mediapipe` | `0.10.32` | [PyPI metadata](https://pypi.org/project/mediapipe/0.10.32/) reports Apache-2.0; [source license](https://github.com/google-ai-edge/mediapipe/blob/v0.10.32/LICENSE) is Apache-2.0 | Pose Tasks runtime |
+| `mediapipe` | `0.10.18` | [PyPI metadata](https://pypi.org/project/mediapipe/0.10.18/) reports Apache-2.0; [source license](https://github.com/google-ai-edge/mediapipe/blob/v0.10.18/LICENSE) is Apache-2.0 | Pose Tasks runtime |
+| `matplotlib` | `3.11.1` | [Matplotlib license](https://github.com/matplotlib/matplotlib/blob/v3.11.1/LICENSE) is PSF-compatible | Required by MediaPipe's package initializer; no plotting is used by the worker |
 | `numpy` | `1.26.4` | [NumPy license](https://github.com/numpy/numpy/blob/v1.26.4/LICENSE.txt) is BSD-3-Clause compatible | contiguous RGB preprocessing and tensor handling |
 | `opencv-python-headless` | `4.10.0.84` | [OpenCV 4.10.0 source license](https://github.com/opencv/opencv/blob/4.10.0/LICENSE) is Apache-2.0 | CFR frame decoding through its FFmpeg video backend and explicit rotation-normalized BGR frames |
 
@@ -92,8 +93,8 @@ Authoritative PyPI SHA-256 evidence captured for the Python 3.12 worker targets:
 
 | Wheel | SHA-256 |
 | --- | --- |
-| `mediapipe-0.10.32-py3-none-manylinux_2_28_x86_64.whl` | `4b0941fbbbce41862f13cb1850c4878c13dbc62cd5e81e74880051b7a20ce3b6` |
-| `mediapipe-0.10.32-py3-none-macosx_11_0_arm64.whl` | `b62178b7585e0bb8789075c43bbb3e352fbc4a8f765797fded509f86a098b29b` |
+| `mediapipe-0.10.18-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl` | `edbabfb9728dc1fcd93fea47abece12d43300530a1d4261e257f6bd4e3be09d1` |
+| `mediapipe-0.10.18-cp312-cp312-macosx_11_0_universal2.whl` | `95b6d067ae0b46e7a2b9b549f0ad6d3187ad86c63c77d3b8c7314a9a7ef5e2c8` |
 | `onnxruntime-1.22.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl` | `6964a975731afc19dc3418fad8d4e08c48920144ff590149429a5ebe0d15fb3c` |
 | `onnxruntime-1.22.0-cp312-cp312-macosx_13_0_universal2.whl` | `f3c0380f53c1e72a41b3f4d6af2ccc01df2c17844072233442c3a7e74851ab97` |
 | `numpy-1.26.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl` | `675d61ffbfa78604709862923189bad94014bef562cc35cf61d3a07bba02a7ed` |

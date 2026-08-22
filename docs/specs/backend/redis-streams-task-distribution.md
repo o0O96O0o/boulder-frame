@@ -68,7 +68,7 @@ the PostgreSQL job row remains the source of truth if the stream and database te
 
 ## Consumer Contract
 
-1. Read new entries with `XREADGROUP` and recover abandoned pending entries with `XAUTOCLAIM` after the configured idle interval.
+1. Read new entries with `XREADGROUP` and recover abandoned pending entries with `XAUTOCLAIM` after the configured idle interval. The worker retries Redis connection and timeout failures during polling rather than terminating, while startup readiness remains fail-fast.
 2. Parse a payload with exactly `job_id` and `trace_id` fields, and require `task_id == job_id`.
 3. Load the job and source asset from PostgreSQL.
 4. Atomically claim an eligible PostgreSQL job lease. A pending Stream entry alone never authorizes processing.
