@@ -11,9 +11,11 @@ from boulder_frame_worker.media import (
     FFmpegRenderer,
     FFprobeAdapter,
     MediaMetadata,
+    _frame_expression,
     crop_path_filter,
     metadata_from_ffprobe,
     validate_output,
+    write_crop_path_filter,
 )
 from boulder_frame_worker.planner import CropRect
 from boulder_frame_worker.protocol import AspectRatio
@@ -114,6 +116,68 @@ def test_crop_path_filter_normalizes_clockwise_rotation_before_cropping() -> Non
     assert filter_graph.startswith("transpose=clock,crop=")
     assert "scale=1920:1080" in filter_graph
     assert "setsar=1" in filter_graph
+
+
+def test_frame_expression_uses_logarithmic_nesting_for_long_crop_paths() -> None:
+    expression = _frame_expression([float(index) for index in range(2520)])
+    depth = 0
+    maximum_depth = 0
+    for character in expression:
+        if character == "(":
+            depth += 1
+            maximum_depth = max(maximum_depth, depth)
+        elif character == ")":
+            depth -= 1
+
+    assert expression.count("if(") == 2519
+    assert depth == 0
+    assert maximum_depth <= 14
+
+
+def test_long_crop_path_filter_is_accepted_by_ffmpeg(tmp_path: Path) -> None:
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("FFmpeg is required for media integration tests")
+    metadata = MediaMetadata(
+        width=160,
+        height=90,
+        duration_ms=42000,
+        frame_rate=Fraction(60, 1),
+        video_codec="h264",
+        audio_codec=None,
+        rotation=0,
+        has_audio=False,
+    )
+    script = tmp_path / "crop.ffscript"
+    write_crop_path_filter(
+        script,
+        [CropRect(0, 0, 160, 90)] * metadata.expected_frame_count,
+        metadata,
+        AspectRatio.LANDSCAPE,
+    )
+
+    completed = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x90:rate=60:duration=0.02",
+            "-filter_script:v",
+            str(script),
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize(

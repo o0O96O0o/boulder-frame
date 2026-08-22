@@ -215,10 +215,18 @@ def expected_frame_count(metadata: MediaMetadata) -> int:
 def _frame_expression(values: Sequence[float]) -> str:
     if not values:
         raise ValueError("crop path must not be empty")
-    expression = f"{values[-1]:.6f}"
-    for index in range(len(values) - 2, -1, -1):
-        expression = f"if(lt(n\\,{index + 1})\\,{values[index]:.6f}\\,{expression})"
-    return expression
+
+    def select(start: int, end: int) -> str:
+        if end - start == 1:
+            return f"{values[start]:.6f}"
+        middle = (start + end) // 2
+        return (
+            f"if(lt(n\\,{middle})\\,{select(start, middle)}\\,{select(middle, end)})"
+        )
+
+    # FFmpeg's expression parser cannot handle one nested conditional per source frame.
+    # A balanced tree retains exact frame lookup while bounding nesting depth logarithmically.
+    return select(0, len(values))
 
 
 def _rotation_filter(rotation: int) -> str | None:
