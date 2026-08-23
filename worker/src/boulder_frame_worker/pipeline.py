@@ -207,18 +207,17 @@ class ProcessingPipeline:
             metadata = self.inspector.inspect(inputs.output)
             validate_output(
                 metadata,
-                inputs.output_settings.aspect_ratio,
+                inputs.metadata.display_dimensions,
                 expected_duration_ms=inputs.metadata.duration_ms,
                 duration_tolerance_ms=round(1000 / float(inputs.metadata.frame_rate)),
                 source_has_audio=inputs.metadata.has_audio,
             )
             return metadata
-        return self.renderer.render_crop_path(
+        return self.renderer.render_crop_annotations(
             inputs.source,
             inputs.output,
             self._crop_path(inputs),
             inputs.metadata,
-            inputs.output_settings.aspect_ratio,
             self.inspector,
         )
 

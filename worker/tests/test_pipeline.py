@@ -45,9 +45,7 @@ class Inspector:
 
 
 class Renderer:
-    def render_crop_path(
-        self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
-    ):
+    def render_crop_annotations(self, source, destination, crop_path, source_metadata, inspector):
         destination.write_bytes(b"x" * 4)
         return Inspector().inspect(destination)
 

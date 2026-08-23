@@ -11,11 +11,10 @@ from boulder_frame_worker.media import (
     FFmpegRenderer,
     FFprobeAdapter,
     MediaMetadata,
-    _frame_expression,
-    crop_path_filter,
+    crop_annotation_filter,
     metadata_from_ffprobe,
     validate_output,
-    write_crop_path_filter,
+    write_crop_annotation_filter,
 )
 from boulder_frame_worker.planner import CropRect
 from boulder_frame_worker.protocol import AspectRatio
@@ -138,42 +137,26 @@ def test_invalid_media_is_classified(mutation: object, code: ErrorCode) -> None:
     assert raised.value.code is code
 
 
-def test_output_validation_requires_selected_dimensions() -> None:
+def test_output_validation_requires_source_display_dimensions() -> None:
     metadata = metadata_from_ffprobe(probe_payload())
     with pytest.raises(WorkerError) as raised:
-        validate_output(metadata, AspectRatio.LANDSCAPE)
+        validate_output(metadata, metadata.display_dimensions)
 
     assert raised.value.code is ErrorCode.INVALID_OUTPUT
 
 
-def test_crop_path_filter_normalizes_clockwise_rotation_before_cropping() -> None:
+def test_crop_annotation_filter_normalizes_clockwise_rotation_before_drawing() -> None:
     metadata = metadata_from_ffprobe(probe_payload())
     crop = CropRect(0, 0, 2160, 1215)
 
-    filter_graph = crop_path_filter([crop], metadata, AspectRatio.LANDSCAPE)
+    filter_graph = crop_annotation_filter([crop], metadata)
 
-    assert filter_graph.startswith("transpose=clock,crop=")
-    assert "scale=1920:1080" in filter_graph
+    assert filter_graph.startswith("transpose=clock,drawbox@crop=")
+    assert "w=2160.000000:h=1215.000000" in filter_graph
     assert "setsar=1" in filter_graph
 
 
-def test_frame_expression_uses_logarithmic_nesting_for_long_crop_paths() -> None:
-    expression = _frame_expression([float(index) for index in range(2520)])
-    depth = 0
-    maximum_depth = 0
-    for character in expression:
-        if character == "(":
-            depth += 1
-            maximum_depth = max(maximum_depth, depth)
-        elif character == ")":
-            depth -= 1
-
-    assert expression.count("if(") == 2519
-    assert depth == 0
-    assert maximum_depth <= 14
-
-
-def test_long_crop_path_filter_is_accepted_by_ffmpeg(tmp_path: Path) -> None:
+def test_long_crop_annotation_filter_is_accepted_by_ffmpeg(tmp_path: Path) -> None:
     if shutil.which("ffmpeg") is None:
         pytest.skip("FFmpeg is required for media integration tests")
     metadata = MediaMetadata(
@@ -186,12 +169,11 @@ def test_long_crop_path_filter_is_accepted_by_ffmpeg(tmp_path: Path) -> None:
         rotation=0,
         has_audio=False,
     )
-    script = tmp_path / "crop.ffscript"
-    write_crop_path_filter(
+    script = tmp_path / "annotation.ffscript"
+    write_crop_annotation_filter(
         script,
         [CropRect(0, 0, 160, 90)] * metadata.expected_frame_count,
         metadata,
-        AspectRatio.LANDSCAPE,
     )
 
     completed = subprocess.run(
@@ -252,7 +234,7 @@ def test_renderer_preserves_bounded_ffmpeg_diagnostics() -> None:
         ),
     ],
 )
-def test_renderer_creates_valid_decodable_mp4_from_crop_path(
+def test_renderer_creates_valid_decodable_mp4_with_crop_annotations(
     tmp_path: Path, aspect_ratio: AspectRatio, with_audio: bool, audio_duration: int | None
 ) -> None:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
@@ -314,22 +296,81 @@ def test_renderer_creates_valid_decodable_mp4_from_crop_path(
         else CropRect(59.375, 0, 50.625, 90)
     )
 
-    output_metadata = FFmpegRenderer().render_crop_path(
+    output_metadata = FFmpegRenderer().render_crop_annotations(
         source,
         destination,
         [crop, moving_crop],
         source_metadata,
-        aspect_ratio,
         inspector,
     )
 
     assert destination.exists()
-    assert (output_metadata.width, output_metadata.height) == (
-        (1920, 1080) if aspect_ratio is AspectRatio.LANDSCAPE else (1080, 1920)
-    )
+    assert (output_metadata.width, output_metadata.height) == source_metadata.display_dimensions
     assert output_metadata.video_codec == "h264"
     assert output_metadata.has_audio is with_audio
     assert abs(output_metadata.duration_ms - source_metadata.duration_ms) <= 500
+
+
+def test_renderer_draws_the_planned_bbox_on_each_source_frame(tmp_path: Path) -> None:
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("FFmpeg and ffprobe are required for media integration tests")
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "output.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:size=160x90:rate=2:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    inspector = FFprobeAdapter()
+    source_metadata = inspector.inspect(source)
+    FFmpegRenderer().render_crop_annotations(
+        source,
+        destination,
+        [CropRect(20, 10, 80, 45), CropRect(40, 10, 80, 45)],
+        source_metadata,
+        inspector,
+    )
+    decoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(destination),
+            "-frames:v",
+            "2",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    frame_size = 160 * 90 * 3
+
+    def is_lime(frame: int, x: int, y: int) -> bool:
+        offset = frame * frame_size + (y * 160 + x) * 3
+        red, green, blue = decoded[offset : offset + 3]
+        return green > 200 and red < 40 and blue < 40
+
+    assert is_lime(0, 20, 30)
+    assert not is_lime(1, 20, 30)
+    assert is_lime(1, 40, 30)
 
 
 def test_output_validation_requires_source_audio_and_duration_within_tolerance() -> None:
@@ -347,7 +388,7 @@ def test_output_validation_requires_source_audio_and_duration_within_tolerance()
     with pytest.raises(WorkerError) as raised:
         validate_output(
             metadata,
-            AspectRatio.LANDSCAPE,
+            (1920, 1080),
             expected_duration_ms=1000,
             duration_tolerance_ms=33,
             source_has_audio=True,

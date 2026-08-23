@@ -47,8 +47,8 @@ class FakeStorageClient:
 class FakeInspector:
     def inspect(self, path: Path) -> MediaMetadata:
         return MediaMetadata(
-            width=1920 if path.name == "output.mp4" else 160,
-            height=1080 if path.name == "output.mp4" else 90,
+            width=160,
+            height=90,
             duration_ms=1000,
             frame_rate=2,
             video_codec="h264",
@@ -59,9 +59,7 @@ class FakeInspector:
 
 
 class FakeRenderer:
-    def render_crop_path(
-        self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
-    ):
+    def render_crop_annotations(self, source, destination, crop_path, source_metadata, inspector):
         assert len(crop_path) == 2
         destination.write_bytes(b"x" * 42)
         return FakeInspector().inspect(destination)
@@ -210,8 +208,8 @@ def test_runtime_completes_job_when_pose_misses_transition_tracker_to_lost(tmp_p
             return [DecodedFrame(index, index * 200, IndexedPixels(index)) for index in range(5)]
 
     class FiveFrameRenderer:
-        def render_crop_path(
-            self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
+        def render_crop_annotations(
+            self, source, destination, crop_path, source_metadata, inspector
         ):
             assert len(crop_path) == 5
             destination.write_bytes(b"x" * 42)

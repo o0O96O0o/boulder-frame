@@ -13,7 +13,6 @@ from typing import Any, Protocol
 
 from .errors import ErrorCode, WorkerError, terminal
 from .planner import CropRect
-from .protocol import AspectRatio
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,29 +231,8 @@ def metadata_from_ffprobe(payload: dict[str, Any]) -> MediaMetadata:
     )
 
 
-def output_dimensions(aspect_ratio: AspectRatio) -> tuple[int, int]:
-    return (1920, 1080) if aspect_ratio is AspectRatio.LANDSCAPE else (1080, 1920)
-
-
 def expected_frame_count(metadata: MediaMetadata) -> int:
     return metadata.expected_frame_count
-
-
-def _frame_expression(values: Sequence[float]) -> str:
-    if not values:
-        raise ValueError("crop path must not be empty")
-
-    def select(start: int, end: int) -> str:
-        if end - start == 1:
-            return f"{values[start]:.6f}"
-        middle = (start + end) // 2
-        return (
-            f"if(lt(n\\,{middle})\\,{select(start, middle)}\\,{select(middle, end)})"
-        )
-
-    # FFmpeg's expression parser cannot handle one nested conditional per source frame.
-    # A balanced tree retains exact frame lookup while bounding nesting depth logarithmically.
-    return select(0, len(values))
 
 
 def _rotation_filter(rotation: int) -> str | None:
@@ -266,13 +244,22 @@ def _rotation_filter(rotation: int) -> str | None:
     }[rotation]
 
 
-def crop_path_filter(
-    crop_path: Sequence[CropRect], metadata: MediaMetadata, aspect_ratio: AspectRatio
-) -> str:
-    """Return a filter graph that applies one display-coordinate crop per input frame."""
+def _crop_annotation_commands(crop_path: Sequence[CropRect], metadata: MediaMetadata) -> str:
+    commands = []
+    for index, crop in enumerate(crop_path[1:], start=1):
+        time = float(Fraction(index, 1) / metadata.frame_rate)
+        commands.append(
+            f"{time:.6f} drawbox@crop x {crop.x:.6f},"
+            f"drawbox@crop y {crop.y:.6f},"
+            f"drawbox@crop w {crop.width:.6f},"
+            f"drawbox@crop h {crop.height:.6f}"
+        )
+    return ";".join(commands)
+
+
+def crop_annotation_filter(crop_path: Sequence[CropRect], metadata: MediaMetadata) -> str:
+    """Return a filter graph that draws each display-coordinate crop on its source frame."""
     display_width, display_height = metadata.display_dimensions
-    output_width, output_height = output_dimensions(aspect_ratio)
-    expected_aspect = output_width / output_height
     for crop in crop_path:
         if (
             crop.width <= 0
@@ -281,31 +268,29 @@ def crop_path_filter(
             or crop.y < 0
             or crop.right > display_width
             or crop.bottom > display_height
-            or not math.isclose(crop.width / crop.height, expected_aspect, rel_tol=1e-6)
         ):
             raise terminal(ErrorCode.INVALID_OUTPUT, "Planned crop path is invalid.")
 
-    width = _frame_expression([crop.width for crop in crop_path])
-    height = _frame_expression([crop.height for crop in crop_path])
-    x = _frame_expression([crop.x for crop in crop_path])
-    y = _frame_expression([crop.y for crop in crop_path])
+    initial = crop_path[0]
     filters = [rotation_filter] if (rotation_filter := _rotation_filter(metadata.rotation)) else []
+    if commands := _crop_annotation_commands(crop_path, metadata):
+        filters.append(f"sendcmd=commands='{commands}'")
     filters.append(
-        f"crop=w='{width}':h='{height}':x='{x}':y='{y}',"
-        f"scale={output_width}:{output_height}:flags=lanczos"
+        f"drawbox@crop=x={initial.x:.6f}:y={initial.y:.6f}:"
+        f"w={initial.width:.6f}:h={initial.height:.6f}:color=lime@0.9:thickness=8"
     )
     filters.append("setsar=1")
     return ",".join(filters)
 
 
-def write_crop_path_filter(
-    path: Path, crop_path: Sequence[CropRect], metadata: MediaMetadata, aspect_ratio: AspectRatio
+def write_crop_annotation_filter(
+    path: Path, crop_path: Sequence[CropRect], metadata: MediaMetadata
 ) -> None:
-    path.write_text(crop_path_filter(crop_path, metadata, aspect_ratio), encoding="ascii")
+    path.write_text(crop_annotation_filter(crop_path, metadata), encoding="ascii")
 
 
 class FFmpegRenderer:
-    """Renders a frame-accurate crop-path filter with source audio when present."""
+    """Renders frame-accurate crop annotations with source audio when present."""
 
     def __init__(self, binary: str = "ffmpeg", runner: CommandRunner | None = None) -> None:
         self.binary = binary
@@ -387,13 +372,12 @@ class FFmpegRenderer:
                 ErrorCode.INVALID_OUTPUT, "Rendered video could not be decoded."
             ) from error
 
-    def render_crop_path(
+    def render_crop_annotations(
         self,
         source: Path,
         destination: Path,
         crop_path: Sequence[CropRect],
         source_metadata: MediaMetadata,
-        aspect_ratio: AspectRatio,
         inspector: FFprobeAdapter,
     ) -> MediaMetadata:
         if len(crop_path) != expected_frame_count(source_metadata):
@@ -401,7 +385,7 @@ class FFmpegRenderer:
                 ErrorCode.INVALID_OUTPUT, "Planned crop path does not cover the source video."
             )
         filter_script = destination.with_suffix(".ffscript")
-        write_crop_path_filter(filter_script, crop_path, source_metadata, aspect_ratio)
+        write_crop_annotation_filter(filter_script, crop_path, source_metadata)
         self.render(
             source,
             destination,
@@ -417,7 +401,7 @@ class FFmpegRenderer:
             ) from error
         validate_output(
             output_metadata,
-            aspect_ratio,
+            source_metadata.display_dimensions,
             expected_duration_ms=source_metadata.duration_ms,
             duration_tolerance_ms=math.ceil(1000 / float(source_metadata.frame_rate)),
             source_has_audio=source_metadata.has_audio,
@@ -428,14 +412,13 @@ class FFmpegRenderer:
 
 def validate_output(
     metadata: MediaMetadata,
-    aspect_ratio: AspectRatio,
+    expected_dimensions: tuple[int, int],
     *,
     expected_duration_ms: int | None = None,
     duration_tolerance_ms: int | None = None,
     source_has_audio: bool | None = None,
 ) -> None:
-    expected = output_dimensions(aspect_ratio)
-    if (metadata.width, metadata.height) != expected:
+    if (metadata.width, metadata.height) != expected_dimensions:
         raise terminal(ErrorCode.INVALID_OUTPUT, "Rendered video dimensions are invalid.")
     if metadata.video_codec != "h264":
         raise terminal(ErrorCode.INVALID_OUTPUT, "Rendered video codec is invalid.")

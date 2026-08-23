@@ -101,7 +101,7 @@ When a source contains action-camera metadata or non-decodable `codec_name=none`
 the worker ignores those tracks and maps only the validated AAC stream by its absolute input-stream
 index. Other decodable audio codecs remain unsupported.
 
-Rotation metadata is read from stream tags or side data. `display_dimensions` swaps width and height for 90/270-degree rotation. The renderer adapter is responsible for applying normalization; the current foundation does not yet implement the complete rotation-aware render pipeline.
+Rotation metadata is read from stream tags or side data. `display_dimensions` swaps width and height for 90/270-degree rotation. The renderer applies that normalization before drawing crop annotations, so output coordinates and pixels use the same display coordinate system.
 
 ## Errors
 
@@ -116,7 +116,7 @@ durable stages:
 1. `validating`: downloads the immutable source key and validates it with `ffprobe`.
 2. `analyzing`: maps the immutable target selection, emits detector/pose observations through injected
    adapters, tracks them, and generates a deterministic crop path.
-3. `rendering`: regenerates the crop path, renders it with FFmpeg, and validates the MP4.
+3. `rendering`: regenerates the crop path, draws each final crop rectangle on its original display-normalized frame with FFmpeg, and validates the MP4.
 4. `uploading`: revalidates or recreates the deterministic output, uploads and heads
    `private/output/{project_id}/{job_id}.mp4`, then performs lease-guarded artifact finalization.
 
@@ -138,11 +138,11 @@ immutable CFR metadata. No model weights are downloaded or inferred from configu
 
 ## Rendering Boundary
 
-`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The crop script uses a balanced per-frame decision tree, avoiding FFmpeg expression-parser nesting limits while preserving exact source-frame crop selection. It maps video and the single validated AAC input stream, encodes H.264/AAC, and uses `+faststart`. `validate_output` checks output dimensions and codecs. `ProcessingPipeline` generates the crop-path filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
+`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The annotation script uses FFmpeg `sendcmd` updates so every source frame receives its exact final crop rectangle without expression-size limits. It rotation-normalizes the source, draws the rectangle in lime, maps video and the single validated AAC input stream, encodes H.264/AAC, and uses `+faststart`. `validate_output` requires display-normalized source dimensions and validates codecs. `ProcessingPipeline` generates the annotation filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
 
 ```mermaid
 flowchart LR
-    P[Planned crop per source frame] --> T[Balanced FFmpeg crop decision tree]
-    T --> R[FFmpeg crop scale encode]
+    P[Planned crop per source frame] --> T[FFmpeg per-frame drawbox commands]
+    T --> R[Original frame annotation encode]
     R --> V[ffprobe and decode validation]
 ```

@@ -154,3 +154,35 @@ func TestJobValidationDoesNotPublishInvalidRequest(t *testing.T) {
 		t.Fatalf("status %d publish count %d", rec.Code, q.count)
 	}
 }
+
+func TestCompletedJobDownloadAllowsOutputWithoutFilename(t *testing.T) {
+	projectID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	outputID := uuid.New()
+	repo := &fakeRepo{
+		project: domain.Project{ID: projectID},
+		asset: domain.Asset{
+			ID:          outputID,
+			ProjectID:   projectID,
+			Kind:        domain.AssetOutput,
+			StorageKey:  "private/output/project/job.mp4",
+			UploadState: domain.UploadUploaded,
+		},
+		job: domain.Job{
+			ID:            uuid.New(),
+			ProjectID:     projectID,
+			State:         domain.JobCompleted,
+			OutputAssetID: &outputID,
+		},
+	}
+	h := &Handler{Repo: repo, Store: fakeStore{}, Owner: domain.OwnerDevelopment, URLTTL: time.Hour}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+repo.job.ID.String()+"/download", nil)
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"download_url":"https://download.test"`) {
+		t.Fatalf("unexpected response %s", rec.Body.String())
+	}
+}

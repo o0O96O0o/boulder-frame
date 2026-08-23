@@ -63,7 +63,7 @@ func (p *PG) CreateSourceAsset(ctx context.Context, id, project uuid.UUID, filen
 }
 func (p *PG) GetAsset(ctx context.Context, id uuid.UUID) (domain.Asset, error) {
 	var x domain.Asset
-	err := p.pool.QueryRow(ctx, `SELECT id,project_id,kind,storage_key,upload_state,filename,content_type,size_bytes,COALESCE(width,0),COALESCE(height,0),COALESCE(frame_rate,0),COALESCE(duration_ms,0),created_at FROM assets WHERE id=$1`, id).Scan(&x.ID, &x.ProjectID, &x.Kind, &x.StorageKey, &x.UploadState, &x.Filename, &x.ContentType, &x.SizeBytes, &x.Width, &x.Height, &x.FrameRate, &x.DurationMS, &x.CreatedAt)
+	err := p.pool.QueryRow(ctx, `SELECT id,project_id,kind,storage_key,upload_state,COALESCE(filename,''),content_type,size_bytes,COALESCE(width,0),COALESCE(height,0),COALESCE(frame_rate,0),COALESCE(duration_ms,0),created_at FROM assets WHERE id=$1`, id).Scan(&x.ID, &x.ProjectID, &x.Kind, &x.StorageKey, &x.UploadState, &x.Filename, &x.ContentType, &x.SizeBytes, &x.Width, &x.Height, &x.FrameRate, &x.DurationMS, &x.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return x, ErrNotFound
 	}
