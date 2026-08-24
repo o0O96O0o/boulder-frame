@@ -3,6 +3,8 @@ import pytest
 from boulder_frame_worker.config import (
     DEFAULT_DEBUG_MAX_BYTES,
     DEFAULT_DEBUG_MAX_FRAMES,
+    DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES,
+    DEFAULT_NORMALIZATION_TIMEOUT_SECONDS,
     LOCAL_ENV_UNCONFIGURED_MODEL_VERSION,
     UNCONFIGURED_MODEL_VERSION,
     ConfigError,
@@ -22,6 +24,8 @@ def test_config_uses_safe_defaults() -> None:
     assert config.debug_require_private_storage
     assert config.debug_max_frames == DEFAULT_DEBUG_MAX_FRAMES
     assert config.debug_max_bytes == DEFAULT_DEBUG_MAX_BYTES
+    assert config.normalization_max_source_bytes == DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
+    assert config.normalization_timeout_seconds == DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
 
 
 def test_config_normalizes_local_env_unconfigured_model_sentinel() -> None:
@@ -65,7 +69,15 @@ def test_config_parses_debug_capture_separately_from_scratch_retention() -> None
         WorkerConfig.from_mapping({"debug_require_private_storage": "sometimes"})
 
 
-@pytest.mark.parametrize("name", ["debug_max_frames", "debug_max_bytes"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "debug_max_frames",
+        "debug_max_bytes",
+        "normalization_max_source_bytes",
+        "normalization_timeout_seconds",
+    ],
+)
 @pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
 def test_config_rejects_invalid_debug_limits(name: str, value: str) -> None:
     with pytest.raises(ConfigError, match=name):
@@ -73,11 +85,20 @@ def test_config_rejects_invalid_debug_limits(name: str, value: str) -> None:
 
 
 def test_config_parses_debug_limits_separately_from_capture() -> None:
-    config = WorkerConfig.from_mapping({"debug_max_frames": "25", "debug_max_bytes": "4096"})
+    config = WorkerConfig.from_mapping(
+        {
+            "debug_max_frames": "25",
+            "debug_max_bytes": "4096",
+            "normalization_max_source_bytes": "8192",
+            "normalization_timeout_seconds": "60",
+        }
+    )
 
     assert not config.debug_capture
     assert config.debug_max_frames == 25
     assert config.debug_max_bytes == 4096
+    assert config.normalization_max_source_bytes == 8192
+    assert config.normalization_timeout_seconds == 60
 
 
 def test_runtime_config_requires_adapter_urls() -> None:

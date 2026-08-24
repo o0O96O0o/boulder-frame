@@ -19,6 +19,8 @@ UNCONFIGURED_MODEL_VERSION = "unconfigured"
 LOCAL_ENV_UNCONFIGURED_MODEL_VERSION = "unset-until-pinned"
 DEFAULT_DEBUG_MAX_FRAMES = 10_000
 DEFAULT_DEBUG_MAX_BYTES = 50 * 1024 * 1024
+DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES = 1024 * 1024 * 1024
+DEFAULT_NORMALIZATION_TIMEOUT_SECONDS = 30 * 60
 
 
 def _positive_int(value: str, name: str) -> int:
@@ -70,6 +72,8 @@ class WorkerConfig:
     debug_require_private_storage: bool = True
     debug_max_frames: int = DEFAULT_DEBUG_MAX_FRAMES
     debug_max_bytes: int = DEFAULT_DEBUG_MAX_BYTES
+    normalization_max_source_bytes: int = DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
+    normalization_timeout_seconds: int = DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]) -> WorkerConfig:
@@ -142,6 +146,22 @@ class WorkerConfig:
             ),
             debug_max_bytes=_positive_int(
                 str(worker.get("debug_max_bytes", DEFAULT_DEBUG_MAX_BYTES)), "debug_max_bytes"
+            ),
+            normalization_max_source_bytes=_positive_int(
+                str(
+                    worker.get(
+                        "normalization_max_source_bytes", DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
+                    )
+                ),
+                "normalization_max_source_bytes",
+            ),
+            normalization_timeout_seconds=_positive_int(
+                str(
+                    worker.get(
+                        "normalization_timeout_seconds", DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
+                    )
+                ),
+                "normalization_timeout_seconds",
             ),
         )
 

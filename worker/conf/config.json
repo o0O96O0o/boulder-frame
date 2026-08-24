@@ -22,5 +22,7 @@
   "debug_capture": true,
   "debug_require_private_storage": false,
   "debug_max_frames": 10000,
-  "debug_max_bytes": 52428800
+  "debug_max_bytes": 52428800,
+  "normalization_max_source_bytes": 1073741824,
+  "normalization_timeout_seconds": 1800
 }

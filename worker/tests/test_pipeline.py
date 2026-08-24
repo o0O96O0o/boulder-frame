@@ -1,12 +1,13 @@
 import gzip
 import json
+from fractions import Fraction
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from boulder_frame_worker.debug import append_debug_record
-from boulder_frame_worker.errors import ErrorCode, WorkerError, transient
+from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal, transient
 from boulder_frame_worker.measurement import (
     Detection,
     Point,
@@ -76,7 +77,21 @@ class Renderer:
         return Inspector().inspect(destination)
 
 
-def _record() -> JobRecord:
+class Normalizer:
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[tuple[Path, Path, Fraction, int | None]] = []
+        self.fail = fail
+
+    def normalize(
+        self, source: Path, destination: Path, frame_rate: Fraction, audio_stream_index: int | None
+    ) -> None:
+        self.calls.append((source, destination, frame_rate, audio_stream_index))
+        if self.fail:
+            raise terminal(ErrorCode.INVALID_MEDIA, "Video timing could not be normalized.")
+        destination.write_bytes(b"cfr")
+
+
+def _record(*, source_size_bytes: int = 1) -> JobRecord:
     source_id = uuid4()
     return JobRecord(
         uuid4(),
@@ -90,7 +105,17 @@ def _record() -> JobRecord:
             {},
         ),
         source_asset=SourceAsset(
-            source_id, uuid4(), "source", "uploaded", None, None, 1, None, None, None, None
+            source_id,
+            uuid4(),
+            "source",
+            "uploaded",
+            None,
+            None,
+            source_size_bytes,
+            None,
+            None,
+            None,
+            None,
         ),
     )
 
@@ -148,6 +173,114 @@ def test_upload_database_finalization_failure_is_transient(tmp_path) -> None:
     assert raised.value.transient
     assert storage.uploaded == 1
     assert finalizer.outputs == []
+
+
+def test_pipeline_uses_original_source_without_normalization_for_cfr_media(tmp_path) -> None:
+    normalizer = Normalizer()
+    pipeline = ProcessingPipeline(
+        Storage(), Finalizer(), inspector=Inspector(), renderer=Renderer(), normalizer=normalizer
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+
+    inputs = pipeline._inputs(_record(), scratch)
+
+    assert inputs.source == scratch / "source-original"
+    assert inputs.source.read_bytes() == b"source"
+    assert normalizer.calls == []
+
+
+def test_pipeline_normalizes_vfr_media_once_and_uses_derivative_downstream(tmp_path) -> None:
+    class VFRInspector:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Path, bool]] = []
+
+        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
+            self.calls.append((path, allow_variable_frame_rate))
+            if path.name == "source-original" and not allow_variable_frame_rate:
+                raise terminal(
+                    ErrorCode.VARIABLE_FRAME_RATE, "Variable-frame-rate video is not supported."
+                )
+            return MediaMetadata(
+                1920, 1080, 1000, Fraction(30000, 1001), "h264", "aac", 0, True, None, 4
+            )
+
+    inspector = VFRInspector()
+    normalizer = Normalizer()
+    pipeline = ProcessingPipeline(
+        Storage(), Finalizer(), inspector=inspector, renderer=Renderer(), normalizer=normalizer
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+
+    inputs = pipeline._inputs(_record(), scratch)
+    repeated_inputs = pipeline._inputs(_record(), scratch)
+
+    assert inputs.source == scratch / "source-cfr.mp4"
+    assert repeated_inputs.source == scratch / "source-cfr.mp4"
+    assert normalizer.calls == [
+        (scratch / "source-original", scratch / "source-cfr.mp4", Fraction(30000, 1001), 4)
+    ]
+    assert inspector.calls == [
+        (scratch / "source-original", False),
+        (scratch / "source-original", True),
+        (scratch / "source-cfr.mp4", False),
+        (scratch / "source-original", False),
+        (scratch / "source-original", True),
+        (scratch / "source-cfr.mp4", False),
+    ]
+
+
+def test_pipeline_stops_when_vfr_normalization_fails(tmp_path) -> None:
+    class VFRInspector:
+        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
+            if not allow_variable_frame_rate:
+                raise terminal(
+                    ErrorCode.VARIABLE_FRAME_RATE, "Variable-frame-rate video is not supported."
+                )
+            return MediaMetadata(1920, 1080, 1000, Fraction(30, 1), "h264", None, 0, False)
+
+    normalizer = Normalizer(fail=True)
+    pipeline = ProcessingPipeline(
+        Storage(), Finalizer(), inspector=VFRInspector(), renderer=Renderer(), normalizer=normalizer
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+
+    with pytest.raises(WorkerError, match="Video timing could not be normalized"):
+        pipeline._inputs(_record(), scratch)
+
+    assert len(normalizer.calls) == 1
+    assert not (scratch / "source-cfr.mp4").exists()
+
+
+def test_pipeline_rejects_vfr_source_larger_than_normalization_limit(tmp_path) -> None:
+    class VFRInspector:
+        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
+            if not allow_variable_frame_rate:
+                raise terminal(
+                    ErrorCode.VARIABLE_FRAME_RATE, "Variable-frame-rate video is not supported."
+                )
+            return MediaMetadata(1920, 1080, 1000, Fraction(30, 1), "h264", None, 0, False)
+
+    normalizer = Normalizer()
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=VFRInspector(),
+        renderer=Renderer(),
+        normalizer=normalizer,
+        normalization_max_source_bytes=100,
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+
+    with pytest.raises(WorkerError) as raised:
+        pipeline._inputs(_record(source_size_bytes=101), scratch)
+
+    assert raised.value.code is ErrorCode.INVALID_MEDIA
+    assert raised.value.message == "This variable-frame-rate video is too large to normalize."
+    assert normalizer.calls == []
 
 
 def test_pipeline_routes_pose_misses_through_tracker_loss_without_failing(tmp_path) -> None:

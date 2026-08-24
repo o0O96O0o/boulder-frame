@@ -401,3 +401,5 @@ def test_runtime_creates_default_frame_reader_only_with_loaded_baseline_models(
     )
 
     assert isinstance(captured["frame_reader"], Reader)
+    assert isinstance(captured["normalizer"], runtime.FFmpegCFRNormalizer)
+    assert captured["normalizer"].timeout_seconds == 1800

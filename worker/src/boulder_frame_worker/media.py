@@ -54,7 +54,17 @@ class MediaMetadata:
 
 
 class CommandRunner(Protocol):
-    def run(self, arguments: list[str]) -> str: ...
+    def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str: ...
+
+
+class CFRNormalizer(Protocol):
+    def normalize(
+        self,
+        source: Path,
+        destination: Path,
+        frame_rate: Fraction,
+        audio_stream_index: int | None,
+    ) -> None: ...
 
 
 def _command_diagnostic(stderr: str | None) -> str | None:
@@ -67,12 +77,26 @@ def _command_diagnostic(stderr: str | None) -> str | None:
 
 
 class SubprocessRunner:
-    def run(self, arguments: list[str]) -> str:
+    def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
         try:
-            completed = subprocess.run(arguments, capture_output=True, check=True, text=True)
+            completed = subprocess.run(
+                arguments,
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
         except FileNotFoundError as error:
             raise terminal(
                 ErrorCode.INTERNAL, f"Required media tool is unavailable: {arguments[0]}."
+            ) from error
+        except subprocess.TimeoutExpired as error:
+            raise terminal(
+                ErrorCode.INTERNAL,
+                "Media processing exceeded its time limit.",
+                diagnostic=_command_diagnostic(
+                    error.stderr.decode() if isinstance(error.stderr, bytes) else error.stderr
+                ),
             ) from error
         except subprocess.CalledProcessError as error:
             raise terminal(
@@ -88,7 +112,7 @@ class FFprobeAdapter:
         self.binary = binary
         self.runner = runner or SubprocessRunner()
 
-    def inspect(self, path: Path) -> MediaMetadata:
+    def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
         output = self.runner.run(
             [
                 self.binary,
@@ -109,7 +133,7 @@ class FFprobeAdapter:
             ) from error
         if not isinstance(payload, dict):
             raise terminal(ErrorCode.INVALID_MEDIA, "Video media could not be inspected.")
-        return metadata_from_ffprobe(payload)
+        return metadata_from_ffprobe(payload, allow_variable_frame_rate=allow_variable_frame_rate)
 
 
 def _stream(payload: dict[str, Any], codec_type: str) -> dict[str, Any] | None:
@@ -194,7 +218,9 @@ def _video_duration(video: dict[str, Any]) -> Fraction:
     return duration
 
 
-def metadata_from_ffprobe(payload: dict[str, Any]) -> MediaMetadata:
+def metadata_from_ffprobe(
+    payload: dict[str, Any], *, allow_variable_frame_rate: bool = False
+) -> MediaMetadata:
     format_info = payload.get("format")
     format_name = format_info.get("format_name") if isinstance(format_info, dict) else None
     if not isinstance(format_name, str) or not {"mp4", "mov"}.intersection(format_name.split(",")):
@@ -209,7 +235,7 @@ def metadata_from_ffprobe(payload: dict[str, Any]) -> MediaMetadata:
         raise terminal(ErrorCode.UNSUPPORTED_VIDEO_CODEC, "Only H.264 or HEVC video is supported.")
     avg_rate = _fraction(video.get("avg_frame_rate"))
     real_rate = _fraction(video.get("r_frame_rate"))
-    if avg_rate != real_rate:
+    if avg_rate != real_rate and not allow_variable_frame_rate:
         raise terminal(ErrorCode.VARIABLE_FRAME_RATE, "Variable-frame-rate video is not supported.")
     width, height = video.get("width"), video.get("height")
     if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
@@ -229,6 +255,73 @@ def metadata_from_ffprobe(payload: dict[str, Any]) -> MediaMetadata:
         video_duration=video_duration,
         audio_stream_index=audio_stream_index,
     )
+
+
+class FFmpegCFRNormalizer:
+    """Creates a display-rotation-normalized H.264/AAC CFR derivative for analysis."""
+
+    def __init__(
+        self,
+        binary: str = "ffmpeg",
+        runner: CommandRunner | None = None,
+        timeout_seconds: int = 30 * 60,
+    ) -> None:
+        self.binary = binary
+        self.runner = runner or SubprocessRunner()
+        self.timeout_seconds = timeout_seconds
+
+    def normalize(
+        self,
+        source: Path,
+        destination: Path,
+        frame_rate: Fraction,
+        audio_stream_index: int | None,
+    ) -> None:
+        audio_mapping = (
+            ["-map", f"0:{audio_stream_index}"] if audio_stream_index is not None else []
+        )
+        try:
+            self.runner.run(
+                [
+                    self.binary,
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-vf",
+                    f"fps=fps={frame_rate}",
+                    "-fps_mode:v",
+                    "cfr",
+                    "-map",
+                    "0:v:0",
+                    *audio_mapping,
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "medium",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-map_metadata",
+                    "-1",
+                    "-metadata:s:v:0",
+                    "rotate=0",
+                    "-movflags",
+                    "+faststart",
+                    str(destination),
+                ],
+                timeout_seconds=self.timeout_seconds,
+            )
+        except WorkerError as error:
+            if error.code is not ErrorCode.INVALID_MEDIA:
+                raise
+            raise terminal(
+                ErrorCode.INVALID_MEDIA,
+                "Video timing could not be normalized.",
+                diagnostic=error.diagnostic,
+            ) from error
 
 
 def expected_frame_count(metadata: MediaMetadata) -> int:
@@ -338,7 +431,6 @@ class FFmpegRenderer:
                     "rotate=0",
                     "-movflags",
                     "+faststart",
-                    "-shortest",
                     str(destination),
                 ]
             )

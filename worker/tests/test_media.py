@@ -8,6 +8,7 @@ import pytest
 
 from boulder_frame_worker.errors import ErrorCode, WorkerError
 from boulder_frame_worker.media import (
+    FFmpegCFRNormalizer,
     FFmpegRenderer,
     FFprobeAdapter,
     MediaMetadata,
@@ -61,6 +62,15 @@ def test_hevc_quicktime_metadata_is_supported() -> None:
     assert metadata.video_codec == "hevc"
 
 
+def test_permissive_inspection_retains_supported_vfr_metadata() -> None:
+    data = probe_payload()
+    data["streams"][0].update(avg_frame_rate="30000/1001")  # type: ignore[index]
+
+    metadata = metadata_from_ffprobe(data, allow_variable_frame_rate=True)
+
+    assert metadata.frame_rate == Fraction(30000, 1001)
+
+
 def test_aac_stream_is_selected_without_mapping_codec_none_tracks() -> None:
     data = probe_payload()
     data["streams"] = [
@@ -81,7 +91,8 @@ def test_renderer_maps_only_the_validated_aac_stream() -> None:
         def __init__(self) -> None:
             self.arguments: list[str] = []
 
-        def run(self, arguments: list[str]) -> str:
+        def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
+            del timeout_seconds
             self.arguments = arguments
             return ""
 
@@ -97,6 +108,74 @@ def test_renderer_maps_only_the_validated_aac_stream() -> None:
     assert ["-map", "0:v:0", "-map", "0:3"] == runner.arguments[
         runner.arguments.index("-map") : runner.arguments.index("-r")
     ]
+    assert "-shortest" not in runner.arguments
+
+
+def test_normalizer_creates_rotation_normalized_cfr_h264_aac_derivative() -> None:
+    class CapturingRunner:
+        def __init__(self) -> None:
+            self.arguments: list[str] = []
+            self.timeout_seconds: int | None = None
+
+        def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
+            self.arguments = arguments
+            self.timeout_seconds = timeout_seconds
+            return ""
+
+    runner = CapturingRunner()
+    FFmpegCFRNormalizer(runner=runner, timeout_seconds=123).normalize(
+        Path("source.mov"), Path("source-cfr.mp4"), Fraction(30000, 1001), 3
+    )
+
+    assert "-noautorotate" not in runner.arguments
+    assert ["-vf", "fps=fps=30000/1001", "-fps_mode:v", "cfr"] == runner.arguments[
+        runner.arguments.index("-vf") : runner.arguments.index("-map")
+    ]
+    assert ["-map", "0:v:0", "-map", "0:3"] == runner.arguments[
+        runner.arguments.index("-map") : runner.arguments.index("-c:v")
+    ]
+    assert ["-map_metadata", "-1", "-metadata:s:v:0", "rotate=0"] == runner.arguments[
+        runner.arguments.index("-map_metadata") : runner.arguments.index("-movflags")
+    ]
+    assert "-shortest" not in runner.arguments
+    assert runner.timeout_seconds == 123
+
+
+@pytest.mark.parametrize("code", [ErrorCode.INTERNAL, ErrorCode.STORAGE_UNAVAILABLE])
+def test_normalizer_preserves_non_media_error_classification(code: ErrorCode) -> None:
+    class FailingRunner:
+        def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
+            del arguments, timeout_seconds
+            raise WorkerError(code, "media tool is unavailable", diagnostic="missing ffmpeg")
+
+    with pytest.raises(WorkerError) as raised:
+        FFmpegCFRNormalizer(runner=FailingRunner()).normalize(
+            Path("source.mov"), Path("source-cfr.mp4"), Fraction(30, 1), None
+        )
+
+    assert raised.value.code is code
+    assert raised.value.message == "media tool is unavailable"
+    assert raised.value.diagnostic == "missing ffmpeg"
+
+
+def test_normalizer_reports_user_safe_media_error() -> None:
+    class FailingRunner:
+        def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
+            del arguments, timeout_seconds
+            raise WorkerError(
+                ErrorCode.INVALID_MEDIA,
+                "Video media could not be inspected.",
+                diagnostic="FFmpeg normalization failed.",
+            )
+
+    with pytest.raises(WorkerError) as raised:
+        FFmpegCFRNormalizer(runner=FailingRunner()).normalize(
+            Path("source.mov"), Path("source-cfr.mp4"), Fraction(30, 1), None
+        )
+
+    assert raised.value.code is ErrorCode.INVALID_MEDIA
+    assert raised.value.message == "Video timing could not be normalized."
+    assert raised.value.diagnostic == "FFmpeg normalization failed."
 
 
 def test_video_timing_is_used_when_container_duration_includes_longer_audio() -> None:
@@ -309,6 +388,114 @@ def test_renderer_creates_valid_decodable_mp4_with_crop_annotations(
     assert output_metadata.video_codec == "h264"
     assert output_metadata.has_audio is with_audio
     assert abs(output_metadata.duration_ms - source_metadata.duration_ms) <= 500
+
+
+@pytest.mark.parametrize("audio_duration", [1, 3], ids=["shorter-audio", "longer-audio"])
+def test_normalizer_preserves_vfr_video_duration_with_optional_aac(
+    tmp_path: Path, audio_duration: int
+) -> None:
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("FFmpeg and ffprobe are required for media integration tests")
+    source = tmp_path / "source-vfr.mp4"
+    destination = tmp_path / "source-cfr.mp4"
+    output = tmp_path / "output.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x90:rate=30:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:sample_rate=48000:duration={audio_duration}",
+            "-vf",
+            "select=not(mod(n\\,2))",
+            "-fps_mode:v",
+            "vfr",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    inspector = FFprobeAdapter()
+    with pytest.raises(WorkerError) as raised:
+        inspector.inspect(source)
+    assert raised.value.code is ErrorCode.VARIABLE_FRAME_RATE
+
+    source_metadata = inspector.inspect(source, allow_variable_frame_rate=True)
+    FFmpegCFRNormalizer().normalize(
+        source, destination, source_metadata.frame_rate, source_metadata.audio_stream_index
+    )
+    derivative = inspector.inspect(destination)
+
+    assert derivative.frame_rate == source_metadata.frame_rate
+    assert derivative.has_audio
+    assert derivative.rotation == 0
+    assert derivative.duration_ms >= source_metadata.duration_ms - 100
+    derivative.frame_for_time_ms(source_metadata.duration_ms - 200)
+    if audio_duration > 1:
+        derivative_duration = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(destination),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert float(derivative_duration.stdout) > source_metadata.duration_ms / 1000
+
+    rendered = FFmpegRenderer().render_crop_annotations(
+        destination,
+        output,
+        [CropRect(0, 0, derivative.width, derivative.height)] * derivative.expected_frame_count,
+        derivative,
+        inspector,
+    )
+
+    assert rendered.duration_ms >= source_metadata.duration_ms - 100
+    rendered.frame_for_time_ms(source_metadata.duration_ms - 200)
+    if audio_duration > 1:
+        rendered_duration = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert float(rendered_duration.stdout) > source_metadata.duration_ms / 1000
 
 
 def test_renderer_draws_the_planned_bbox_on_each_source_frame(tmp_path: Path) -> None:

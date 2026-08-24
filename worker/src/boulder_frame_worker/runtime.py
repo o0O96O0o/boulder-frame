@@ -7,7 +7,7 @@ from typing import Protocol, cast
 from .config import UNCONFIGURED_MODEL_VERSION, WorkerConfig
 from .frame_reader import FrameReaderUnavailable, OpenCVFrameReader
 from .measurement import PersonDetector, PoseEstimator
-from .media import FFmpegRenderer, FFprobeAdapter
+from .media import CFRNormalizer, FFmpegCFRNormalizer, FFmpegRenderer, FFprobeAdapter
 from .models import (
     MODEL_VERSION,
     MediaPipePoseLandmarkerFull,
@@ -105,6 +105,7 @@ def compose_runtime(
     planner_factory: PlannerFactory | None = None,
     inspector: FFprobeAdapter | None = None,
     renderer: FFmpegRenderer | None = None,
+    normalizer: CFRNormalizer | None = None,
 ) -> WorkerRuntime:
     config.validate_runtime()
     if repository is None:
@@ -153,6 +154,10 @@ def compose_runtime(
         cast(OutputFinalizer, repository),  # PostgresJobRepository owns guarded finalization.
         inspector=inspector or FFprobeAdapter(config.ffprobe_bin),
         renderer=renderer or FFmpegRenderer(config.ffmpeg_bin),
+        normalizer=normalizer
+        or FFmpegCFRNormalizer(
+            config.ffmpeg_bin, timeout_seconds=config.normalization_timeout_seconds
+        ),
         frame_reader=frame_reader,
         detector=detector,
         pose_estimator=pose_estimator,
@@ -161,6 +166,7 @@ def compose_runtime(
         debug_capture=config.debug_capture,
         debug_max_frames=config.debug_max_frames,
         debug_max_bytes=config.debug_max_bytes,
+        normalization_max_source_bytes=config.normalization_max_source_bytes,
     )
     worker = Worker(config, repository, config.worker_id)
     consumer = QueueConsumerAdapter(

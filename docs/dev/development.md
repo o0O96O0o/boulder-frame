@@ -29,6 +29,11 @@ pending-entry reclaim idle time, heartbeat interval, and concurrency. Set unique
 for concurrent worker processes. PostgreSQL remains the job-lease authority; Redis consumer-group
 pending state is only delivery coordination.
 
+Worker `conf/config.json` and `conf/config.dev.json` set VFR normalization limits:
+`normalization_max_source_bytes` defaults to 1 GiB and `normalization_timeout_seconds` to 1,800.
+The API upload ceiling is 2 GiB; the lower VFR cap reserves scratch capacity for the immutable download
+and temporary CFR derivative. Lower either value for a deployment with less disk or processing budget.
+
 ## Start Modules
 
 Start the complete module set with:

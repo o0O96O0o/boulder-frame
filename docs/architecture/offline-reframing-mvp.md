@@ -22,7 +22,9 @@ This document is the authoritative implementation specification, including the p
 - One continuous shot from a static phone or tripod.
 - 4K input is the recommended source resolution.
 - One intended athlete.
-- Constant-frame-rate video with a supported FFmpeg decode path.
+- MP4 or QuickTime MOV video with a supported FFmpeg decode path. The worker uses supported
+  constant-frame-rate input directly and normalizes supported variable-frame-rate input locally
+  before analysis and rendering.
 - H.264/AAC MP4 and QuickTime MOV sources are supported. HEVC/H.265 video in MOV is
   accepted when the worker's FFmpeg build can decode it; browser preview support depends on
   the browser codec (Safari on macOS is the recommended preview path for HEVC).
@@ -53,7 +55,6 @@ Profile differences are planner configuration only. They do not select different
 - AI upscaling or super-resolution.
 - Automatic lens-distortion correction.
 - Native camera capture in the initial implementation.
-- Variable-frame-rate input support until timestamp normalization is explicitly implemented and tested.
 
 ## Architecture
 
@@ -124,7 +125,8 @@ flowchart LR
 
 - Consumes jobs through the Redis Streams consumer group, then atomically claims PostgreSQL lease authority before moving them through valid states.
 - Loads the immutable job configuration and source asset from PostgreSQL/object storage.
-- Normalizes source rotation and validates dimensions, codec, timing, and decodability.
+- Validates dimensions, codec, timing, and decodability; normalizes supported variable frame rate
+  and display rotation inside job scratch before analysis.
 - Runs athlete measurement, tracking, crop planning, and rendering.
 - Periodically persists stage progress and structured errors.
 - Writes output/debug artifacts to object storage and makes the completed output available through the API.
@@ -247,10 +249,18 @@ Store only object keys and metadata in PostgreSQL. Do not store video bytes or p
 
 ### 1. Validate and normalize source
 
-1. Fetch source asset metadata and inspect the asset with FFmpeg/ffprobe.
-2. Reject unsupported codec/container, undecodable media, missing video stream, and variable-frame-rate inputs.
-3. Normalize display rotation before analysis and retain source audio mapping for output.
-4. Establish a constant analysis cadence that maps exactly to output timestamps.
+1. Download the immutable source asset into job scratch as `source-original` and inspect it strictly
+   with FFmpeg/ffprobe.
+2. Reject unsupported codec/container, undecodable media, missing video stream, and unsupported
+   audio. For a supported variable-frame-rate source only, inspect permissively, transcode a
+   job-local `source-cfr.mp4` at its valid average frame rate, then inspect that derivative strictly.
+   Reject VFR sources above the worker's configured temporary-processing source-size cap before
+   starting FFmpeg; normalization also has a configured subprocess timeout.
+3. Let FFmpeg normalize display rotation while creating the derivative, retain valid optional AAC
+   audio without allowing shorter audio to truncate the normalized or rendered video, and use the
+   selected original or derivative only within the worker.
+4. Establish a constant analysis cadence that maps exactly to output timestamps. The immutable
+   object-store source is never overwritten or uploaded as a derivative.
 
 ### 2. Identify and measure the athlete
 

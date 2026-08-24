@@ -51,6 +51,10 @@ Analysis and stage scratch writes are best-effort and do not change media proces
 schema, redaction rules, limits, and evaluation contract are specified in
 [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md).
 
+The downloaded immutable source is always named `source-original`. A supported VFR source may also
+produce `source-cfr.mp4` in the same scratch directory; that derivative is never uploaded, persisted,
+or allowed to replace the object-store source.
+
 ## State Machine
 
 ```mermaid
@@ -116,8 +120,21 @@ change the required output-job result; see [Debug Telemetry and Evaluation](debu
 - H.264 or HEVC/H.265 video
 - Positive dimensions and video-stream duration. The worker derives frame counts and render-duration checks from the video stream's `duration_ts`/`time_base` timing (or its stream duration when timestamps are unavailable), never the container duration, which may include longer AAC audio.
 - Valid positive `avg_frame_rate` and `r_frame_rate`
-- Equal average and real frame rates, otherwise `variable_frame_rate`
 - AAC audio when an audio stream exists
+
+Strict inspection requires equal average and real frame rates. If and only if it returns
+`variable_frame_rate`, the pipeline performs the same supported-media validation permissively to
+obtain `avg_frame_rate`, then `FFmpegCFRNormalizer` writes `source-cfr.mp4` with FFmpeg's `fps`
+filter and CFR output mode at that exact rational rate. The normalizer maps primary video and only
+the validated optional AAC stream, transcodes H.264/AAC, uses FFmpeg's default display-rotation
+normalization, clears derivative rotation metadata, and the pipeline strictly inspects the derivative
+before analysis or rendering. Neither normalization nor rendering uses an audio-shortening output mode:
+a valid AAC stream is retained, while the derivative and final output preserve the full normalized
+video duration. Before FFmpeg runs,
+the pipeline rejects a VFR source whose persisted `size_bytes` exceeds
+`normalization_max_source_bytes`; FFmpeg receives `normalization_timeout_seconds`. Defaults are 1 GiB
+and 1,800 seconds, respectively, against the API's 2 GiB upload limit, reserving scratch capacity for
+the original and derivative. All other strict-inspection errors fail the job unchanged.
 
 When a source contains action-camera metadata or non-decodable `codec_name=none` sidecar tracks,
 the worker ignores those tracks and maps only the validated AAC stream by its absolute input-stream
@@ -135,7 +152,8 @@ Rotation metadata is read from stream tags or side data. `display_dimensions` sw
 reconstructs source media and stage prerequisites in job scratch on every attempt, then runs these
 durable stages:
 
-1. `validating`: downloads the immutable source key and validates it with `ffprobe`.
+1. `validating`: downloads the immutable source key as `source-original`, validates it strictly with
+   `ffprobe`, and performs the local VFR-to-CFR branch when required.
 2. `analyzing`: maps the immutable target selection, emits detector/pose observations through injected
    adapters, tracks them, and generates a deterministic crop path.
 3. `rendering`: regenerates the crop path, draws each final crop rectangle on its original display-normalized frame with FFmpeg, and validates the MP4.
@@ -155,6 +173,17 @@ storage or database errors release the PostgreSQL lease and keep the Redis entry
 Duplicate deliveries of terminal jobs acknowledge without reprocessing; a live foreign lease keeps the
 entry pending.
 
+```mermaid
+flowchart LR
+    S[Object-store source] --> O[source-original]
+    O --> I[Strict ffprobe inspection]
+    I -->|CFR| D[Analysis and rendering]
+    I -->|VFR only| P[Permissive supported-media inspection]
+    P --> N[FFmpeg fps to source-cfr.mp4]
+    N --> V[Strict derivative inspection]
+    V --> D
+```
+
 The local `.env.example` sentinel `model_version=unset-until-pinned` normalizes to `unconfigured`.
 This safe state starts and consumes matching jobs, whose unavailable adapters terminate with
 `model_unavailable`. With `model_version=w0.1-ssd-mobilenetv1-12-onnx-mediapipe-pose-full-1`, runtime
@@ -166,12 +195,17 @@ provisioned worker terminally rejects a claimed job before a stage handler execu
 display-rotation-normalized BGR frame at a time, using sequential indices and timestamps derived from
 immutable CFR metadata. No model weights are downloaded or inferred from configuration.
 
+Worker JSON configuration exposes `normalization_max_source_bytes` and
+`normalization_timeout_seconds`; both must be positive integers. Deployment configs set their safe
+defaults explicitly so an operator can lower either limit for available scratch capacity or runtime
+budget without changing API, persistence, or job configuration contracts.
+
 On service shutdown, runtime explicitly closes closeable model adapters before interpreter teardown.
 This releases MediaPipe task dispatchers while their native runtime is still available.
 
 ## Rendering Boundary
 
-`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The annotation script uses FFmpeg `sendcmd` updates so every source frame receives its exact final crop rectangle without expression-size limits. It rotation-normalizes the source, draws the rectangle in lime, maps video and the single validated AAC input stream, encodes H.264/AAC, and uses `+faststart`. `validate_output` requires display-normalized source dimensions and validates codecs. `ProcessingPipeline` generates the annotation filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
+`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The annotation script uses FFmpeg `sendcmd` updates so every source frame receives its exact final crop rectangle without expression-size limits. It rotation-normalizes the source, draws the rectangle in lime, maps video and the single validated AAC input stream, encodes H.264/AAC, uses `+faststart`, and preserves video when the optional audio stream ends earlier. `validate_output` requires display-normalized source dimensions and validates codecs. `ProcessingPipeline` generates the annotation filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
 
 ```mermaid
 flowchart LR

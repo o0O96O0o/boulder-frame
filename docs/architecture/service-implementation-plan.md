@@ -4,7 +4,7 @@
 
 Implement the offline Boulder Frame MVP as independently testable browser frontend, Go API, and Python processing worker services, with Docker Compose startup for those modules. PostgreSQL, Redis, and S3-compatible object storage remain external application dependencies.
 
-This plan turns [offline-reframing-mvp.md](offline-reframing-mvp.md) into an executable implementation sequence. It does not expand the MVP to real-time processing, native capture, multi-athlete tracking, equipment detection, super-resolution, or variable-frame-rate input.
+This plan turns [offline-reframing-mvp.md](offline-reframing-mvp.md) into an executable implementation sequence. It does not expand the MVP to real-time processing, native capture, multi-athlete tracking, equipment detection, or super-resolution.
 
 ## Implementation Status
 
@@ -17,7 +17,7 @@ Implemented baseline interfaces include:
 - Migration `002_worker_leases.sql` for lease owner/expiry fields, stage support, and efficient eligible-job claims.
 - Immutable job configuration with target selection, output settings, pipeline version, model version, and planner identifier.
 - Redis Streams handoff through stream `boulder-frame:jobs` and consumer group `boulder-frame:job-processors`; Redis pending recovery is paired with PostgreSQL lease authority.
-- Worker media validation for MP4 or QuickTime MOV, H.264/HEVC video, AAC audio, constant frame rate, rotation metadata, target-coordinate mapping, crop geometry, and deterministic planner behavior.
+- Worker media validation for MP4 or QuickTime MOV, H.264/HEVC video, AAC audio, local VFR-to-CFR normalization, rotation metadata, target-coordinate mapping, crop geometry, and deterministic planner behavior.
 - Direct-upload support through the shared external S3-compatible store and its CORS configuration.
 
 ## Task Tree
@@ -81,11 +81,11 @@ Implemented baseline interfaces include:
       - Implementation/reuse: Consume `boulder-frame:jobs` through group `boulder-frame:job-processors`. The entry has `type`, `task_id`, and `payload`; load configuration from PostgreSQL using the payload job UUID. PostgreSQL leases and guarded transitions are the authority for active ownership. Recover pending deliveries, heartbeat active entries/leases, classify transient failures, and acknowledge only terminal stream work. A restarted worker must resume or safely retry without duplicate output artifacts.
       - Verification: Worker integration tests cover duplicate delivery, crash/retry, invalid transition rejection, transient storage failure, and terminal media failure.
     - **W2.1 Implement source validation and timestamp normalization boundary.**
-      - Outcome: The worker accepts supported constant-frame-rate H.264/AAC MP4 or QuickTime MOV input, including HEVC video when FFmpeg supports it, and rejects unsupported or variable-frame-rate media with a user-safe error.
+      - Outcome: The worker accepts supported H.264/AAC MP4 or QuickTime MOV input, including HEVC video when FFmpeg supports it. It uses CFR input directly and normalizes supported VFR input to a job-local H.264/AAC CFR MP4 at the source average frame rate.
       - Ownership: Media/CV worker owner.
       - Dependencies: W1.1, I1.1.
-      - Implementation/reuse: Download to a job-scoped temporary directory, inspect with pinned `ffprobe`, validate stream/container/codec/dimensions/duration/frame timing, normalize display rotation, and establish the analysis/output timestamp map. Preserve source audio metadata for rendering.
-      - Verification: Fixture tests cover valid input, VFR rejection, missing video, unsupported codec, rotation metadata, corrupt bytes, and cleanup after failure.
+      - Implementation/reuse: Download the immutable object to `source-original` in a job-scoped temporary directory and inspect with pinned `ffprobe`. Validate stream/container/codec/dimensions/duration/audio/rotation before accepting CFR input. On only the VFR validation error, reject sources above the configured temporary-normalization size cap, inspect permissively to obtain the valid average rate, and use FFmpeg's `fps` filter and CFR mode to create `source-cfr.mp4` under a configured timeout. Preserve valid optional AAC without truncating the normalized or rendered video when audio is shorter, let FFmpeg normalize display rotation, and strictly inspect the derivative before downstream work. Never upload or persist the derivative.
+      - Verification: Fixture tests cover valid CFR input, VFR normalization, shorter/longer AAC, normalization size/timeout configuration, missing video, unsupported codec, rotation metadata, corrupt bytes, failed normalization, strict derivative validation, and scratch cleanup.
     - **W3.1 Implement target-frame detection association and pose measurement.**
       - Outcome: The worker maps the normalized tap to a source frame and selects the intended person, then emits source-coordinate pose and detector measurements.
       - Ownership: CV worker owner.

@@ -47,7 +47,9 @@ Update the focused documentation and its index whenever an implementation decisi
 
 - Prefer the smallest change that meets the documented MVP.
 - Pin and verify model licenses before adding a detector or pose model dependency.
-- Reject unsupported or variable-frame-rate input until timestamp handling is intentionally implemented and tested.
+- Reject unsupported media. For supported VFR input, normalize once to a job-local CFR derivative
+  before analysis and rendering; never alter the immutable source object. Bound normalization by its
+  configured source-size cap and FFmpeg timeout; retain valid AAC without truncating video.
 - Make durable worker operations idempotent and record user-safe terminal errors with structured internal error codes.
 - Add automated tests for API/job transitions, tracking/planning behavior, output-media validation, and browser workflow where applicable.
 - Maintain a permitted fixture/evaluation manifest; keep private videos out of version control.

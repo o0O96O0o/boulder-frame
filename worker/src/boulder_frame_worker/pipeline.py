@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol, cast
 from uuid import uuid4
 
+from .config import DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
 from .debug import (
     DebugBundleWriter,
     append_debug_record,
@@ -17,7 +18,7 @@ from .debug import (
     serialize_raw_frame_observation,
     serialize_tracked_measurement,
 )
-from .errors import ErrorCode, terminal
+from .errors import ErrorCode, WorkerError, terminal
 from .measurement import (
     PersonDetector,
     PoseEstimator,
@@ -27,6 +28,8 @@ from .measurement import (
     UnavailablePoseEstimator,
 )
 from .media import (
+    CFRNormalizer,
+    FFmpegCFRNormalizer,
     FFmpegRenderer,
     FFprobeAdapter,
     MediaMetadata,
@@ -93,6 +96,7 @@ class ProcessingPipeline:
         *,
         inspector: FFprobeAdapter,
         renderer: FFmpegRenderer,
+        normalizer: CFRNormalizer | None = None,
         frame_reader: FrameReader | None = None,
         detector: PersonDetector | None = None,
         pose_estimator: PoseEstimator | None = None,
@@ -101,11 +105,13 @@ class ProcessingPipeline:
         debug_capture: bool = False,
         debug_max_frames: int = 10_000,
         debug_max_bytes: int = 50 * 1024 * 1024,
+        normalization_max_source_bytes: int = DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES,
     ) -> None:
         self.storage = storage
         self.finalizer = finalizer
         self.inspector = inspector
         self.renderer = renderer
+        self.normalizer = normalizer or FFmpegCFRNormalizer()
         self.frame_reader = frame_reader or UnavailableFrameReader()
         self.analyzer = TargetFrameAnalyzer(
             detector or UnavailableDetector(), pose_estimator or UnavailablePoseEstimator()
@@ -115,6 +121,7 @@ class ProcessingPipeline:
         self.debug_capture = debug_capture
         self.debug_max_frames = debug_max_frames
         self.debug_max_bytes = debug_max_bytes
+        self.normalization_max_source_bytes = normalization_max_source_bytes
 
     def validating(self, record: JobRecord, scratch: Path) -> None:
         self._inputs(record, scratch)
@@ -239,10 +246,30 @@ class ProcessingPipeline:
             )
         selection = _selection(configuration)
         output_settings = _output_settings(configuration)
-        source = scratch / "source"
+        source = scratch / "source-original"
         if not source.exists():
             self.storage.download(source_asset.storage_key, source)
-        metadata = self.inspector.inspect(source)
+        try:
+            metadata = self.inspector.inspect(source)
+        except WorkerError as error:
+            if error.code is not ErrorCode.VARIABLE_FRAME_RATE:
+                raise
+            source_metadata = self.inspector.inspect(source, allow_variable_frame_rate=True)
+            if source_asset.size_bytes > self.normalization_max_source_bytes:
+                raise terminal(
+                    ErrorCode.INVALID_MEDIA,
+                    "This variable-frame-rate video is too large to normalize.",
+                ) from error
+            normalized_source = scratch / "source-cfr.mp4"
+            if not normalized_source.exists():
+                self.normalizer.normalize(
+                    source,
+                    normalized_source,
+                    source_metadata.frame_rate,
+                    source_metadata.audio_stream_index,
+                )
+            source = normalized_source
+            metadata = self.inspector.inspect(source)
         metadata.frame_for_time_ms(selection.frame_time_ms)
         return _Inputs(source, scratch / "output.mp4", metadata, selection, output_settings)
 
