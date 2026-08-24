@@ -1,5 +1,3 @@
-DROP CONSTRAINT IF EXISTS job_artifacts_kind_check;
-
 -- Retire only database links for obsolete review roles. Their debug objects may be
 -- shared or otherwise retained outside this table, so object-storage lifecycle
 -- policy, not this migration, owns their eventual deletion.

@@ -69,6 +69,9 @@ func TestDetectorOnlyReviewRoleMigrationRetiresObsoleteRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 	contents := string(sqlBytes)
+	if strings.HasPrefix(strings.TrimSpace(contents), "DROP CONSTRAINT") {
+		t.Fatal("detector-only review migration has a standalone DROP CONSTRAINT statement")
+	}
 	for _, expected := range []string{
 		"'debug_detection'", "'debug_framing'", "'debug_render'",
 		"'debug_measurement'", "'debug_pose'", "'debug_tracking'", "'debug_planning'",
