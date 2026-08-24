@@ -71,6 +71,35 @@ class DebugAsset:
             raise DebugNotValidatedError("debug asset must be application/gzip")
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewArtifact:
+    role: str
+    storage_key: str
+    size_bytes: int
+    content_type: str
+
+    def __post_init__(self) -> None:
+        if self.role not in {
+            "debug_telemetry",
+            "debug_manifest",
+            "debug_measurement",
+            "debug_pose",
+            "debug_tracking",
+            "debug_planning",
+            "debug_render",
+        }:
+            raise DebugNotValidatedError("review artifact role is unsupported")
+        if self.size_bytes <= 0:
+            raise DebugNotValidatedError("review artifact size must be greater than zero")
+        expected_type = (
+            "application/gzip"
+            if self.role == "debug_telemetry"
+            else ("application/json" if self.role == "debug_manifest" else "video/mp4")
+        )
+        if self.content_type != expected_type:
+            raise DebugNotValidatedError("review artifact content type is invalid")
+
+
 class PostgresJobRepository:
     """Durable worker repository using PostgreSQL as the job ownership authority."""
 
@@ -196,6 +225,64 @@ class PostgresJobRepository:
         if row is None:
             raise LeaseLostError("job state was changed, cancelled, or lease expired")
         return _uuid(row[0])
+
+    def finalize_review(
+        self, record: JobRecord, review_id: UUID, artifacts: tuple[ReviewArtifact, ...]
+    ) -> None:
+        """Atomically link one complete UUID-scoped review while its lease is live."""
+        if record.lease_owner is None or record.source_asset is None:
+            raise LeaseLostError("review finalization requires a claimed job with a source asset")
+        if record.state in TERMINAL_STATES:
+            raise ValueError("review finalization requires a nonterminal job")
+        if not artifacts or not {"debug_telemetry", "debug_manifest"} <= {
+            artifact.role for artifact in artifacts
+        }:
+            raise ValueError("review must include telemetry and manifest artifacts")
+        roles: set[str] = set()
+        for artifact in artifacts:
+            if artifact.role in roles:
+                raise ValueError("review artifact roles must be unique")
+            roles.add(artifact.role)
+            _validate_review_storage_key(
+                artifact.storage_key,
+                record.source_asset.project_id,
+                record.id,
+                review_id,
+                _review_name_for_role(artifact.role),
+            )
+        payload = json.dumps(
+            [
+                {
+                    "role": artifact.role,
+                    "storage_key": artifact.storage_key,
+                    "content_type": artifact.content_type,
+                    "size_bytes": artifact.size_bytes,
+                }
+                for artifact in artifacts
+            ]
+        )
+        connection = self._connection_factory()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                _FINALIZE_REVIEW_SQL,
+                (
+                    record.id,
+                    record.source_asset.project_id,
+                    record.lease_owner,
+                    payload,
+                ),
+            )
+            row = cursor.fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+        if row is None or int(row[0]) != len(artifacts):
+            raise LeaseLostError("job state was changed, cancelled, or lease expired")
 
     def _returning(
         self, query: str, params: tuple[object, ...], *, missing_ok: bool
@@ -382,7 +469,7 @@ WITH owned_job AS (
   RETURNING id
 ), debug_artifact AS (
   INSERT INTO job_artifacts (job_id, asset_id, kind)
-  SELECT owned_job.id, debug_asset.id, 'debug'
+  SELECT owned_job.id, debug_asset.id, 'debug_telemetry'
   FROM owned_job
   JOIN debug_asset ON true
   ON CONFLICT (job_id, kind) DO UPDATE
@@ -390,6 +477,52 @@ WITH owned_job AS (
   RETURNING asset_id
 )
 SELECT asset_id FROM debug_artifact
+"""
+
+_FINALIZE_REVIEW_SQL = """
+WITH owned_job AS (
+  SELECT id, project_id
+  FROM processing_jobs
+  WHERE id = %s
+    AND project_id = %s
+    AND state NOT IN ('completed', 'failed', 'cancelled')
+    AND lease_owner = %s
+    AND lease_expires_at > now()
+), artifact_input AS (
+  SELECT * FROM jsonb_to_recordset(%s::jsonb) AS input(
+    role text, storage_key text, content_type text, size_bytes bigint
+  )
+), review_assets AS (
+  INSERT INTO assets (project_id, kind, storage_key, upload_state, content_type, size_bytes)
+  SELECT owned_job.project_id, 'debug', artifact_input.storage_key, 'uploaded',
+         artifact_input.content_type, artifact_input.size_bytes
+  FROM owned_job CROSS JOIN artifact_input
+  ON CONFLICT (storage_key) DO UPDATE
+  SET content_type = EXCLUDED.content_type,
+      size_bytes = EXCLUDED.size_bytes
+  WHERE assets.project_id = EXCLUDED.project_id
+    AND assets.kind = 'debug'
+    AND assets.upload_state = 'uploaded'
+  RETURNING id, storage_key
+), review_artifacts AS (
+  INSERT INTO job_artifacts (job_id, asset_id, kind)
+  SELECT owned_job.id, review_assets.id, artifact_input.role
+  FROM owned_job
+  JOIN artifact_input ON true
+  JOIN review_assets ON review_assets.storage_key = artifact_input.storage_key
+  ON CONFLICT (job_id, kind) DO UPDATE
+  SET asset_id = EXCLUDED.asset_id
+  RETURNING asset_id
+), removed_review_artifacts AS (
+  DELETE FROM job_artifacts
+  WHERE job_id = (SELECT id FROM owned_job)
+    AND kind IN (
+      'debug_telemetry', 'debug_manifest', 'debug_measurement', 'debug_pose',
+      'debug_tracking', 'debug_planning', 'debug_render'
+    )
+    AND kind NOT IN (SELECT role FROM artifact_input)
+)
+SELECT count(*) FROM review_artifacts
 """
 
 
@@ -400,6 +533,18 @@ def output_storage_key(project_id: UUID, job_id: UUID) -> str:
 def debug_storage_key(project_id: UUID, job_id: UUID, debug_id: UUID) -> str:
     """Build a canonical unique debug-object key within a job's private namespace."""
     return f"private/debug/{project_id}/{job_id}/{debug_id}.jsonl.gz"
+
+
+def review_storage_key(project_id: UUID, job_id: UUID, review_id: UUID, name: str) -> str:
+    return f"private/debug/{project_id}/{job_id}/{review_id}/{name}"
+
+
+def _review_name_for_role(role: str) -> str:
+    if role == "debug_telemetry":
+        return "telemetry.jsonl.gz"
+    if role == "debug_manifest":
+        return "manifest.json"
+    return role.removeprefix("debug_") + ".mp4"
 
 
 def _validate_debug_storage_key(storage_key: str, project_id: UUID, job_id: UUID) -> None:
@@ -413,6 +558,13 @@ def _validate_debug_storage_key(storage_key: str, project_id: UUID, job_id: UUID
         raise ValueError("debug storage key must include a UUID") from error
     if storage_key != expected:
         raise ValueError("debug storage key must use the canonical job-scoped format")
+
+
+def _validate_review_storage_key(
+    storage_key: str, project_id: UUID, job_id: UUID, review_id: UUID, name: str
+) -> None:
+    if storage_key != review_storage_key(project_id, job_id, review_id, name):
+        raise ValueError("review storage key must use the canonical UUID-scoped format")
 
 
 def _record_from_row(row: tuple[Any, ...]) -> JobRecord:

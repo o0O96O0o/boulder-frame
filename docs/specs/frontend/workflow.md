@@ -50,7 +50,7 @@ The marker uses the inverse contain transform so its displayed location matches 
 
 After `POST /api/v1/projects/{id}/jobs`, the UI polls `GET /api/v1/jobs/{id}` every 1.8 seconds while the state is non-terminal. It displays `queued`, `validating`, `analyzing`, `rendering`, `uploading`, `completed`, `failed`, and `cancelled` states. A failure offers creation of a new job rather than mutating the stored configuration.
 
-When completed, the UI requests `GET /api/v1/jobs/{id}/download` and opens the short-lived signed URL. The frontend does not store the URL beyond the current page state.
+When completed, the UI requests `GET /api/v1/jobs/{id}/download` and opens the short-lived signed URL. The frontend does not store the URL beyond the current page state. Selecting `Review processing` for a terminal job makes one explicit `GET /api/v1/jobs/{id}/evaluation` request; it does not prefetch or presign review media. The workspace opens only when the response has `available: true` and at least one phase video. Telemetry-only or all-phase-unavailable runs leave the workspace closed; their optional telemetry export is retained on the terminal card. The browser never derives overlays or evaluation metrics from original video pixels.
 
 ## API Client
 

@@ -79,16 +79,18 @@ func sanitizeValue(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(value))
 		for key, item := range value {
-			lower := strings.ToLower(key)
-			if strings.Contains(lower, "url") || strings.Contains(lower, "token") ||
-				strings.Contains(lower, "secret") || strings.Contains(lower, "password") ||
-				strings.Contains(lower, "authorization") || strings.Contains(lower, "cookie") {
+			if sensitiveLogKey(key) {
 				out[key] = "[REDACTED]"
 				continue
 			}
 			out[key] = sanitizeValue(item)
 		}
 		return out
+	case string:
+		if sensitiveLogText(value) {
+			return "[REDACTED]"
+		}
+		return value
 	case []any:
 		out := make([]any, len(value))
 		for index, item := range value {
@@ -98,4 +100,21 @@ func sanitizeValue(value any) any {
 	default:
 		return value
 	}
+}
+
+func sensitiveLogKey(key string) bool {
+	key = strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(key))
+	return strings.Contains(key, "url") || strings.Contains(key, "uri") || strings.Contains(key, "href") ||
+		strings.Contains(key, "token") || strings.Contains(key, "secret") || strings.Contains(key, "password") ||
+		strings.Contains(key, "authorization") || strings.Contains(key, "cookie") || strings.Contains(key, "credential") ||
+		strings.Contains(key, "signature") || strings.Contains(key, "accesskey") || strings.Contains(key, "storagekey") ||
+		strings.Contains(key, "objectkey") || strings.Contains(key, "endpoint")
+}
+
+func sensitiveLogText(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "://") || strings.Contains(lower, "www.") || strings.Contains(lower, "x-amz-") ||
+		strings.Contains(lower, "private/debug/") || strings.Contains(lower, "access_key") || strings.Contains(lower, "secret") ||
+		strings.Contains(lower, "token") || strings.Contains(lower, "password") || strings.Contains(lower, "authorization") ||
+		strings.Contains(lower, "credential") || strings.Contains(lower, "signature")
 }

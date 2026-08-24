@@ -182,9 +182,7 @@ def test_debug_bundle_removes_partial_output_when_byte_limit_is_exceeded(tmp_pat
 
 
 def test_sanitization_ignores_non_string_mapping_keys() -> None:
-    assert json.loads(canonical_json_bytes({1: "ignored", "frame_index": 1})) == {
-        "frame_index": 1
-    }
+    assert json.loads(canonical_json_bytes({1: "ignored", "frame_index": 1})) == {"frame_index": 1}
 
 
 def test_serializers_preserve_only_source_coordinate_measurements() -> None:

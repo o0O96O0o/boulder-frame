@@ -516,8 +516,7 @@ def test_renderer_applies_the_planned_crop_to_each_source_frame(tmp_path: Path) 
             "-f",
             "lavfi",
             "-i",
-            "color=c=blue:size=160x90:rate=2:duration=1,"
-            "drawbox=x=0:y=0:w=80:h=90:color=red:t=fill",
+            "color=c=blue:size=160x90:rate=2:duration=1,drawbox=x=0:y=0:w=80:h=90:color=red:t=fill",
             "-c:v",
             "libx264",
             "-pix_fmt",

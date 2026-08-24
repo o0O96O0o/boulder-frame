@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent } from 'react'
-import { api, ApiError, sourceContentType, type AspectRatio, type Asset, type Job, type OutputSettings, type Profile, type Project, type TargetSelection, uploadFile } from './api'
+import { api, sourceContentType, type AspectRatio, type Asset, type Evaluation, type Job, type OutputSettings, type Profile, type Project, type TargetSelection, uploadFile } from './api'
+import { PhaseReview } from './components/PhaseReview'
 import { appConfig } from './config'
 import { mapPointerToNormalized, normalizedToContainPoint } from './coordinates'
 
@@ -31,6 +32,9 @@ export function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
+  const [evaluation, setEvaluation] = useState<Evaluation | null>(null)
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [reviewLoading, setReviewLoading] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl) }, [previewUrl])
@@ -55,7 +59,7 @@ export function App() {
     const isSupportedExtension = /\.(mp4|mov)$/i.test(nextFile.name)
     const isSupportedType = !nextFile.type || nextFile.type === 'video/mp4' || nextFile.type === 'video/quicktime'
     if (!isSupportedExtension || !isSupportedType || nextFile.size > maxUploadBytes) return setError(`Choose an MP4 or MOV video smaller than ${maxUploadLabel}.`)
-    setFile(nextFile); setSelection(null); setError(null); setUploadProgress(0); setAsset(null); setJob(null); setDownloadUrl(null)
+    setFile(nextFile); setSelection(null); setError(null); setUploadProgress(0); setAsset(null); setJob(null); setDownloadUrl(null); setEvaluation(null); setReviewOpen(false)
     setPreviewUrl(URL.createObjectURL(nextFile))
     if (!project) return
     setBusy(true)
@@ -79,8 +83,18 @@ export function App() {
   }
   async function startJob() {
     if (!project || !asset || !selection || busy) return
-    setBusy(true); setError(null); setDownloadUrl(null)
+    setBusy(true); setError(null); setDownloadUrl(null); setEvaluation(null); setReviewOpen(false)
     try { setJob(await api.createJob(project.id, asset.id, selection, { aspect_ratio: aspect, profile })) } catch (err) { setError(message(err)) } finally { setBusy(false) }
+  }
+  async function openReview() {
+    if (!job || reviewLoading) return
+    setReviewLoading(true); setError(null)
+    try {
+      // Explicit opens refresh short-lived URLs without retaining them outside React state.
+      const nextEvaluation = await api.getEvaluation(job.id)
+      setEvaluation(nextEvaluation)
+      setReviewOpen(nextEvaluation.available)
+    } catch (err) { setError(message(err)) } finally { setReviewLoading(false) }
   }
   const step = !project ? 1 : !asset ? 2 : !selection ? 3 : !job ? 4 : 5
 
@@ -96,14 +110,15 @@ export function App() {
         {project && !asset && <section className="card upload-card"><div className="card-index">02</div><div className="card-body"><span className="micro-label">SOURCE VIDEO</span><label className="dropzone"><input type="file" accept="video/mp4,video/quicktime,.mp4,.mov" onChange={(e) => void chooseFile(e.target.files?.[0])} /><span className="upload-glyph">↥</span><strong>{busy ? `Uploading ${uploadProgress}%` : 'Drop your MP4 or MOV here'}</strong><span>or click to browse · H.264 / HEVC · up to {maxUploadLabel}</span>{busy && <span className="progress"><i style={{ width: `${uploadProgress}%` }} /></span>}</label></div></section>}
         {project && asset && <section className="card preview-card"><div className="card-index">03</div><div className="card-body"><div className="preview-head"><div><span className="micro-label">ATHLETE SELECTION</span><p>Tap the athlete you want to keep in frame.</p></div><span className={selection ? 'selection-state selected' : 'selection-state'}>{selection ? 'Athlete selected' : 'Awaiting selection'}</span></div><div className={`preview ${aspect === '9:16' ? 'portrait-preview' : ''}`}><video ref={videoRef} src={previewUrl ?? undefined} controls playsInline onClick={selectAthlete} onError={() => setError(`${sourceContentType(file!) === 'video/quicktime' ? 'This MOV uses a codec your browser cannot preview.' : 'This video cannot be previewed in your browser.'} Try Safari on macOS or choose an H.264 MP4.`)} onLoadedMetadata={(e) => { if (!asset.width || !asset.height) setAsset({ ...asset, width: e.currentTarget.videoWidth, height: e.currentTarget.videoHeight }) }} />{selection && <span className="target-dot" style={{ left: `${normalizedToContainPoint({ x: selection.normalized_x, y: selection.normalized_y }, videoRef.current?.clientWidth ?? 1, videoRef.current?.clientHeight ?? 1, asset.width || videoRef.current?.videoWidth || 1, asset.height || videoRef.current?.videoHeight || 1).x * 100}%`, top: `${normalizedToContainPoint({ x: selection.normalized_x, y: selection.normalized_y }, videoRef.current?.clientWidth ?? 1, videoRef.current?.clientHeight ?? 1, asset.width || videoRef.current?.videoWidth || 1, asset.height || videoRef.current?.videoHeight || 1).y * 100}%` }} />}</div><div className="asset-meta"><span>{file?.name}</span><span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : 'Reading dimensions'} · {formatDuration(asset.duration_ms)}</span></div>{selection && <button className="text-button" onClick={() => setSelection(null)}>Choose again</button>}</div></section>}
         {asset && selection && !job && <section className="card settings-card"><div className="card-index">04</div><div className="card-body"><div className="settings-group"><span className="micro-label">OUTPUT ASPECT</span><div className="segmented">{(['16:9', '9:16'] as AspectRatio[]).map((value) => <button className={aspect === value ? 'active' : ''} onClick={() => setAspect(value)} key={value}><span className={value === '16:9' ? 'landscape-icon' : 'portrait-icon'} />{value}</button>)}</div></div><div className="settings-group"><span className="micro-label">FRAMING PROFILE</span><div className="profile-grid">{profiles.map((item) => <button className={profile === item.value ? 'profile active' : 'profile'} onClick={() => setProfile(item.value)} key={item.value}><strong>{item.label}</strong><span>{item.detail}</span>{profile === item.value && <i>✓</i>}</button>)}</div></div><button className="primary start-button" onClick={() => void startJob()} disabled={busy}>{busy ? 'Starting…' : 'Start reframing'} <span>↗</span></button></div></section>}
-        {job && <JobCard job={job} downloadUrl={downloadUrl} onRetry={() => { setJob(null); setDownloadUrl(null) }} />}
+        {job && <JobCard job={job} downloadUrl={downloadUrl} telemetryDownloadUrl={evaluation?.telemetry_download_url ?? null} reviewLoading={reviewLoading} onOpenReview={() => void openReview()} onRetry={() => { setJob(null); setDownloadUrl(null); setEvaluation(null); setReviewOpen(false) }} />}
+        {reviewOpen && evaluation && <PhaseReview evaluation={evaluation} onClose={() => setReviewOpen(false)} onRefresh={() => void openReview()} refreshing={reviewLoading} />}
       </div>
     </div>
     <footer><span>BOULDER FRAME / MVP</span><span>Private by default · Built for recorded movement</span></footer>
   </main>
 }
 
-function JobCard({ job, downloadUrl, onRetry }: { job: Job; downloadUrl: string | null; onRetry: () => void }) {
+function JobCard({ job, downloadUrl, telemetryDownloadUrl, reviewLoading, onOpenReview, onRetry }: { job: Job; downloadUrl: string | null; telemetryDownloadUrl: string | null; reviewLoading: boolean; onOpenReview: () => void; onRetry: () => void }) {
   const percent = Math.max(0, Math.min(100, job.progress))
-  return <section className="card job-card"><div className="card-index">05</div><div className="card-body"><div className="job-status"><div className={`status-orb ${job.state}`}><span>{job.state === 'completed' ? '✓' : job.state === 'failed' ? '!' : '↻'}</span></div><div><span className="micro-label">{job.state === 'completed' ? 'COMPLETE' : job.state === 'failed' ? 'TERMINAL ERROR' : 'IN PROGRESS'}</span><h3>{stageLabels[job.stage] ?? job.stage}</h3></div></div>{job.state !== 'failed' && job.state !== 'completed' && <><div className="job-progress"><i style={{ width: `${percent}%` }} /></div><div className="job-progress-meta"><span>{percent}% complete</span><span>Keep this tab open</span></div></>}{job.error && <div className="failure"><strong>{job.error.message}</strong><span>Try a new job with the same source and a different selection if needed.</span></div>}{downloadUrl && <a className="primary download" href={downloadUrl} target="_blank" rel="noreferrer">Download 1080p MP4 <span>↓</span></a>}{job.state === 'failed' && <button className="secondary" onClick={onRetry}>Create a new job</button>}<div className="job-id">JOB {job.id}</div></div></section>
+  return <section className="card job-card"><div className="card-index">05</div><div className="card-body"><div className="job-status"><div className={`status-orb ${job.state}`}><span>{job.state === 'completed' ? '✓' : job.state === 'failed' ? '!' : '↻'}</span></div><div><span className="micro-label">{job.state === 'completed' ? 'COMPLETE' : job.state === 'failed' ? 'TERMINAL ERROR' : 'IN PROGRESS'}</span><h3>{stageLabels[job.stage] ?? job.stage}</h3></div></div>{job.state !== 'failed' && job.state !== 'completed' && <><div className="job-progress"><i style={{ width: `${percent}%` }} /></div><div className="job-progress-meta"><span>{percent}% complete</span><span>Keep this tab open</span></div></>}{job.error && <div className="failure"><strong>{job.error.message}</strong><span>Try a new job with the same source and a different selection if needed.</span></div>}{downloadUrl && <a className="primary download" href={downloadUrl} target="_blank" rel="noreferrer">Download 1080p MP4 <span>↓</span></a>}{telemetryDownloadUrl && <a className="telemetry-link" href={telemetryDownloadUrl} target="_blank" rel="noreferrer">Export telemetry <span>↓</span></a>}{(job.state === 'completed' || job.state === 'failed') && <button className="secondary review-button" onClick={onOpenReview} disabled={reviewLoading}>{reviewLoading ? 'Checking review…' : 'Review processing'}</button>}{job.state === 'failed' && <button className="secondary" onClick={onRetry}>Create a new job</button>}<div className="job-id">JOB {job.id}</div></div></section>
 }

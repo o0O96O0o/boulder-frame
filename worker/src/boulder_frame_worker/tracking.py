@@ -27,6 +27,7 @@ class TrackedMeasurement:
     covariance: float | None
     state: TrackingState
     timestamp_ms: int = 0
+    reacquired: bool = False
 
 
 class TargetTracker(Protocol):
@@ -102,6 +103,7 @@ class SingleTargetTracker:
                 is_valid = distance <= limit
 
             if is_valid and candidate is not None:
+                reacquired = root is None and has_tracked
                 if root is None and not has_tracked:
                     root = candidate
                     velocity = Point(0, 0)
@@ -156,7 +158,14 @@ class SingleTargetTracker:
                 reacquire_count = 0
                 has_tracked = True
                 result.append(
-                    self._measurement(observation, root, bounds, covariance, TrackingState.TRACKED)
+                    self._measurement(
+                        observation,
+                        root,
+                        bounds,
+                        covariance,
+                        TrackingState.TRACKED,
+                        reacquired=reacquired,
+                    )
                 )
                 continue
 
@@ -185,6 +194,8 @@ class SingleTargetTracker:
         bounds: Rect | None,
         covariance: float | None,
         state: TrackingState,
+        *,
+        reacquired: bool = False,
     ) -> TrackedMeasurement:
         return TrackedMeasurement(
             frame_index=observation.frame_index,
@@ -197,6 +208,7 @@ class SingleTargetTracker:
             covariance=covariance,
             state=state,
             timestamp_ms=observation.timestamp_ms,
+            reacquired=reacquired,
         )
 
 

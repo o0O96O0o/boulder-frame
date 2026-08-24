@@ -18,11 +18,15 @@ import (
 )
 
 type fakeRepo struct {
-	project   domain.Project
-	asset     domain.Asset
-	job       domain.Job
-	published bool
-	failPing  bool
+	project         domain.Project
+	asset           domain.Asset
+	job             domain.Job
+	reviewArtifacts []domain.ReviewArtifact
+	published       bool
+	failPing        bool
+	projectErr      error
+	jobErr          error
+	reviewErr       error
 }
 
 func (f *fakeRepo) Ping(context.Context) error {
@@ -35,6 +39,9 @@ func (f *fakeRepo) CreateProject(context.Context, string, string) (domain.Projec
 	return f.project, nil
 }
 func (f *fakeRepo) GetProject(context.Context, uuid.UUID, string) (domain.Project, error) {
+	if f.projectErr != nil {
+		return domain.Project{}, f.projectErr
+	}
 	if f.project.ID == uuid.Nil || f.project.ID != uuid.Nil && f.project.ID != uuid.MustParse("00000000-0000-0000-0000-000000000001") {
 		return domain.Project{}, repository.ErrNotFound
 	}
@@ -57,22 +64,36 @@ func (f *fakeRepo) CreateOrGetJob(context.Context, domain.Job, string) (domain.J
 	f.job = domain.Job{ID: uuid.New(), State: domain.JobQueued, Stage: domain.JobQueued}
 	return f.job, false, nil
 }
-func (f *fakeRepo) GetJob(context.Context, uuid.UUID) (domain.Job, error) { return f.job, nil }
+func (f *fakeRepo) GetJob(context.Context, uuid.UUID) (domain.Job, error) { return f.job, f.jobErr }
 func (f *fakeRepo) ListArtifacts(context.Context, uuid.UUID) ([]domain.Artifact, error) {
 	return []domain.Artifact{}, nil
 }
+func (f *fakeRepo) ListReviewArtifacts(context.Context, uuid.UUID) ([]domain.ReviewArtifact, error) {
+	return f.reviewArtifacts, f.reviewErr
+}
 func (f *fakeRepo) SetJobFailed(context.Context, uuid.UUID, string, string) error { return nil }
 
-type fakeStore struct{}
+type fakeStore struct {
+	manifest   []byte
+	readInfo   storage.ObjectInfo
+	readErr    error
+	presignErr error
+}
 
 func (fakeStore) PresignUpload(context.Context, string, string, time.Duration) (string, error) {
 	return "https://upload.test", nil
 }
-func (fakeStore) PresignDownload(context.Context, string, time.Duration) (string, error) {
+func (f fakeStore) PresignDownload(context.Context, string, time.Duration) (string, error) {
+	if f.presignErr != nil {
+		return "", f.presignErr
+	}
 	return "https://download.test", nil
 }
 func (fakeStore) Head(context.Context, string) (storage.ObjectInfo, error) {
 	return storage.ObjectInfo{}, nil
+}
+func (f fakeStore) Read(context.Context, string, int64) ([]byte, storage.ObjectInfo, error) {
+	return f.manifest, f.readInfo, f.readErr
 }
 
 type fakeQueue struct{ count int }
@@ -141,6 +162,18 @@ func TestTraceIDAndStructuredBodiesAreLogged(t *testing.T) {
 	}
 }
 
+func TestRequestLogsRedactSensitiveValuesNotJustFieldNames(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	h := &Handler{Repo: &fakeRepo{}, Logger: logger}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", strings.NewReader(`{"name":"https://storage.test/private/debug/object?X-Amz-Signature=secret"}`))
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, req)
+	if strings.Contains(logs.String(), "storage.test") || !strings.Contains(logs.String(), "[REDACTED]") {
+		t.Fatalf("sensitive request text was logged: %s", logs.String())
+	}
+}
+
 func TestJobValidationDoesNotPublishInvalidRequest(t *testing.T) {
 	id := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	repo := &fakeRepo{project: domain.Project{ID: id}, asset: domain.Asset{ID: uuid.New(), ProjectID: id, Kind: domain.AssetSource, UploadState: domain.UploadUploaded}}
@@ -184,5 +217,201 @@ func TestCompletedJobDownloadAllowsOutputWithoutFilename(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"download_url":"https://download.test"`) {
 		t.Fatalf("unexpected response %s", rec.Body.String())
+	}
+}
+
+func evaluationManifest(reviewID uuid.UUID) []byte {
+	return []byte(`{"schema_version":1,"review_id":"` + reviewID.String() + `","pipeline_version":"w0.1.0","model_version":"w0.1-model","timing":{"frame_rate":60,"duration_ms":1200,"frame_count":72},"telemetry":{"status":"ready"},"phases":[{"id":"measurement","status":"ready","summary":{"selected_rate":0.9,"mapping_verified":false}},{"id":"pose","status":"partial"},{"id":"tracking","status":"warning","warning_intervals":[{"start_ms":3,"end_ms":7,"label":"Tracking lost","detail":"Subject was briefly occluded"}]},{"id":"planning","status":"unavailable","detail":"Review capture exceeded its duration limit"},{"id":"render","status":"unavailable"}]}`)
+}
+
+func evaluationConfig() domain.JobConfig {
+	return domain.JobConfig{PipelineVersion: "w0.1.0", ModelVersion: "w0.1-model"}
+}
+
+func reviewArtifact(projectID, jobID, reviewID uuid.UUID, role, name, contentType string) domain.ReviewArtifact {
+	return domain.ReviewArtifact{Role: role, Asset: domain.Asset{
+		ID: uuid.New(), ProjectID: projectID, Kind: domain.AssetDebug, UploadState: domain.UploadUploaded,
+		StorageKey:  "private/debug/" + projectID.String() + "/" + jobID.String() + "/" + reviewID.String() + "/" + name,
+		ContentType: contentType, SizeBytes: 100,
+	}}
+}
+
+func TestEvaluationRejectsMalformedAndNonterminalJobs(t *testing.T) {
+	projectID, jobID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New()
+	h := &Handler{Repo: &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobUploading}}, Owner: domain.OwnerDevelopment}
+	for requestURL, expectedStatus := range map[string]int{
+		"/api/v1/jobs/nope/evaluation":                   http.StatusBadRequest,
+		"/api/v1/jobs/" + jobID.String() + "/evaluation": http.StatusConflict,
+	} {
+		rec := httptest.NewRecorder()
+		h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, requestURL, nil))
+		if rec.Code != expectedStatus {
+			t.Fatalf("%s status %d: %s", requestURL, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestEvaluationRequiresOwnerAndReturnsUnavailableWithoutReview(t *testing.T) {
+	projectID, jobID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New()
+	repo := &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted}, projectErr: repository.ErrNotFound}
+	h := &Handler{Repo: repo, Owner: domain.OwnerDevelopment}
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID.String()+"/evaluation", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unauthorized status %d", rec.Code)
+	}
+	repo.projectErr = nil
+	rec = httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID.String()+"/evaluation", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "{\"available\":false}\n" {
+		t.Fatalf("no review response %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEvaluationProjectsVerifiedPartialFailedReviewWithoutLeaks(t *testing.T) {
+	projectID, jobID, reviewID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New(), uuid.New()
+	artifacts := []domain.ReviewArtifact{
+		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json"),
+		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugTelemetry, "telemetry.jsonl.gz", "application/gzip"),
+		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugMeasurement, "measurement.mp4", "video/mp4"),
+		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugPose, "pose.mp4", "video/mp4"),
+		// Tracking is manifest-declared but unavailable in persistence.
+	}
+	var logs bytes.Buffer
+	h := &Handler{
+		Repo:  &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobFailed, Configuration: evaluationConfig()}, reviewArtifacts: artifacts},
+		Store: fakeStore{manifest: evaluationManifest(reviewID), readInfo: storage.ObjectInfo{Size: 100, ContentType: "application/json"}},
+		Owner: domain.OwnerDevelopment, URLTTL: time.Minute, Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	}
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID.String()+"/evaluation", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, expected := range []string{
+		`"available":true`, `"state":"failed"`, `"review_id":"` + reviewID.String(),
+		`"video_url":"https://download.test"`, `"telemetry_download_url":"https://download.test"`,
+		`"expires_in_seconds":60`, `"id":"tracking","label":"Tracking","status":"unavailable"`,
+		`"id":"planning","label":"Planning","status":"unavailable","detail":"Review capture exceeded its duration limit"`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("response missing %s: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"private/debug", "manifest.json"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("response leaked %q: %s", forbidden, body)
+		}
+	}
+	for _, secret := range []string{"private/debug", "manifest.json", string(evaluationManifest(reviewID)), "https://download.test"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("log leaked %q: %s", secret, logs.String())
+		}
+	}
+}
+
+func TestEvaluationHandlesMalformedManifestAndStorageFailure(t *testing.T) {
+	projectID, jobID, reviewID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New(), uuid.New()
+	artifact := reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json")
+	for _, test := range []struct {
+		name   string
+		store  fakeStore
+		status int
+		media  bool
+	}{
+		{"malformed manifest", fakeStore{manifest: []byte("bad"), readInfo: storage.ObjectInfo{Size: 100, ContentType: "application/json"}}, http.StatusOK, false},
+		{"read failure", fakeStore{readErr: errors.New("down")}, http.StatusBadGateway, false},
+		{"presign failure", fakeStore{manifest: evaluationManifest(reviewID), readInfo: storage.ObjectInfo{Size: 100, ContentType: "application/json"}, presignErr: errors.New("down")}, http.StatusBadGateway, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifacts := []domain.ReviewArtifact{artifact}
+			if test.media {
+				artifacts = append(artifacts, reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugMeasurement, "measurement.mp4", "video/mp4"))
+			}
+			h := &Handler{Repo: &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: artifacts}, Store: test.store, Owner: domain.OwnerDevelopment, URLTTL: time.Minute}
+			rec := httptest.NewRecorder()
+			h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID.String()+"/evaluation", nil))
+			if rec.Code != test.status {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			if test.status == http.StatusOK && !strings.Contains(rec.Body.String(), `"available":false`) {
+				t.Fatalf("malformed manifest response: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestEvaluationRejectsSensitiveManifestWithoutLeakingIt(t *testing.T) {
+	projectID, jobID, reviewID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New(), uuid.New()
+	manifest := []byte(`{"schema_version":1,"review_id":"` + reviewID.String() + `","phases":[{"id":"measurement","status":"unavailable","detail":"https://storage.test/private/debug?X-Amz-Signature=secret"},{"id":"pose","status":"ready"},{"id":"tracking","status":"ready"},{"id":"planning","status":"ready"},{"id":"render","status":"ready"}]}`)
+	var logs bytes.Buffer
+	h := &Handler{
+		Repo:  &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: []domain.ReviewArtifact{reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json")}},
+		Store: fakeStore{manifest: manifest, readInfo: storage.ObjectInfo{Size: 100, ContentType: "application/json"}},
+		Owner: domain.OwnerDevelopment, Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	}
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID.String()+"/evaluation", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "{\"available\":false}\n" {
+		t.Fatalf("unsafe manifest response: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, secret := range []string{"storage.test", "X-Amz-Signature", "private/debug"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("log leaked %q: %s", secret, logs.String())
+		}
+	}
+}
+
+func TestEvaluationRejectsManifestVersionMismatchWithoutLeaks(t *testing.T) {
+	projectID, jobID, reviewID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New(), uuid.New()
+	manifest := bytes.Replace(evaluationManifest(reviewID), []byte(`"model_version":"w0.1-model"`), []byte(`"model_version":"other-model"`), 1)
+	h := &Handler{
+		Repo:  &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: []domain.ReviewArtifact{reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json")}},
+		Store: fakeStore{manifest: manifest, readInfo: storage.ObjectInfo{Size: 100, ContentType: "application/json"}},
+		Owner: domain.OwnerDevelopment,
+	}
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID.String()+"/evaluation", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "{\"available\":false}\n" || strings.Contains(rec.Body.String(), "other-model") {
+		t.Fatalf("mismatched manifest was projected: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEvaluationTreatsTelemetryOnlyReviewAsVisuallyUnavailable(t *testing.T) {
+	projectID, jobID, reviewID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New(), uuid.New()
+	artifacts := []domain.ReviewArtifact{
+		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json"),
+		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugTelemetry, "telemetry.jsonl.gz", "application/gzip"),
+	}
+	h := &Handler{
+		Repo:  &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: artifacts},
+		Store: fakeStore{manifest: evaluationManifest(reviewID), readInfo: storage.ObjectInfo{Size: 100, ContentType: "application/json"}},
+		Owner: domain.OwnerDevelopment, URLTTL: time.Minute,
+	}
+	rec := httptest.NewRecorder()
+	h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID.String()+"/evaluation", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"available":false`) || !strings.Contains(rec.Body.String(), `"telemetry_download_url":"https://download.test"`) || strings.Contains(rec.Body.String(), `"video_url"`) {
+		t.Fatalf("telemetry-only review was not safely projected: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEvaluationRejectsDuplicateOrMismatchedReviewArtifacts(t *testing.T) {
+	projectID, jobID, reviewID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New(), uuid.New()
+	manifest := reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json")
+	for _, artifacts := range [][]domain.ReviewArtifact{
+		{manifest, manifest},
+		{manifest, reviewArtifact(projectID, jobID, uuid.New(), domain.ArtifactDebugMeasurement, "measurement.mp4", "video/mp4")},
+	} {
+		h := &Handler{
+			Repo:  &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: artifacts},
+			Store: fakeStore{manifest: evaluationManifest(reviewID), readInfo: storage.ObjectInfo{Size: 100, ContentType: "application/json"}},
+			Owner: domain.OwnerDevelopment, URLTTL: time.Minute,
+		}
+		rec := httptest.NewRecorder()
+		h.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+jobID.String()+"/evaluation", nil))
+		if rec.Code != http.StatusOK || rec.Body.String() != "{\"available\":false}\n" {
+			t.Fatalf("response did not strictly reconcile artifacts: %d %s", rec.Code, rec.Body.String())
+		}
 	}
 }

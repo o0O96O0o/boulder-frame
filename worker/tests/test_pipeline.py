@@ -18,7 +18,7 @@ from boulder_frame_worker.measurement import (
 from boulder_frame_worker.media import MediaMetadata
 from boulder_frame_worker.pipeline import DecodedFrame, ProcessingPipeline
 from boulder_frame_worker.planner import CropRect, FrameMeasurement
-from boulder_frame_worker.repository import DebugAsset, OutputAsset
+from boulder_frame_worker.repository import OutputAsset, ReviewArtifact
 from boulder_frame_worker.state import JobConfiguration, JobRecord, JobState, SourceAsset
 from boulder_frame_worker.storage import StoredObject
 from boulder_frame_worker.tracking import SingleTargetTracker, TrackedMeasurement, TrackingState
@@ -28,6 +28,7 @@ class Storage:
     def __init__(self) -> None:
         self.uploaded = 0
         self.fail = False
+        self.head_fail = False
         self.deleted: list[str] = []
         self.objects: dict[str, bytes] = {}
 
@@ -39,6 +40,8 @@ class Storage:
             raise transient(ErrorCode.STORAGE_UNAVAILABLE, "storage unavailable")
         self.uploaded += 1
         self.objects[key] = source.read_bytes()
+        if self.head_fail:
+            raise transient(ErrorCode.STORAGE_UNAVAILABLE, "storage unavailable")
         return StoredObject(key, source.stat().st_size, content_type)
 
     def delete(self, key: str) -> None:
@@ -49,7 +52,7 @@ class Storage:
 class Finalizer:
     def __init__(self) -> None:
         self.outputs: list[OutputAsset] = []
-        self.debug: list[DebugAsset] = []
+        self.reviews: list[tuple[object, tuple[ReviewArtifact, ...]]] = []
         self.fail = False
         self.debug_fail = False
 
@@ -58,12 +61,14 @@ class Finalizer:
             raise transient(ErrorCode.DATABASE_UNAVAILABLE, "database unavailable")
         self.outputs.append(output)
 
-    def finalize_debug(self, record: JobRecord, storage_key: str, debug: DebugAsset) -> None:
+    def finalize_review(
+        self, record: JobRecord, review_id, artifacts: tuple[ReviewArtifact, ...]
+    ) -> None:
         assert record.state is JobState.UPLOADING
-        assert storage_key.startswith("private/debug/")
+        assert all(artifact.storage_key.startswith("private/debug/") for artifact in artifacts)
         if self.debug_fail:
             raise transient(ErrorCode.DATABASE_UNAVAILABLE, "database unavailable")
-        self.debug.append(debug)
+        self.reviews.append((review_id, artifacts))
 
 
 class Inspector:
@@ -137,6 +142,21 @@ def test_upload_reuses_valid_render_and_finalizes_verified_output(tmp_path) -> N
     assert storage.uploaded == 1
     assert len(finalizer.outputs) == 1
     assert finalizer.outputs[0].size_bytes == 4
+
+
+def test_upload_ignores_invalid_optional_trace_after_output_validation(tmp_path) -> None:
+    storage = Storage()
+    finalizer = Finalizer()
+    pipeline = ProcessingPipeline(storage, finalizer, inspector=Inspector(), renderer=Renderer())
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    (scratch / "source").write_bytes(b"source")
+    (scratch / "output.mp4").write_bytes(b"x" * 4)
+    (scratch / "analysis-trace.jsonl").write_text("not json\n", encoding="ascii")
+
+    pipeline.uploading(_record(), scratch)
+
+    assert len(finalizer.outputs) == 1
 
 
 def test_upload_storage_failure_is_transient_and_skips_finalization(tmp_path) -> None:
@@ -347,6 +367,53 @@ def test_pipeline_routes_pose_misses_through_tracker_loss_without_failing(tmp_pa
     ]
 
 
+def test_render_reuses_aligned_scratch_crop_trace_without_running_models(tmp_path) -> None:
+    class OneFrameInspector:
+        def inspect(self, path: Path) -> MediaMetadata:
+            return MediaMetadata(1920, 1080, 1000, 1, "h264", None, 0, False)
+
+    class FailingFrames:
+        def read(self, source: Path, metadata: MediaMetadata):
+            raise AssertionError("analysis should be reused")
+
+    class CapturingRenderer(Renderer):
+        def __init__(self) -> None:
+            self.crops = None
+
+        def render_crop_path(
+            self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
+        ):
+            self.crops = crop_path
+            return super().render_crop_path(
+                source, destination, crop_path, source_metadata, aspect_ratio, inspector
+            )
+
+    renderer = CapturingRenderer()
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=OneFrameInspector(),
+        renderer=renderer,
+        frame_reader=FailingFrames(),
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    (scratch / "source").write_bytes(b"source")
+    append_debug_record(
+        scratch / "analysis-trace.jsonl",
+        "frame",
+        {
+            "frame_index": 0,
+            "timestamp_ms": 0,
+            "planning": {"crop": {"x": 0, "y": 0, "width": 1920, "height": 1080}},
+        },
+    )
+
+    pipeline.rendering(_record(), scratch)
+
+    assert renderer.crops == [CropRect(0, 0, 1920, 1080)]
+
+
 def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(tmp_path) -> None:
     storage = Storage()
     finalizer = Finalizer()
@@ -366,7 +433,7 @@ def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(
         0, Point(25, 40), None, Rect(10, 20, 30, 40), 0.9, 1.0, TrackingState.TRACKED, 0
     )
     pipeline._write_analysis_trace(
-        scratch / "debug-analysis.jsonl",
+        scratch / "analysis-trace.jsonl",
         [observation],
         [tracked],
         [FrameMeasurement(Point(25, 40), None, 0.9)],
@@ -385,7 +452,7 @@ def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(
         json.loads(line)
         for line in gzip.decompress(storage.objects[key]).decode("ascii").splitlines()
     ]
-    assert finalizer.debug and finalizer.debug[0].content_type == "application/gzip"
+    assert finalizer.reviews
     assert records[0]["record_type"] == "header"
     assert records[0]["source_metadata"]["source_id"] == str(record.source_asset.id)  # type: ignore[union-attr]
     assert [item["record_type"] for item in records[1:]] == [
@@ -400,6 +467,34 @@ def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(
         "y": 20,
     }
     assert records[3]["output"] == {"width": 1920, "height": 1080}
+    review_id, artifacts = finalizer.reviews[0]
+    assert {artifact.role for artifact in artifacts} == {"debug_telemetry", "debug_manifest"}
+    assert all(f"/{review_id}/" in artifact.storage_key for artifact in artifacts)
+    manifest = next(
+        json.loads(value)
+        for key, value in storage.objects.items()
+        if key.endswith("/manifest.json")
+    )
+    assert manifest["schema_version"] == 1
+    assert manifest["review_id"] == str(review_id)
+    assert manifest["telemetry"] == {"status": "ready"}
+    assert [phase["id"] for phase in manifest["phases"]] == [
+        "measurement",
+        "pose",
+        "tracking",
+        "planning",
+        "render",
+    ]
+    assert all(phase["status"] == "unavailable" for phase in manifest["phases"])
+    assert manifest["phases"][0]["summary"] == {
+        "detected_frames": 0,
+        "frames": 0,
+        "model_version": "model",
+        "pipeline_version": "pipeline",
+        "source_duration_ms": 1000,
+        "source_frame_rate": 30.0,
+        "trace_frame_count": 0,
+    }
 
 
 def test_pipeline_deletes_unlinked_debug_object_after_finalization_failure(tmp_path) -> None:
@@ -421,5 +516,94 @@ def test_pipeline_deletes_unlinked_debug_object_after_finalization_failure(tmp_p
     with pytest.raises(WorkerError):
         pipeline.publish_debug(record, scratch)
 
+    assert len(storage.deleted) == 2
+    assert storage.objects == {}
+
+
+def test_pipeline_deletes_review_object_when_upload_succeeds_but_head_fails(tmp_path) -> None:
+    storage = Storage()
+    storage.head_fail = True
+    pipeline = ProcessingPipeline(
+        storage,
+        Finalizer(),
+        inspector=Inspector(),
+        renderer=Renderer(),
+        debug_capture=True,
+    )
+    record = _record()
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    (scratch / "source").write_bytes(b"source")
+
+    with pytest.raises(WorkerError) as raised:
+        pipeline.publish_debug(record, scratch)
+
+    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert storage.uploaded == 1
     assert len(storage.deleted) == 1
     assert storage.objects == {}
+
+
+def test_review_manifest_has_ordered_api_phases_and_safe_warning_fields(tmp_path) -> None:
+    review_id = uuid4()
+    manifest = ProcessingPipeline._write_review_manifest(
+        tmp_path,
+        review_id,
+        [
+            {
+                "timestamp_ms": 0,
+                "measurement": {"detection": None, "pose": None},
+                "tracking": {"state": "lost", "reacquired": False},
+                "planning": {"decision": {"containment_risk": True}},
+                "render": {"mapping_independently_verified": False},
+            }
+        ],
+        {"measurement": {"status": "ready"}},
+    )
+
+    data = json.loads(manifest.read_text())
+
+    assert data["schema_version"] == 1
+    assert data["review_id"] == str(review_id)
+    assert data["telemetry"] == {"status": "ready"}
+    assert [phase["id"] for phase in data["phases"]] == [
+        "measurement",
+        "pose",
+        "tracking",
+        "planning",
+        "render",
+    ]
+    assert data["phases"][0]["status"] == "ready"
+    assert data["phases"][1]["status"] == "unavailable"
+    assert data["phases"][1]["detail"] == "unavailable"
+    assert data["phases"][0]["summary"] == {
+        "detected_frames": 0,
+        "frames": 1,
+        "model_version": "unavailable",
+        "pipeline_version": "unavailable",
+        "trace_frame_count": 1,
+    }
+    assert data["phases"][0]["warning_intervals"] == [
+        {
+            "start_ms": 0,
+            "end_ms": 0,
+            "label": "Detection unavailable",
+            "detail": "No detector bounds were recorded.",
+        }
+    ]
+
+
+def test_review_manifest_bounds_unavailable_phase_detail(tmp_path) -> None:
+    manifest = ProcessingPipeline._write_review_manifest(
+        tmp_path,
+        uuid4(),
+        [],
+        {"measurement": {"status": "unavailable", "detail": " reason\n" * 100}},
+    )
+
+    phase = json.loads(manifest.read_text())["phases"][0]
+
+    assert phase["status"] == "unavailable"
+    assert len(phase["detail"]) == 80
+    assert "\n" not in phase["detail"]
+    assert phase["detail"].startswith("reason")

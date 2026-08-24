@@ -5,6 +5,11 @@ from boulder_frame_worker.config import (
     DEFAULT_DEBUG_MAX_FRAMES,
     DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES,
     DEFAULT_NORMALIZATION_TIMEOUT_SECONDS,
+    DEFAULT_REVIEW_HEIGHT,
+    DEFAULT_REVIEW_MAX_BYTES,
+    DEFAULT_REVIEW_MAX_DURATION_MS,
+    DEFAULT_REVIEW_TIMEOUT_SECONDS,
+    DEFAULT_REVIEW_WIDTH,
     LOCAL_ENV_UNCONFIGURED_MODEL_VERSION,
     UNCONFIGURED_MODEL_VERSION,
     ConfigError,
@@ -21,9 +26,15 @@ def test_config_uses_safe_defaults() -> None:
     assert config.lease_seconds == 300
     assert not config.retain_debug_artifacts
     assert not config.debug_capture
+    assert not config.debug_visual_capture
     assert config.debug_require_private_storage
     assert config.debug_max_frames == DEFAULT_DEBUG_MAX_FRAMES
     assert config.debug_max_bytes == DEFAULT_DEBUG_MAX_BYTES
+    assert config.review_max_duration_ms == DEFAULT_REVIEW_MAX_DURATION_MS
+    assert config.review_width == DEFAULT_REVIEW_WIDTH
+    assert config.review_height == DEFAULT_REVIEW_HEIGHT
+    assert config.review_max_bytes == DEFAULT_REVIEW_MAX_BYTES
+    assert config.review_timeout_seconds == DEFAULT_REVIEW_TIMEOUT_SECONDS
     assert config.normalization_max_source_bytes == DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
     assert config.normalization_timeout_seconds == DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
 
@@ -54,17 +65,25 @@ def test_config_rejects_invalid_boolean() -> None:
         WorkerConfig.from_mapping({"retain_debug_artifacts": "sometimes"})
 
 
-def test_config_parses_debug_capture_separately_from_scratch_retention() -> None:
+def test_config_parses_debug_capture_and_visual_capture_separately_from_scratch_retention() -> None:
     config = WorkerConfig.from_mapping(
         {"debug_capture": "true", "debug_require_private_storage": "false"}
     )
 
     assert config.debug_capture
+    assert not config.debug_visual_capture
     assert not config.debug_require_private_storage
     assert not config.retain_debug_artifacts
 
     with pytest.raises(ConfigError, match="debug_capture"):
         WorkerConfig.from_mapping({"debug_capture": "sometimes"})
+    with pytest.raises(ConfigError, match="debug_visual_capture"):
+        WorkerConfig.from_mapping({"debug_visual_capture": "sometimes"})
+    with pytest.raises(ConfigError, match="requires debug_capture"):
+        WorkerConfig.from_mapping({"debug_visual_capture": True})
+    assert WorkerConfig.from_mapping(
+        {"debug_capture": True, "debug_visual_capture": True}
+    ).debug_visual_capture
     with pytest.raises(ConfigError, match="debug_require_private_storage"):
         WorkerConfig.from_mapping({"debug_require_private_storage": "sometimes"})
 
@@ -74,6 +93,11 @@ def test_config_parses_debug_capture_separately_from_scratch_retention() -> None
     [
         "debug_max_frames",
         "debug_max_bytes",
+        "review_max_duration_ms",
+        "review_width",
+        "review_height",
+        "review_max_bytes",
+        "review_timeout_seconds",
         "normalization_max_source_bytes",
         "normalization_timeout_seconds",
     ],
@@ -89,6 +113,11 @@ def test_config_parses_debug_limits_separately_from_capture() -> None:
         {
             "debug_max_frames": "25",
             "debug_max_bytes": "4096",
+            "review_max_duration_ms": "1000",
+            "review_width": "320",
+            "review_height": "180",
+            "review_max_bytes": "8192",
+            "review_timeout_seconds": "30",
             "normalization_max_source_bytes": "8192",
             "normalization_timeout_seconds": "60",
         }
@@ -97,6 +126,10 @@ def test_config_parses_debug_limits_separately_from_capture() -> None:
     assert not config.debug_capture
     assert config.debug_max_frames == 25
     assert config.debug_max_bytes == 4096
+    assert config.review_max_duration_ms == 1000
+    assert (config.review_width, config.review_height) == (320, 180)
+    assert config.review_max_bytes == 8192
+    assert config.review_timeout_seconds == 30
     assert config.normalization_max_source_bytes == 8192
     assert config.normalization_timeout_seconds == 60
 

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"mime"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
+
+const maxEvaluationManifestBytes int64 = 256 * 1024
 
 type Handler struct {
 	Repo            repository.Repository
@@ -45,6 +49,7 @@ func (h *Handler) Router() http.Handler {
 		r.Post("/projects/{projectID}/jobs", h.createJob)
 		r.Get("/jobs/{jobID}", h.getJob)
 		r.Get("/jobs/{jobID}/artifacts", h.artifacts)
+		r.Get("/jobs/{jobID}/evaluation", h.evaluation)
 		r.Get("/jobs/{jobID}/download", h.download)
 	})
 	return r
@@ -306,6 +311,173 @@ func (h *Handler) artifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, 200, x)
+}
+func (h *Handler) evaluation(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r, "jobID")
+	if !ok {
+		return
+	}
+	job, err := h.Repo.GetJob(r.Context(), id)
+	if err != nil {
+		notFound(w, err)
+		return
+	}
+	if _, err := h.Repo.GetProject(r.Context(), job.ProjectID, h.Owner); err != nil {
+		notFound(w, err)
+		return
+	}
+	if job.State != domain.JobCompleted && job.State != domain.JobFailed {
+		writeError(w, http.StatusConflict, "evaluation_unavailable", "evaluation is available only after completion or failure")
+		return
+	}
+	artifacts, err := h.Repo.ListReviewArtifacts(r.Context(), job.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "could not load evaluation")
+		return
+	}
+	byRole, ok := reviewArtifactsByRole(artifacts)
+	if !ok {
+		jsonResponse(w, http.StatusOK, domain.Evaluation{Available: false})
+		return
+	}
+	manifestAsset, ok := byRole[domain.ArtifactDebugManifest]
+	if !ok {
+		jsonResponse(w, http.StatusOK, domain.Evaluation{Available: false})
+		return
+	}
+	reviewID, ok := reviewIDForAsset(manifestAsset, job.ProjectID, job.ID, "manifest.json")
+	if !ok || !jsonContentType(manifestAsset.ContentType) || manifestAsset.SizeBytes <= 0 || manifestAsset.SizeBytes > maxEvaluationManifestBytes {
+		jsonResponse(w, http.StatusOK, domain.Evaluation{Available: false})
+		return
+	}
+	manifestBytes, info, err := h.Store.Read(r.Context(), manifestAsset.StorageKey, maxEvaluationManifestBytes)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "storage_unavailable", "could not load evaluation")
+		return
+	}
+	if !jsonContentType(info.ContentType) || info.Size != manifestAsset.SizeBytes {
+		jsonResponse(w, http.StatusOK, domain.Evaluation{Available: false})
+		return
+	}
+	manifest, err := domain.ParseEvaluationManifest(manifestBytes)
+	if err != nil || manifest.ReviewID != reviewID || manifest.PipelineVersion != job.Configuration.PipelineVersion || manifest.ModelVersion != job.Configuration.ModelVersion {
+		jsonResponse(w, http.StatusOK, domain.Evaluation{Available: false})
+		return
+	}
+	if !validReviewArtifactSet(byRole, job.ProjectID, job.ID, reviewID) {
+		jsonResponse(w, http.StatusOK, domain.Evaluation{Available: false})
+		return
+	}
+	evaluation := domain.Evaluation{ReviewID: reviewID.String(), State: job.State, PipelineVersion: manifest.PipelineVersion, ModelVersion: manifest.ModelVersion, Timing: &manifest.Timing, ExpiresInSeconds: int(h.URLTTL / time.Second)}
+	for _, phase := range manifest.Phases {
+		projected := domain.EvaluationPhase{ID: phase.ID, Label: domain.ReviewPhaseLabel(phase.ID), Status: phase.Status, Detail: phase.Detail, Summary: phase.Summary, WarningIntervals: phase.WarningIntervals}
+		if phase.Status == "ready" || phase.Status == "partial" || phase.Status == "warning" {
+			asset, exists := byRole[domain.ReviewArtifactRoleForPhase(phase.ID)]
+			if !exists || !validReviewAsset(asset, job.ProjectID, job.ID, reviewID, phase.ID+".mp4", "video/mp4") {
+				projected.Status = "unavailable"
+			}
+		}
+		evaluation.Phases = append(evaluation.Phases, projected)
+	}
+	for _, phase := range evaluation.Phases {
+		if phase.Status != "unavailable" {
+			evaluation.Available = true
+			break
+		}
+	}
+	if !evaluation.Available {
+		evaluation.ReviewID = ""
+		evaluation.State = ""
+		evaluation.PipelineVersion = ""
+		evaluation.ModelVersion = ""
+		evaluation.Timing = nil
+		evaluation.Phases = nil
+	}
+	if evaluation.Available {
+		for index, phase := range evaluation.Phases {
+			if phase.Status == "unavailable" {
+				continue
+			}
+			asset := byRole[domain.ReviewArtifactRoleForPhase(phase.ID)]
+			url, err := h.Store.PresignDownload(r.Context(), asset.StorageKey, h.URLTTL)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "storage_unavailable", "could not create evaluation URL")
+				return
+			}
+			evaluation.Phases[index].VideoURL = url
+		}
+	}
+	if manifest.TelemetryReady {
+		if asset, exists := byRole[domain.ArtifactDebugTelemetry]; exists && validReviewAsset(asset, job.ProjectID, job.ID, reviewID, "telemetry.jsonl.gz", "application/gzip") {
+			url, err := h.Store.PresignDownload(r.Context(), asset.StorageKey, h.URLTTL)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "storage_unavailable", "could not create evaluation URL")
+				return
+			}
+			evaluation.TelemetryDownloadURL = url
+		}
+	}
+	jsonResponse(w, http.StatusOK, evaluation)
+}
+func reviewArtifactsByRole(artifacts []domain.ReviewArtifact) (map[string]domain.Asset, bool) {
+	byRole := make(map[string]domain.Asset, len(artifacts))
+	for _, artifact := range artifacts {
+		if !domain.ValidReviewArtifactRole(artifact.Role) {
+			return nil, false
+		}
+		if _, exists := byRole[artifact.Role]; exists {
+			return nil, false
+		}
+		byRole[artifact.Role] = artifact.Asset
+	}
+	return byRole, true
+}
+func validReviewArtifactSet(artifacts map[string]domain.Asset, projectID, jobID, reviewID uuid.UUID) bool {
+	for role, asset := range artifacts {
+		name, contentType, ok := reviewArtifactSpec(role)
+		if !ok || !validReviewAsset(asset, projectID, jobID, reviewID, name, contentType) {
+			return false
+		}
+	}
+	return true
+}
+func reviewArtifactSpec(role string) (name, contentType string, ok bool) {
+	switch role {
+	case domain.ArtifactDebugTelemetry:
+		return "telemetry.jsonl.gz", "application/gzip", true
+	case domain.ArtifactDebugManifest:
+		return "manifest.json", "application/json", true
+	case domain.ArtifactDebugMeasurement:
+		return "measurement.mp4", "video/mp4", true
+	case domain.ArtifactDebugPose:
+		return "pose.mp4", "video/mp4", true
+	case domain.ArtifactDebugTracking:
+		return "tracking.mp4", "video/mp4", true
+	case domain.ArtifactDebugPlanning:
+		return "planning.mp4", "video/mp4", true
+	case domain.ArtifactDebugRender:
+		return "render.mp4", "video/mp4", true
+	default:
+		return "", "", false
+	}
+}
+func reviewIDForAsset(asset domain.Asset, projectID, jobID uuid.UUID, name string) (uuid.UUID, bool) {
+	prefix := "private/debug/" + projectID.String() + "/" + jobID.String() + "/"
+	if !strings.HasPrefix(asset.StorageKey, prefix) || path.Base(asset.StorageKey) != name {
+		return uuid.Nil, false
+	}
+	reviewID, err := uuid.Parse(strings.TrimSuffix(strings.TrimPrefix(asset.StorageKey, prefix), "/"+name))
+	if err != nil || !domain.ValidReviewStorageKey(asset.StorageKey, projectID, jobID, reviewID, name) {
+		return uuid.Nil, false
+	}
+	return reviewID, true
+}
+func validReviewAsset(asset domain.Asset, projectID, jobID, reviewID uuid.UUID, name, contentType string) bool {
+	return asset.UploadState == domain.UploadUploaded && asset.Kind == domain.AssetDebug && asset.SizeBytes > 0 && asset.ContentType == contentType && domain.ValidReviewStorageKey(asset.StorageKey, projectID, jobID, reviewID, name)
+}
+func jsonContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mediaType == "application/json"
 }
 func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r, "jobID")

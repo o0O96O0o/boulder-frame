@@ -118,7 +118,8 @@ flowchart LR
 - Creates signed object-store upload/download URLs.
 - Persists immutable processing configuration before enqueueing the job.
 - Appends one idempotent processing task using the job identifier as `task_id`.
-- Exposes project, asset, job status, and output artifact metadata.
+- Exposes project, asset, job status, output artifact metadata, and authorized optional phase-review URLs
+  for terminal jobs.
 - Does not call CV models, decode video, or render media.
 
 ### Python worker
@@ -129,7 +130,8 @@ flowchart LR
   and display rotation inside job scratch before analysis.
 - Runs athlete measurement, tracking, crop planning, and rendering.
 - Periodically persists stage progress and structured errors.
-- Writes output/debug artifacts to object storage and makes the completed output available through the API.
+- Writes output/debug artifacts to object storage, including opt-in phase-review artifacts, and makes
+  the completed output and authorized review available through the API.
 - Is stateless between jobs; all durable state belongs in PostgreSQL or object storage.
 
 ## API Contract
@@ -241,9 +243,12 @@ The initial PostgreSQL schema has these durable entities:
 | `projects` | id, name, owner_id, created_at | `owner_id` may use the local development user until authentication exists. |
 | `assets` | id, project_id, kind, storage_key, upload_state, media metadata, created_at | `kind` is `source`, `output`, or `debug`. |
 | `processing_jobs` | id, project_id, source_asset_id, state, stage, progress, immutable configuration JSON, error code/message, lease owner/expiry, timestamps | Stores pipeline and model versions in the configuration. Migration `002_worker_leases.sql` adds the worker lease fields and active-claim index. |
-| `job_artifacts` | id, job_id, asset_id, kind, created_at | Links completed output and optional debug artifacts. |
+| `job_artifacts` | id, job_id, asset_id, kind, created_at | Links completed output and optional debug/review artifacts; uniqueness is per job and semantic artifact kind. |
 
-Store only object keys and metadata in PostgreSQL. Do not store video bytes or per-frame measurements in relational rows. Optional visual-debug overlays and compact planner telemetry belong in object storage as job artifacts.
+Store only object keys and metadata in PostgreSQL. Do not store video bytes, per-frame measurements,
+or review summaries in relational rows. Optional visual-debug overlays and compact planner telemetry
+belong in private object storage as job artifacts. The final output remains the cropped 1080p video;
+annotated phase videos are diagnostics only.
 
 ## Processing Specification
 
@@ -320,7 +325,10 @@ The planner must be behind an interface that accepts per-frame measurements/conf
 2. Render 1080p H.264 output at the selected aspect ratio.
 3. Preserve source audio when supported.
 4. Inspect the output with ffprobe and verify codec, dimensions, duration tolerance, audio mapping, and decodability.
-5. Upload the output asset and optional debug overlays before marking the job `completed`.
+5. Upload and finalize the validated output asset before marking the job `completed`. Afterwards,
+   best-effort telemetry and optional phase-review resources reuse the aligned analysis trace under one
+   UUID-scoped review set; their render/upload/finalization failures cannot alter the completed output
+   result. Visual rendering has independent duration, byte, and enforced wall-clock limits.
 
 ## Quality Gates
 

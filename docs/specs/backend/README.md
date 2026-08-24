@@ -33,4 +33,7 @@ go run .
 go run . migrate up
 ```
 
-The migration command applies `backend/migrations/001_init.sql` and `backend/migrations/002_worker_leases.sql` in order and is idempotent.
+The migration command applies `backend/migrations/001_init.sql` through
+`backend/migrations/003_phase_evaluation.sql` in order and is idempotent. Before applying migration
+`003`, drain and stop older workers because it rejects their legacy `debug` finalization role; see
+[Persistence](persistence.md#phase-review-rollout).

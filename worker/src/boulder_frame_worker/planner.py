@@ -50,6 +50,35 @@ class FrameMeasurement:
 
 
 @dataclass(frozen=True, slots=True)
+class PlannerFrameTrace:
+    """Authoritative planner inputs and decision for one source frame."""
+
+    envelope: Rect | None
+    lead_room: Point
+    uncertainty_padding: float
+    containment_risk: bool
+    zoom_action: str
+
+
+@dataclass(frozen=True, slots=True)
+class CropPlan(Sequence[CropRect]):
+    """A frame-aligned crop path plus the diagnostic decisions that produced it."""
+
+    crops: tuple[CropRect, ...]
+    trace: tuple[PlannerFrameTrace, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.crops) != len(self.trace):
+            raise ValueError("crop plan records must have matching frame counts")
+
+    def __len__(self) -> int:
+        return len(self.crops)
+
+    def __getitem__(self, index: int | slice) -> CropRect | tuple[CropRect, ...]:
+        return self.crops[index]
+
+
+@dataclass(frozen=True, slots=True)
 class PlannerConfig:
     base_padding: float
     uncertainty_padding: float
@@ -72,7 +101,7 @@ PROFILE_CONFIGS: dict[FramingProfile, PlannerConfig] = {
 
 
 class CropPlanner(Protocol):
-    def plan(self, measurements: Sequence[FrameMeasurement]) -> list[CropRect]: ...
+    def plan(self, measurements: Sequence[FrameMeasurement]) -> CropPlan: ...
 
 
 def full_frame_crop(source_width: int, source_height: int, aspect_ratio: AspectRatio) -> CropRect:
@@ -113,9 +142,11 @@ class DeterministicCropPlanner:
         self.config = PROFILE_CONFIGS[profile]
         self.full_frame = full_frame_crop(source_width, source_height, aspect_ratio)
 
-    def _desired_crop(self, measurement: FrameMeasurement, envelope: Rect | None) -> CropRect:
+    def _desired_crop(
+        self, measurement: FrameMeasurement, envelope: Rect | None
+    ) -> tuple[CropRect, Point, float]:
         if measurement.lost or measurement.root is None or envelope is None:
-            return self.full_frame
+            return self.full_frame, Point(0, 0), 0
         uncertainty = self.config.uncertainty_padding * (1 - max(0, min(measurement.confidence, 1)))
         if measurement.covariance is not None:
             uncertainty += min(
@@ -136,27 +167,35 @@ class DeterministicCropPlanner:
             measurement.velocity.y * self.config.lead_fraction,
         )
         center = Point(measurement.root.x + lead.x, measurement.root.y + lead.y)
-        return clamp_crop(
-            CropRect(center.x - width / 2, center.y - height / 2, width, height),
-            self.source_width,
-            self.source_height,
+        return (
+            clamp_crop(
+                CropRect(center.x - width / 2, center.y - height / 2, width, height),
+                self.source_width,
+                self.source_height,
+            ),
+            lead,
+            uncertainty,
         )
 
-    def plan(self, measurements: Sequence[FrameMeasurement]) -> list[CropRect]:
+    def plan(self, measurements: Sequence[FrameMeasurement]) -> CropPlan:
         smoothed = self._smooth(measurements)
         crops: list[CropRect] = []
+        trace: list[PlannerFrameTrace] = []
         previous: CropRect | None = None
         stable_frames = 0
         pan_delta = Point(0, 0)
         for index, measurement in enumerate(smoothed):
             envelope = self._movement_envelope(smoothed, index)
-            desired = self._desired_crop(measurement, envelope)
+            desired, lead, uncertainty = self._desired_crop(measurement, envelope)
+            zoom_action = "hold"
             if previous is None:
                 crop = desired
+                zoom_action = "full_frame" if measurement.lost else "initial"
             elif measurement.lost or measurement.confidence < self.config.high_confidence:
                 # Low-confidence observations may widen immediately but must never zoom in.
                 crop = self._rate_limited(previous, desired, 1.0)
                 stable_frames = 0
+                zoom_action = "zoom_out" if crop.height > previous.height else "hold"
             else:
                 stable_frames += 1
                 factor = (
@@ -165,18 +204,34 @@ class DeterministicCropPlanner:
                     else 1.0
                 )
                 crop = self._rate_limited(previous, desired, factor)
+                if crop.height > previous.height:
+                    zoom_action = "zoom_out"
+                elif crop.height < previous.height:
+                    zoom_action = "zoom_in"
             if previous is not None:
                 crop, pan_delta = self._pan_limited(previous, crop, pan_delta)
                 # Containment is more important than a motion limit when the athlete moves abruptly.
-                if envelope is not None and not crop.contains(envelope):
+                containment_risk = envelope is not None and not crop.contains(envelope)
+                if containment_risk:
                     crop = desired
                     pan_delta = Point(
                         crop.center.x - previous.center.x, crop.center.y - previous.center.y
                     )
+            else:
+                containment_risk = False
             crop = clamp_crop(crop, self.source_width, self.source_height)
             crops.append(crop)
+            trace.append(
+                PlannerFrameTrace(
+                    envelope,
+                    lead,
+                    uncertainty,
+                    containment_risk,
+                    "full_frame" if measurement.lost else zoom_action,
+                )
+            )
             previous = crop
-        return crops
+        return CropPlan(tuple(crops), tuple(trace))
 
     def _smooth(self, measurements: Sequence[FrameMeasurement]) -> list[FrameMeasurement]:
         """Apply a causal pass followed by a backward pass because the source is recorded."""

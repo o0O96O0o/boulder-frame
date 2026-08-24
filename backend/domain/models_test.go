@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -73,5 +74,81 @@ func TestJobConfigHashIsStableAndChangesWithConfiguration(t *testing.T) {
 	d, _ := c.Hash()
 	if a == d {
 		t.Fatal("different configuration produced same hash")
+	}
+}
+
+func TestParseEvaluationManifestAcceptsSafeOrderedProjection(t *testing.T) {
+	reviewID := uuid.New()
+	endMS := int64(20)
+	manifest := map[string]any{
+		"schema_version":   1,
+		"review_id":        reviewID.String(),
+		"pipeline_version": "w0.1.0",
+		"model_version":    "w0.1-model",
+		"timing":           map[string]any{"frame_rate": 60.0, "duration_ms": 1200, "frame_count": 72},
+		"telemetry":        map[string]any{"status": "ready"},
+		"phases": []any{
+			map[string]any{"id": "measurement", "status": "ready", "summary": map[string]any{"selected_rate": .9, "mapping_verified": false, "first_warning": nil}},
+			map[string]any{"id": "pose", "status": "partial"},
+			map[string]any{"id": "tracking", "status": "warning", "warning_intervals": []any{map[string]any{"start_ms": 10, "end_ms": endMS, "label": "Tracking lost", "detail": "Subject was briefly occluded"}}},
+			map[string]any{"id": "planning", "status": "unavailable", "detail": "Review capture exceeded its duration limit"},
+			map[string]any{"id": "render", "status": "unavailable"},
+		},
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseEvaluationManifest(data)
+	if err != nil || got.ReviewID != reviewID || got.PipelineVersion != "w0.1.0" || got.ModelVersion != "w0.1-model" || got.Timing.FrameRate != 60 || got.Timing.DurationMS != 1200 || got.Timing.FrameCount != 72 || !got.TelemetryReady || len(got.Phases) != 5 || got.Phases[2].WarningIntervals[0].EndMS == nil || *got.Phases[2].WarningIntervals[0].EndMS != endMS || got.Phases[3].Detail != "Review capture exceeded its duration limit" {
+		t.Fatalf("ParseEvaluationManifest() = %#v, %v", got, err)
+	}
+}
+
+func TestParseEvaluationManifestRejectsUnsafeOrUnorderedData(t *testing.T) {
+	reviewID := uuid.New().String()
+	validManifest := map[string]any{"schema_version": 1, "review_id": reviewID, "pipeline_version": "w0.1.0", "model_version": "w0.1-model", "timing": map[string]any{"frame_rate": 60.0, "duration_ms": 1200, "frame_count": 72}}
+	validPhases := []map[string]any{
+		{"id": "measurement", "status": "ready"}, {"id": "pose", "status": "ready"}, {"id": "tracking", "status": "ready"}, {"id": "planning", "status": "ready"}, {"id": "render", "status": "ready"},
+	}
+	for _, manifest := range []map[string]any{
+		{"schema_version": 1, "review_id": reviewID, "phases": []map[string]any{{"id": "pose", "status": "ready"}}},
+		{"schema_version": 1, "review_id": reviewID, "phases": []map[string]any{{"id": "measurement", "status": "ready"}, {"id": "pose", "status": "ready"}, {"id": "tracking", "status": "ready"}, {"id": "planning", "status": "ready"}, {"id": "render", "status": "ready", "summary": map[string]any{"storage_key": "private/secret"}}}},
+		{"schema_version": 1, "review_id": reviewID, "phases": []map[string]any{{"id": "measurement", "status": "ready", "warning_intervals": []any{map[string]any{"start_ms": 1, "label": "Signed URL", "detail": "https://storage.test/object?X-Amz-Signature=secret"}}}, validPhases[1], validPhases[2], validPhases[3], validPhases[4]}},
+		{"schema_version": 1, "review_id": reviewID, "phases": []map[string]any{{"id": "measurement", "status": "ready", "summary": map[string]any{"operator_note": "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature"}}, validPhases[1], validPhases[2], validPhases[3], validPhases[4]}},
+		{"schema_version": 1, "review_id": reviewID, "phases": []map[string]any{{"id": "measurement", "status": "unavailable", "detail": "https://storage.test/private/debug?X-Amz-Signature=secret"}, validPhases[1], validPhases[2], validPhases[3], validPhases[4]}},
+		{"schema_version": 1, "review_id": reviewID, "phases": []map[string]any{{"id": "measurement", "status": "ready", "detail": "Capture unavailable"}, validPhases[1], validPhases[2], validPhases[3], validPhases[4]}},
+		{"schema_version": 1, "review_id": reviewID, "phases": []map[string]any{{"id": "measurement", "status": "unavailable", "detail": map[string]any{"reason": "Capture unavailable"}}, validPhases[1], validPhases[2], validPhases[3], validPhases[4]}},
+		{"schema_version": 1, "review_id": reviewID, "phases": []map[string]any{{"id": "measurement", "status": "unavailable", "detail": "Capture unavailable", "debug": true}, validPhases[1], validPhases[2], validPhases[3], validPhases[4]}},
+		{"schema_version": 1, "review_id": reviewID, "pipeline_version": "https://storage.test", "model_version": "w0.1-model", "timing": map[string]any{"frame_rate": 60.0, "duration_ms": 1200, "frame_count": 72}, "phases": validPhases},
+		{"schema_version": 1, "review_id": reviewID, "pipeline_version": "w0.1.0", "model_version": "w0.1-model", "timing": map[string]any{"frame_rate": 0, "duration_ms": 1200, "frame_count": 72}, "phases": validPhases},
+	} {
+		for key, value := range validManifest {
+			if _, exists := manifest[key]; !exists {
+				manifest[key] = value
+			}
+		}
+		data, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseEvaluationManifest(data); err == nil {
+			t.Fatalf("unsafe manifest was accepted: %s", data)
+		}
+	}
+}
+
+func TestParseEvaluationManifestRequiresBoundedLabeledWarningTimestamp(t *testing.T) {
+	reviewID := uuid.New().String()
+	phases := []map[string]any{
+		{"id": "measurement", "status": "warning", "warning_intervals": []any{map[string]any{"start_ms": -1, "label": "Invalid"}}},
+		{"id": "pose", "status": "ready"}, {"id": "tracking", "status": "ready"}, {"id": "planning", "status": "ready"}, {"id": "render", "status": "ready"},
+	}
+	data, err := json.Marshal(map[string]any{"schema_version": 1, "review_id": reviewID, "pipeline_version": "w0.1.0", "model_version": "w0.1-model", "timing": map[string]any{"frame_rate": 60.0, "duration_ms": 1200, "frame_count": 72}, "phases": phases})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseEvaluationManifest(data); err == nil {
+		t.Fatal("manifest without a valid warning interval was accepted")
 	}
 }

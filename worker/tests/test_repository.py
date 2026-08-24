@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -13,9 +14,11 @@ from boulder_frame_worker.repository import (
     OutputAsset,
     OutputNotValidatedError,
     PostgresJobRepository,
+    ReviewArtifact,
     _record_from_row,
     debug_storage_key,
     output_storage_key,
+    review_storage_key,
 )
 from boulder_frame_worker.state import JobStage, JobState
 
@@ -208,7 +211,7 @@ def test_finalize_debug_links_deterministic_asset_and_unique_artifact() -> None:
     assert result == asset_id
     assert "lease_owner = %s" in query
     assert "lease_expires_at > now()" in query
-    assert "'debug'" in query
+    assert "'debug_telemetry'" in query
     assert "ON CONFLICT (storage_key) DO UPDATE" in query
     assert "ON CONFLICT (job_id, kind) DO UPDATE" in query
     assert params[3] == storage_key
@@ -302,9 +305,118 @@ def test_debug_storage_key_is_deterministic_per_project_job_and_debug_asset() ->
     job_id = uuid4()
     debug_id = uuid4()
 
-    assert debug_storage_key(
-        project_id, job_id, debug_id
-    ) == f"private/debug/{project_id}/{job_id}/{debug_id}.jsonl.gz"
+    assert (
+        debug_storage_key(project_id, job_id, debug_id)
+        == f"private/debug/{project_id}/{job_id}/{debug_id}.jsonl.gz"
+    )
+
+
+def test_finalize_review_links_canonical_scoped_artifacts_atomically() -> None:
+    cursor = FakeCursor([(2,)])
+    repo, connection = repository(cursor)
+    record = _record_from_row(_row("uploading", "uploading", "worker-a"))
+    assert record.source_asset is not None
+    review_id = uuid4()
+    artifacts = (
+        ReviewArtifact(
+            "debug_telemetry",
+            review_storage_key(
+                record.source_asset.project_id, record.id, review_id, "telemetry.jsonl.gz"
+            ),
+            123,
+            "application/gzip",
+        ),
+        ReviewArtifact(
+            "debug_manifest",
+            review_storage_key(
+                record.source_asset.project_id, record.id, review_id, "manifest.json"
+            ),
+            456,
+            "application/json",
+        ),
+    )
+
+    repo.finalize_review(record, review_id, artifacts)
+
+    query, params = cursor.calls[0]
+    assert "jsonb_to_recordset" in query
+    assert "ON CONFLICT (job_id, kind) DO UPDATE" in query
+    assert "removed_review_artifacts" in query
+    assert "kind NOT IN (SELECT role FROM artifact_input)" in query
+    assert "lease_expires_at > now()" in query
+    assert {item["role"] for item in json.loads(params[3])} == {
+        "debug_telemetry",
+        "debug_manifest",
+    }
+    assert connection.committed and connection.closed
+
+
+def test_finalize_review_retry_with_fewer_artifacts_removes_stale_phase_roles() -> None:
+    cursor = FakeCursor([(7,), (2,)])
+    repo, _ = repository(cursor)
+    record = _record_from_row(_row("uploading", "uploading", "worker-a"))
+    assert record.source_asset is not None
+    full_review, partial_review = uuid4(), uuid4()
+    full = tuple(
+        ReviewArtifact(
+            role,
+            review_storage_key(record.source_asset.project_id, record.id, full_review, name),
+            10,
+            content_type,
+        )
+        for role, name, content_type in (
+            ("debug_telemetry", "telemetry.jsonl.gz", "application/gzip"),
+            ("debug_manifest", "manifest.json", "application/json"),
+            ("debug_measurement", "measurement.mp4", "video/mp4"),
+            ("debug_pose", "pose.mp4", "video/mp4"),
+            ("debug_tracking", "tracking.mp4", "video/mp4"),
+            ("debug_planning", "planning.mp4", "video/mp4"),
+            ("debug_render", "render.mp4", "video/mp4"),
+        )
+    )
+    partial = tuple(
+        ReviewArtifact(
+            role,
+            review_storage_key(record.source_asset.project_id, record.id, partial_review, name),
+            10,
+            content_type,
+        )
+        for role, name, content_type in (
+            ("debug_telemetry", "telemetry.jsonl.gz", "application/gzip"),
+            ("debug_manifest", "manifest.json", "application/json"),
+        )
+    )
+
+    repo.finalize_review(record, full_review, full)
+    repo.finalize_review(record, partial_review, partial)
+
+    query, params = cursor.calls[1]
+    assert "DELETE FROM job_artifacts" in query
+    assert "debug_render" in query
+    assert {item["role"] for item in json.loads(params[3])} == {
+        "debug_telemetry",
+        "debug_manifest",
+    }
+
+
+def test_finalize_review_rejects_missing_manifest_or_invalid_scope() -> None:
+    cursor = FakeCursor([])
+    repo, _ = repository(cursor)
+    record = _record_from_row(_row("uploading", "uploading", "worker-a"))
+    assert record.source_asset is not None
+    review_id = uuid4()
+    telemetry = ReviewArtifact(
+        "debug_telemetry",
+        review_storage_key(
+            record.source_asset.project_id, record.id, review_id, "telemetry.jsonl.gz"
+        ),
+        123,
+        "application/gzip",
+    )
+
+    with pytest.raises(ValueError, match="telemetry and manifest"):
+        repo.finalize_review(record, review_id, (telemetry,))
+    assert cursor.calls == []
 
 
 def _row(state: str, stage: str, owner: str) -> tuple[object, ...]:

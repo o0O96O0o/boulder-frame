@@ -63,6 +63,7 @@ def test_tracker_enters_lost_after_gap_and_reacquires_without_inventing_root() -
     assert tracked[3].state is TrackingState.REACQUIRING
     assert tracked[3].root is None
     assert tracked[4].state is TrackingState.TRACKED
+    assert tracked[4].reacquired
 
 
 def test_tracker_requires_monotonic_timestamps() -> None:

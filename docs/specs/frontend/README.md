@@ -5,3 +5,4 @@ The frontend is a Vite/React/TypeScript browser application. It handles project 
 ## Documents
 
 - [Workflow](workflow.md): UI state machine, API calls, direct upload, selection geometry, polling, and download behavior.
+- [Phase Evaluation Review](phase-evaluation.md): terminal-job visual diagnostics, phase artifacts, review UI, and authorization boundary.

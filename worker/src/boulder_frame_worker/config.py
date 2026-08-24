@@ -21,6 +21,11 @@ DEFAULT_DEBUG_MAX_FRAMES = 10_000
 DEFAULT_DEBUG_MAX_BYTES = 50 * 1024 * 1024
 DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES = 1024 * 1024 * 1024
 DEFAULT_NORMALIZATION_TIMEOUT_SECONDS = 30 * 60
+DEFAULT_REVIEW_MAX_DURATION_MS = 5 * 60 * 1000
+DEFAULT_REVIEW_WIDTH = 960
+DEFAULT_REVIEW_HEIGHT = 540
+DEFAULT_REVIEW_MAX_BYTES = 250 * 1024 * 1024
+DEFAULT_REVIEW_TIMEOUT_SECONDS = 10 * 60
 
 
 def _positive_int(value: str, name: str) -> int:
@@ -69,9 +74,15 @@ class WorkerConfig:
     stream_block_ms: int = 1_000
     retain_debug_artifacts: bool = False
     debug_capture: bool = False
+    debug_visual_capture: bool = False
     debug_require_private_storage: bool = True
     debug_max_frames: int = DEFAULT_DEBUG_MAX_FRAMES
     debug_max_bytes: int = DEFAULT_DEBUG_MAX_BYTES
+    review_max_duration_ms: int = DEFAULT_REVIEW_MAX_DURATION_MS
+    review_width: int = DEFAULT_REVIEW_WIDTH
+    review_height: int = DEFAULT_REVIEW_HEIGHT
+    review_max_bytes: int = DEFAULT_REVIEW_MAX_BYTES
+    review_timeout_seconds: int = DEFAULT_REVIEW_TIMEOUT_SECONDS
     normalization_max_source_bytes: int = DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
     normalization_timeout_seconds: int = DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
 
@@ -101,6 +112,12 @@ class WorkerConfig:
             raise ConfigError("stream_name must not be empty")
         if not stream_group:
             raise ConfigError("stream_group must not be empty")
+        debug_capture = _boolean(str(worker.get("debug_capture", False)), "debug_capture")
+        debug_visual_capture = _boolean(
+            str(worker.get("debug_visual_capture", False)), "debug_visual_capture"
+        )
+        if debug_visual_capture and not debug_capture:
+            raise ConfigError("debug_visual_capture requires debug_capture")
         return cls(
             pipeline_version=pipeline_version,
             model_version=model_version,
@@ -136,7 +153,8 @@ class WorkerConfig:
             retain_debug_artifacts=_boolean(
                 str(worker.get("retain_debug_artifacts", False)), "retain_debug_artifacts"
             ),
-            debug_capture=_boolean(str(worker.get("debug_capture", False)), "debug_capture"),
+            debug_capture=debug_capture,
+            debug_visual_capture=debug_visual_capture,
             debug_require_private_storage=_boolean(
                 str(worker.get("debug_require_private_storage", True)),
                 "debug_require_private_storage",
@@ -146,6 +164,24 @@ class WorkerConfig:
             ),
             debug_max_bytes=_positive_int(
                 str(worker.get("debug_max_bytes", DEFAULT_DEBUG_MAX_BYTES)), "debug_max_bytes"
+            ),
+            review_max_duration_ms=_positive_int(
+                str(worker.get("review_max_duration_ms", DEFAULT_REVIEW_MAX_DURATION_MS)),
+                "review_max_duration_ms",
+            ),
+            review_width=_positive_int(
+                str(worker.get("review_width", DEFAULT_REVIEW_WIDTH)), "review_width"
+            ),
+            review_height=_positive_int(
+                str(worker.get("review_height", DEFAULT_REVIEW_HEIGHT)), "review_height"
+            ),
+            review_max_bytes=_positive_int(
+                str(worker.get("review_max_bytes", DEFAULT_REVIEW_MAX_BYTES)),
+                "review_max_bytes",
+            ),
+            review_timeout_seconds=_positive_int(
+                str(worker.get("review_timeout_seconds", DEFAULT_REVIEW_TIMEOUT_SECONDS)),
+                "review_timeout_seconds",
             ),
             normalization_max_source_bytes=_positive_int(
                 str(

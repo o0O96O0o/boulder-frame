@@ -25,6 +25,7 @@ type Repository interface {
 	CreateOrGetJob(context.Context, domain.Job, string) (domain.Job, bool, error)
 	GetJob(context.Context, uuid.UUID) (domain.Job, error)
 	ListArtifacts(context.Context, uuid.UUID) ([]domain.Artifact, error)
+	ListReviewArtifacts(context.Context, uuid.UUID) ([]domain.ReviewArtifact, error)
 	SetJobFailed(context.Context, uuid.UUID, string, string) error
 }
 
@@ -126,6 +127,29 @@ func (p *PG) ListArtifacts(ctx context.Context, id uuid.UUID) ([]domain.Artifact
 	for rows.Next() {
 		var x domain.Artifact
 		if err := rows.Scan(&x.ID, &x.JobID, &x.AssetID, &x.Kind, &x.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+func (p *PG) ListReviewArtifacts(ctx context.Context, id uuid.UUID) ([]domain.ReviewArtifact, error) {
+	rows, err := p.pool.Query(ctx, `SELECT
+		ja.kind,
+		a.id,a.project_id,a.kind,a.storage_key,a.upload_state,COALESCE(a.filename,''),a.content_type,a.size_bytes,
+		COALESCE(a.width,0),COALESCE(a.height,0),COALESCE(a.frame_rate,0),COALESCE(a.duration_ms,0),a.created_at
+		FROM job_artifacts ja
+		JOIN assets a ON a.id=ja.asset_id
+		WHERE ja.job_id=$1 AND ja.kind IN ('debug_telemetry','debug_manifest','debug_measurement','debug_pose','debug_tracking','debug_planning','debug_render')
+		ORDER BY ja.created_at`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.ReviewArtifact
+	for rows.Next() {
+		var x domain.ReviewArtifact
+		if err := rows.Scan(&x.Role, &x.Asset.ID, &x.Asset.ProjectID, &x.Asset.Kind, &x.Asset.StorageKey, &x.Asset.UploadState, &x.Asset.Filename, &x.Asset.ContentType, &x.Asset.SizeBytes, &x.Asset.Width, &x.Asset.Height, &x.Asset.FrameRate, &x.Asset.DurationMS, &x.Asset.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

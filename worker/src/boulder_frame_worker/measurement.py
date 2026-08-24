@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from .errors import ErrorCode, terminal
@@ -44,6 +45,16 @@ class Detection:
     confidence: float
 
 
+class SelectionOutcome(StrEnum):
+    """How a detector candidate was associated with the requested athlete."""
+
+    SELECTED_CONTAINING_TAP = "selected_containing_tap"
+    SELECTED_NEAREST_TAP = "selected_nearest_tap"
+    TRACKED_CONTAINING_REFERENCE = "tracked_containing_reference"
+    TRACKED_NEAREST_REFERENCE = "tracked_nearest_reference"
+    NO_DETECTIONS = "no_detections"
+
+
 @dataclass(frozen=True, slots=True)
 class PoseMeasurement:
     """A pose expressed in decoded source-pixel coordinates."""
@@ -72,6 +83,7 @@ class RawFrameObservation:
     timestamp_ms: int
     detection: Detection | None
     pose: PoseMeasurement | None
+    selection_outcome: SelectionOutcome | None = None
 
     def __post_init__(self) -> None:
         if self.frame_index < 0 or self.timestamp_ms < 0:
@@ -169,9 +181,11 @@ class TargetFrameAnalyzer:
         source_width: int,
         source_height: int,
     ) -> RawFrameObservation:
-        detection = select_target(
+        detection, outcome = select_target_with_outcome(
             self.detector.detect(frame),
             source_tap(normalized_x, normalized_y, source_width, source_height),
+            containing_outcome=SelectionOutcome.SELECTED_CONTAINING_TAP,
+            nearest_outcome=SelectionOutcome.SELECTED_NEAREST_TAP,
         )
         roi = expand_roi(detection.bounds, self.roi_padding, source_width, source_height)
         estimate = self.pose_estimator.estimate(self.cropper.crop(frame, roi), roi)
@@ -180,6 +194,7 @@ class TargetFrameAnalyzer:
             timestamp_ms=timestamp_ms,
             detection=detection,
             pose=None if estimate is None else pose_to_source(estimate, roi),
+            selection_outcome=outcome,
         )
 
     def observe(
@@ -196,10 +211,18 @@ class TargetFrameAnalyzer:
         """Return an empty observation for later-frame detector gaps."""
         detections = self.detector.detect(frame)
         if not detections:
-            return RawFrameObservation(frame_index, timestamp_ms, None, None)
-        detection = select_target(
+            return RawFrameObservation(
+                frame_index,
+                timestamp_ms,
+                None,
+                None,
+                SelectionOutcome.NO_DETECTIONS,
+            )
+        detection, outcome = select_target_with_outcome(
             detections,
             source_tap(normalized_x, normalized_y, source_width, source_height),
+            containing_outcome=SelectionOutcome.TRACKED_CONTAINING_REFERENCE,
+            nearest_outcome=SelectionOutcome.TRACKED_NEAREST_REFERENCE,
         )
         roi = expand_roi(detection.bounds, self.roi_padding, source_width, source_height)
         estimate = self.pose_estimator.estimate(self.cropper.crop(frame, roi), roi)
@@ -208,6 +231,7 @@ class TargetFrameAnalyzer:
             timestamp_ms=timestamp_ms,
             detection=detection,
             pose=None if estimate is None else pose_to_source(estimate, roi),
+            selection_outcome=outcome,
         )
 
 
@@ -220,15 +244,33 @@ def source_tap(normalized_x: float, normalized_y: float, width: int, height: int
 
 
 def select_target(detections: Sequence[Detection], tap: Point) -> Detection:
+    return select_target_with_outcome(
+        detections,
+        tap,
+        containing_outcome=SelectionOutcome.SELECTED_CONTAINING_TAP,
+        nearest_outcome=SelectionOutcome.SELECTED_NEAREST_TAP,
+    )[0]
+
+
+def select_target_with_outcome(
+    detections: Sequence[Detection],
+    tap: Point,
+    *,
+    containing_outcome: SelectionOutcome,
+    nearest_outcome: SelectionOutcome,
+) -> tuple[Detection, SelectionOutcome]:
     if not detections:
         raise terminal(ErrorCode.NO_SELECTED_ATHLETE, "No athlete was found at the selected frame.")
     containing = [detection for detection in detections if detection.bounds.contains(tap)]
     candidates = containing or list(detections)
-    return min(
-        candidates,
-        key=lambda detection: (
-            (detection.bounds.center.x - tap.x) ** 2 + (detection.bounds.center.y - tap.y) ** 2
+    return (
+        min(
+            candidates,
+            key=lambda detection: (
+                (detection.bounds.center.x - tap.x) ** 2 + (detection.bounds.center.y - tap.y) ** 2
+            ),
         ),
+        containing_outcome if containing else nearest_outcome,
     )
 
 

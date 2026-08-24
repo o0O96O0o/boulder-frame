@@ -22,6 +22,7 @@ from .queue_adapter import (
     RedisStreamsTransport,
 )
 from .repository import PostgresJobRepository
+from .review import ReviewLimits, ReviewRenderer
 from .state import JobRepository
 from .storage import S3Storage
 from .tracking import TargetTracker
@@ -166,6 +167,20 @@ def compose_runtime(
         debug_capture=config.debug_capture,
         debug_max_frames=config.debug_max_frames,
         debug_max_bytes=config.debug_max_bytes,
+        review_renderer=(
+            ReviewRenderer(
+                config.ffmpeg_bin,
+                ReviewLimits(
+                    config.review_max_duration_ms,
+                    config.review_width,
+                    config.review_height,
+                    config.review_max_bytes,
+                    config.review_timeout_seconds,
+                ),
+            )
+            if config.debug_visual_capture
+            else None
+        ),
         normalization_max_source_bytes=config.normalization_max_source_bytes,
     )
     worker = Worker(config, repository, config.worker_id)

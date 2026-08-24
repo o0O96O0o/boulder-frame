@@ -14,7 +14,7 @@ from typing import BinaryIO
 from uuid import UUID
 
 from .measurement import Point, RawFrameObservation, Rect
-from .planner import CropRect, FrameMeasurement
+from .planner import CropRect, FrameMeasurement, PlannerFrameTrace
 from .tracking import TrackedMeasurement
 
 DEBUG_BUNDLE_SCHEMA_VERSION = 1
@@ -75,18 +75,20 @@ def debug_bundle_header(
     source_checksum: str | None = None,
 ) -> dict[str, object]:
     """Build the fixed first record for a debug bundle."""
-    return sanitize_record({
-        "record_type": "header",
-        "schema_version": DEBUG_BUNDLE_SCHEMA_VERSION,
-        "job_id": str(job_id),
-        "source_metadata": sanitize_record(source_metadata),
-        "pipeline_version": pipeline_version,
-        "model_version": model_version,
-        "planner_config": sanitize_record(planner_config),
-        "model_manifest": sanitize_record(model_manifest),
-        "source_object_version": source_object_version,
-        "source_checksum": source_checksum,
-    })
+    return sanitize_record(
+        {
+            "record_type": "header",
+            "schema_version": DEBUG_BUNDLE_SCHEMA_VERSION,
+            "job_id": str(job_id),
+            "source_metadata": sanitize_record(source_metadata),
+            "pipeline_version": pipeline_version,
+            "model_version": model_version,
+            "planner_config": sanitize_record(planner_config),
+            "model_manifest": sanitize_record(model_manifest),
+            "source_object_version": source_object_version,
+            "source_checksum": source_checksum,
+        }
+    )
 
 
 class DebugBundleWriter(AbstractContextManager["DebugBundleWriter"]):
@@ -252,7 +254,7 @@ def serialize_crop_rect(crop: CropRect | None) -> dict[str, float | None] | None
 
 
 def serialize_raw_frame_observation(observation: RawFrameObservation) -> dict[str, object]:
-    return {
+    result: dict[str, object] = {
         "frame_index": observation.frame_index,
         "timestamp_ms": observation.timestamp_ms,
         "detection": (
@@ -274,6 +276,9 @@ def serialize_raw_frame_observation(observation: RawFrameObservation) -> dict[st
             }
         ),
     }
+    if observation.selection_outcome is not None:
+        result["selection_outcome"] = observation.selection_outcome.value
+    return result
 
 
 def serialize_tracked_measurement(measurement: TrackedMeasurement) -> dict[str, object]:
@@ -286,6 +291,7 @@ def serialize_tracked_measurement(measurement: TrackedMeasurement) -> dict[str, 
         "confidence": _finite(measurement.confidence),
         "covariance": _finite(measurement.covariance),
         "state": str(measurement.state),
+        "reacquired": measurement.reacquired,
     }
 
 
@@ -298,6 +304,16 @@ def serialize_frame_measurement(measurement: FrameMeasurement) -> dict[str, obje
         "covariance": _finite(measurement.covariance),
         "velocity": serialize_point(measurement.velocity),
         "lost": measurement.lost,
+    }
+
+
+def serialize_planner_trace(trace: PlannerFrameTrace) -> dict[str, object]:
+    return {
+        "envelope": serialize_rect(trace.envelope),
+        "lead_room": serialize_point(trace.lead_room),
+        "uncertainty_padding": _finite(trace.uncertainty_padding),
+        "containment_risk": trace.containment_risk,
+        "zoom_action": trace.zoom_action,
     }
 
 

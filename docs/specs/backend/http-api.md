@@ -21,6 +21,7 @@ The initial implementation uses the fixed development owner `development-owner`.
 | `GET` | `/api/v1/jobs/{jobID}` | Read job state, progress, configuration, timestamps, and safe error. |
 | `GET` | `/api/v1/jobs/{jobID}/artifacts` | List output/debug artifact metadata. |
 | `GET` | `/api/v1/jobs/{jobID}/download` | Return a short-lived signed URL for a completed output. |
+| `GET` | `/api/v1/jobs/{jobID}/evaluation` | Return an authorized terminal-job visual-review manifest and short-lived phase-media URLs when optional debug visual capture exists. |
 
 ## Upload Contract
 
@@ -74,6 +75,41 @@ The stored configuration additionally contains:
 - `planner.controller = deterministic-v1`
 
 The configuration is serialized and SHA-256 hashed. The hash is used with `(project_id, configuration_hash)` to make repeated submissions idempotent.
+
+## Phase Evaluation Contract
+
+`GET /api/v1/jobs/{jobID}/evaluation` first verifies project ownership. It is available only when the
+job is terminal and does not trigger worker processing. If no optional visual review run was finalized,
+the response is `200` with `available: false`. Otherwise it returns the manifest projection and
+short-lived signed URLs for available review-phase MP4s. It never exposes storage keys or permanent
+URLs. Review URLs are omitted from structured logs and are refreshed by making the same request again.
+
+The endpoint is intentionally distinct from `/artifacts`: artifact listing remains metadata-only and
+must not become an unrestricted storage browser. The detailed phase contract is specified in
+[Phase Evaluation Review](../frontend/phase-evaluation.md).
+
+Each `unavailable` phase may include a user-safe `detail`. It is a 1-500 byte plain-text string and
+is the only allowed unavailable-reason value; nested values, URLs, object paths, credentials, and
+credential-like text are rejected with the complete manifest. `detail` is omitted for all other phase
+statuses. The API preserves accepted details without adding storage or infrastructure context.
+
+### Review Manifest v1
+
+The worker's `manifest.json` is strict schema v1. Its root fields are `schema_version`, `review_id`,
+`pipeline_version`, `model_version`, `timing`, `phases`, and optional `telemetry.status`. The API
+accepts no other fields. `pipeline_version` and `model_version` are 1-128 byte safe plain-text
+identifiers and must exactly equal the job's immutable configuration. `timing` is:
+
+```json
+{"frame_rate":60,"duration_ms":1200,"frame_count":72}
+```
+
+`frame_rate` is finite and in `(0, 1000]`; `duration_ms` is an integer in `(0, 604800000]`; and
+`frame_count` is an integer in `(0, 10000000]`. These fields are projected only for an available
+visual review. They must contain source timing only, never URLs, keys, secrets, source identifiers,
+or raw telemetry. A review is visually available only with at least one verified phase MP4. A
+telemetry-only run returns `available: false` plus an optional short-lived telemetry URL, without
+phase details or manifest metadata.
 
 ## Errors
 

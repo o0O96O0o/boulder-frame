@@ -15,6 +15,7 @@ Implemented baseline interfaces include:
 - API routes under `/api/v1` for projects, signed source uploads, upload confirmation, jobs, artifacts, and signed downloads.
 - PostgreSQL migrations for projects, assets, processing jobs, and job artifacts.
 - Migration `002_worker_leases.sql` for lease owner/expiry fields, stage support, and efficient eligible-job claims.
+- Migration `003_phase_evaluation.sql` migrates the retired `debug` artifact role to `debug_telemetry` and adds the review-set roles; deploy it after `002` and before enabling visual capture.
 - Immutable job configuration with target selection, output settings, pipeline version, model version, and planner identifier.
 - Redis Streams handoff through stream `boulder-frame:jobs` and consumer group `boulder-frame:job-processors`; Redis pending recovery is paired with PostgreSQL lease authority.
 - Worker media validation for MP4 or QuickTime MOV, H.264/HEVC video, AAC audio, local VFR-to-CFR normalization, rotation metadata, target-coordinate mapping, crop geometry, and deterministic planner behavior.
@@ -71,7 +72,7 @@ Implemented baseline interfaces include:
       - Outcome: The frontend can poll a complete job representation and obtain a short-lived download URL only for a completed authorized output.
       - Ownership: Backend owner.
       - Dependencies: B2.1, B4.1, W6.1.
-      - Implementation/reuse: Implement `GET /api/v1/jobs/{jobID}`, `GET /api/v1/jobs/{jobID}/artifacts`, and `GET /api/v1/jobs/{jobID}/download`. Return state, stage, progress, immutable configuration, safe error, and timestamps. Never expose internal stack traces, credentials, or unrestricted object-store URLs.
+      - Implementation/reuse: Implement `GET /api/v1/jobs/{jobID}`, `GET /api/v1/jobs/{jobID}/artifacts`, and `GET /api/v1/jobs/{jobID}/download`. Return state, stage, progress, immutable configuration, safe error, and timestamps. Add an owner-authorized terminal-job evaluation endpoint only for opt-in visual-review artifacts; it returns a bounded manifest projection and short-lived phase-media URLs. Never expose internal stack traces, credentials, storage keys, or unrestricted object-store URLs.
       - Verification: Tests cover every state, terminal error response, missing output, signed URL authorization, and output availability race.
   - Python worker service
     - **W1.1 Implement worker process and task protocol.**
@@ -108,7 +109,7 @@ Implemented baseline interfaces include:
       - Outcome: Successful jobs produce a playable 1080p H.264/AAC MP4 in the requested aspect ratio using the final planned crop on each source frame and source audio when available.
       - Ownership: Media worker owner.
       - Dependencies: W2.1, W5.1, B2.1.
-      - Implementation/reuse: Convert the crop path into frame-accurate FFmpeg crop commands, rotation-normalize the source, scale the result to the selected 1080p output dimensions, encode with pinned settings, validate output using `ffprobe`, upload output and optional debug artifacts to private object storage, create artifact rows, and mark `completed` only after reads succeed. Preserve idempotency using deterministic artifact keys per job.
+      - Implementation/reuse: Convert the crop path into frame-accurate FFmpeg crop commands, rotation-normalize the source, scale the result to the selected 1080p output dimensions, encode with pinned settings, validate output using `ffprobe`, upload output and optional debug artifacts to private object storage, create artifact rows, and mark `completed` only after reads succeed. When opt-in visual capture is enabled, render bounded measurement/pose/tracking/planning/render review MP4s plus a manifest from the same source-coordinate trace; review decode/encode is isolated behind an enforced deadline, finalizing or rendering them remains best-effort, and each render comparison preserves pane aspect ratios through letterboxing. Preserve idempotency using deterministic review-set keys per job.
       - Verification: Media integration tests validate source-display dimensions, per-frame bbox position, H.264/AAC, duration tolerance, audio mapping, decodability, artifact rows, and rerun behavior.
     - **W7.1 Add worker progress, telemetry, and cleanup.**
       - Outcome: Operators can see stage progress and timings while temporary files and failed artifacts are cleaned safely.

@@ -69,3 +69,14 @@ def test_directional_lead_moves_crop_in_velocity_direction() -> None:
     still, moving = planner.plan([measurement(), measurement(velocity=Point(200, 0))])
 
     assert moving.center.x > still.center.x
+
+
+def test_plan_exposes_frame_aligned_semantic_decisions() -> None:
+    plan = DeterministicCropPlanner(
+        3840, 2160, AspectRatio.LANDSCAPE, FramingProfile.BALANCED
+    ).plan([measurement(), FrameMeasurement(None, None, 0, lost=True)])
+
+    assert len(plan.crops) == len(plan.trace) == 2
+    assert plan.trace[0].envelope is not None
+    assert plan.trace[0].zoom_action == "initial"
+    assert plan.trace[1].zoom_action == "full_frame"

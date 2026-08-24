@@ -6,6 +6,7 @@ from boulder_frame_worker.measurement import (
     Point,
     PoseEstimate,
     Rect,
+    SelectionOutcome,
     TargetFrameAnalyzer,
     expand_roi,
     roi_to_source,
@@ -19,6 +20,33 @@ def test_target_selection_prefers_detection_containing_tap() -> None:
     right = Detection(Rect(200, 0, 100, 100), 0.9)
 
     assert select_target([left, right], Point(250, 50)) is right
+
+
+def test_analyzer_records_explicit_selection_outcomes() -> None:
+    class Detector:
+        def detect(self, frame: object) -> list[Detection]:
+            return [Detection(Rect(100, 100, 20, 20), 0.9)]
+
+    class Pose:
+        def estimate(self, roi_pixels: object, roi: Rect) -> None:
+            return None
+
+    class Cropper:
+        def crop(self, frame: object, roi: Rect) -> object:
+            return frame
+
+    analyzer = TargetFrameAnalyzer(Detector(), Pose(), cropper=Cropper())
+    selected = analyzer.observe_selected(
+        object(),
+        frame_index=0,
+        timestamp_ms=0,
+        normalized_x=0.11,
+        normalized_y=0.11,
+        source_width=1000,
+        source_height=1000,
+    )
+
+    assert selected.selection_outcome is SelectionOutcome.SELECTED_CONTAINING_TAP
 
 
 def test_target_selection_uses_nearest_when_tap_is_outside() -> None:

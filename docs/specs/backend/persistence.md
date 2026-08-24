@@ -4,7 +4,8 @@
 
 PostgreSQL is the durable source of truth for project metadata, asset references, immutable job configuration, job state/progress/errors, and artifact relationships. Video bytes and per-frame measurements do not belong in PostgreSQL.
 
-The migrations are `backend/migrations/001_init.sql` and `backend/migrations/002_worker_leases.sql`.
+The migrations are `backend/migrations/001_init.sql`, `backend/migrations/002_worker_leases.sql`, and
+`backend/migrations/003_phase_evaluation.sql`.
 
 ## Tables
 
@@ -43,11 +44,24 @@ The unique constraint on `(project_id, configuration_hash)` prevents duplicate a
 
 ### `job_artifacts`
 
-Links a job to an output/debug asset. `(job_id, kind)` is unique so retries cannot create multiple logical output artifacts for the same job.
+Links a job to an output or optional debug-review asset. `(job_id, kind)` is unique so retries cannot
+create multiple logical artifacts for the same semantic role. The current roles are `output` and
+legacy `debug`. The phase-review design migrates legacy `debug` rows to `debug_telemetry` and adds
+`debug_manifest`, `debug_measurement`, `debug_pose`, `debug_tracking`, `debug_planning`, and
+`debug_render`. All review resources point to assets whose `assets.kind` remains `debug`.
+
+### Phase-Review Rollout
+
+Migration `003_phase_evaluation.sql` removes the legacy `debug` artifact role. It must not be applied
+while an older worker can finalize that role. Drain and stop all older workers first, wait for their
+active leases to finish or expire, apply migration `003`, then deploy/restart only workers that
+finalize the UUID-scoped review role set and remove omitted stale roles before resuming consumption.
+Queued and reclaimed jobs may retry after the compatible workers are live; do not roll back to an
+older worker while the migrated schema is active.
 
 ## Repository Boundary
 
-`backend/repository.Repository` hides SQL from HTTP handlers. The current interface covers project creation/read, source asset lifecycle, job create-or-get, job read, artifact listing, and queue-failure handling. New worker adapters should use a separate worker-facing repository interface rather than importing HTTP handlers.
+`backend/repository.Repository` hides SQL from HTTP handlers. The current interface covers project creation/read, source asset lifecycle, job create-or-get, job read, artifact listing, and queue-failure handling. The phase-review extension adds a lease-guarded worker operation that finalizes one complete debug artifact set and a read operation that returns authorized review metadata without revealing object keys. New worker adapters should use a separate worker-facing repository interface rather than importing HTTP handlers.
 
 ## Idempotency
 
