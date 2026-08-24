@@ -67,6 +67,7 @@ class WorkerConfig:
     stream_block_ms: int = 1_000
     retain_debug_artifacts: bool = False
     debug_capture: bool = False
+    debug_require_private_storage: bool = True
     debug_max_frames: int = DEFAULT_DEBUG_MAX_FRAMES
     debug_max_bytes: int = DEFAULT_DEBUG_MAX_BYTES
 
@@ -132,6 +133,10 @@ class WorkerConfig:
                 str(worker.get("retain_debug_artifacts", False)), "retain_debug_artifacts"
             ),
             debug_capture=_boolean(str(worker.get("debug_capture", False)), "debug_capture"),
+            debug_require_private_storage=_boolean(
+                str(worker.get("debug_require_private_storage", True)),
+                "debug_require_private_storage",
+            ),
             debug_max_frames=_positive_int(
                 str(worker.get("debug_max_frames", DEFAULT_DEBUG_MAX_FRAMES)), "debug_max_frames"
             ),

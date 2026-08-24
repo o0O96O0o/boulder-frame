@@ -191,6 +191,25 @@ def test_runtime_composes_real_pipeline_and_finalizes_successfully(tmp_path) -> 
     assert pose.closed == 1
 
 
+def test_runtime_bypasses_private_storage_check_only_when_explicitly_configured(tmp_path) -> None:
+    config = WorkerConfig.from_mapping(
+        {
+            **_runtime_values(),
+            "scratch_root": str(tmp_path),
+            "debug_capture": True,
+            "debug_require_private_storage": False,
+        }
+    )
+    runtime = compose_runtime(
+        config,
+        InMemoryJobRepository([]),
+        FakeTransport(),
+        S3Storage(FakeStorageClient(), "boulder-frame"),
+    )
+
+    runtime.ready()
+
+
 def test_runtime_completes_job_when_pose_misses_transition_tracker_to_lost(tmp_path) -> None:
     class FiveFrameInspector:
         def inspect(self, path: Path) -> MediaMetadata:

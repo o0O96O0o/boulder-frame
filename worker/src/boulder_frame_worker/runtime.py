@@ -69,7 +69,7 @@ class WorkerRuntime:
             if callable(ready):
                 ready()
             self.storage.ready()
-            if self.config.debug_capture:
+            if self.config.debug_capture and self.config.debug_require_private_storage:
                 self.storage.require_private_debug_storage()
             self.consumer.ready()
         except Exception as error:

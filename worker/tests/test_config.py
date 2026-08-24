@@ -19,6 +19,7 @@ def test_config_uses_safe_defaults() -> None:
     assert config.lease_seconds == 300
     assert not config.retain_debug_artifacts
     assert not config.debug_capture
+    assert config.debug_require_private_storage
     assert config.debug_max_frames == DEFAULT_DEBUG_MAX_FRAMES
     assert config.debug_max_bytes == DEFAULT_DEBUG_MAX_BYTES
 
@@ -50,13 +51,18 @@ def test_config_rejects_invalid_boolean() -> None:
 
 
 def test_config_parses_debug_capture_separately_from_scratch_retention() -> None:
-    config = WorkerConfig.from_mapping({"debug_capture": "true"})
+    config = WorkerConfig.from_mapping(
+        {"debug_capture": "true", "debug_require_private_storage": "false"}
+    )
 
     assert config.debug_capture
+    assert not config.debug_require_private_storage
     assert not config.retain_debug_artifacts
 
     with pytest.raises(ConfigError, match="debug_capture"):
         WorkerConfig.from_mapping({"debug_capture": "sometimes"})
+    with pytest.raises(ConfigError, match="debug_require_private_storage"):
+        WorkerConfig.from_mapping({"debug_require_private_storage": "sometimes"})
 
 
 @pytest.mark.parametrize("name", ["debug_max_frames", "debug_max_bytes"])

@@ -17,10 +17,11 @@ and checks the compressed byte limit while writing, reserving its trailer; the e
 JSONL line by line and applies its frame limit without materializing the bundle. A limit breach removes
 the partial bundle and is treated as an optional-publication failure.
 
-When debug capture is enabled, runtime readiness requires `head_bucket` plus all four S3 bucket
-public-access blocks to be `true`: `BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, and
-`RestrictPublicBuckets`. This prevents telemetry collection when its configured bucket is not
-explicitly private.
+When debug capture is enabled, runtime readiness normally requires `head_bucket` plus all four S3
+bucket public-access blocks to be `true`: `BlockPublicAcls`, `IgnorePublicAcls`,
+`BlockPublicPolicy`, and `RestrictPublicBuckets`. This prevents telemetry collection when its
+configured bucket is not explicitly private. A trusted development environment may explicitly set
+`debug_require_private_storage: false`; production configurations must leave it enabled.
 
 The repository supports at most one finalized debug artifact relation for a job. Each publication
 generates a new UUID and uploads/heads a verified `DebugAsset` with content type `application/gzip`

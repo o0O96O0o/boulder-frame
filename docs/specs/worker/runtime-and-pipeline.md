@@ -16,6 +16,7 @@
 | `lease_seconds` | Job lease duration. | `300` |
 | `retain_debug_artifacts` | Keep scratch data for debugging. | `false` |
 | `debug_capture` | Enable durable private debug-bundle capture. This is distinct from scratch retention. | `false` |
+| `debug_require_private_storage` | Require S3 Public Access Blocks before capture; disable only in trusted development. | `true` |
 | `debug_max_frames` | Maximum `frame` records in one captured bundle; must be positive. | `10000` |
 | `debug_max_bytes` | Maximum compressed bundle size in bytes; must be positive. | `52428800` (50 MiB) |
 | `database_url` | PostgreSQL connection for job hydration and authoritative leases. | Required for `--serve`. |
@@ -88,9 +89,10 @@ without terminating the process. Startup readiness still fails if Redis cannot b
 `S3Storage` uses the configured endpoint, region, credentials, bucket, and path-style setting for
 private source downloads, output uploads, and object heads. Adapter network/service failures become
 transient `storage_unavailable` errors with a user-safe message. Runtime readiness verifies access to
-the configured bucket before queue consumption. When `debug_capture` is enabled, readiness additionally
-requires all four bucket public-access blocks (`BlockPublicAcls`, `IgnorePublicAcls`,
-`BlockPublicPolicy`, and `RestrictPublicBuckets`) to be true.
+the configured bucket before queue consumption. When both `debug_capture` and
+`debug_require_private_storage` are enabled, readiness additionally requires all four bucket
+public-access blocks (`BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, and
+`RestrictPublicBuckets`) to be true. Trusted development may explicitly disable that additional check.
 
 After a renderer has uploaded and headed a validated MP4, `PostgresJobRepository.finalize_output`
 uses the active `uploading` lease to atomically upsert the deterministic key
