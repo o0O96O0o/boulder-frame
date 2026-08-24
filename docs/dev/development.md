@@ -29,6 +29,30 @@ pending-entry reclaim idle time, heartbeat interval, and concurrency. Set unique
 for concurrent worker processes. PostgreSQL remains the job-lease authority; Redis consumer-group
 pending state is only delivery coordination.
 
+## Prepare The Detector
+
+The committed manifest pins the approved W0.2 detector. Before enabling it, download and verify the
+artifact with:
+
+```sh
+./deploy/bin/local prepare-model
+```
+
+This writes the ignored `worker/models/ssd_mobilenet_v1_12.onnx` file, checks its exact byte size and
+SHA-256 against `worker/models/model-manifest.json`, and makes it read-only. Then set this exact value
+in `.env` before starting the worker:
+
+```dotenv
+MODEL_VERSION=w0.2-ssd-mobilenetv1-12-onnx-detector-only-1
+```
+
+`MODEL_VERSION=w0.1-ssd-mobilenetv1-12-onnx-mediapipe-pose-full-1` is unsupported and causes the
+worker to exit before it can process jobs. Existing W0.1 jobs cannot be retried against W0.2: create
+new jobs after the backend is configured with the W0.2 version.
+
+For a non-default host artifact directory, set `MODEL_DIR_HOST` both when preparing the artifact and
+in `.env`; Compose mounts it read-only at the in-container `MODEL_DIR` path.
+
 Worker `conf/config.json` and `conf/config.dev.json` set VFR normalization limits:
 `normalization_max_source_bytes` defaults to 1 GiB and `normalization_timeout_seconds` to 1,800.
 The API upload ceiling is 2 GiB; the lower VFR cap reserves scratch capacity for the immutable download

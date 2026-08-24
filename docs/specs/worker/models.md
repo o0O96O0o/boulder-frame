@@ -64,6 +64,10 @@ MODEL_DIR/
   ssd_mobilenet_v1_12.onnx
 ```
 
+For the repository Compose deployment, run `./deploy/bin/local prepare-model` before startup. It
+downloads the manifest-pinned artifact to `worker/models`, verifies it, and leaves it read-only for
+the `/models` bind mount. It is a deployment operation: the worker itself never downloads models.
+
 Set `MODEL_VERSION` to the W0.2 identifier only after verification succeeds. The backend snapshots
 that value into immutable job configuration, and the worker processes only matching snapshots. The
 local `unset-until-pinned` sentinel normalizes to `unconfigured`: matching jobs fail terminally with

@@ -9,6 +9,7 @@ compose() {
 }
 
 case "${1:-}" in
+  prepare-model) exec "$root/deploy/bin/prepare-model" ;;
   start) compose up --build ;;
   start-detached) compose up --build -d ;;
   migrate) compose run --rm backend migrate up ;;
@@ -16,7 +17,7 @@ case "${1:-}" in
   logs) shift; compose logs -f "$@" ;;
   stop) compose down ;;
   *)
-    echo "usage: $0 {start|start-detached|migrate|status|logs|stop}" >&2
+    echo "usage: $0 {prepare-model|start|start-detached|migrate|status|logs|stop}" >&2
     exit 64
     ;;
 esac

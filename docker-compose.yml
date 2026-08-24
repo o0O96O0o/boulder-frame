@@ -80,7 +80,7 @@ services:
     command: [ "boulder-frame-worker", "--config", "/workspace/worker/conf/config.dev.json", "--serve" ]
     volumes:
       - ./worker:/workspace/worker
-      - ./worker/models:/models:ro
+      - ${MODEL_DIR_HOST:-./worker/models}:${MODEL_DIR:-/models}:ro
       - worker-scratch:/work
     networks:
       - private

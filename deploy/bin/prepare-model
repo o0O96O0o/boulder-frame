@@ -1,0 +1,79 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+manifest="$root/worker/models/model-manifest.json"
+model_dir=${MODEL_DIR_HOST:-"$root/worker/models"}
+
+manifest_string() {
+  sed -n "s/^[[:space:]]*\"$1\": \"\([^\"]*\)\",$/\1/p" "$manifest"
+}
+
+manifest_number() {
+  sed -n "s/^[[:space:]]*\"$1\": \([0-9][0-9]*\),$/\1/p" "$manifest"
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return
+  fi
+  printf '%s\n' "prepare-model requires sha256sum or shasum" >&2
+  return 1
+}
+
+verify() {
+  file_size=$(wc -c < "$1" | tr -d '[:space:]')
+  [ "$file_size" = "$size_bytes" ] && [ "$(sha256_file "$1")" = "$sha256" ]
+}
+
+[ -f "$manifest" ] || {
+  printf '%s\n' "model manifest is missing: $manifest" >&2
+  exit 1
+}
+
+model_version=$(manifest_string model_version)
+file_name=$(manifest_string file_name)
+source_url=$(manifest_string source_url)
+sha256=$(manifest_string sha256)
+size_bytes=$(manifest_number size_bytes)
+
+[ -n "$model_version" ] && [ -n "$file_name" ] && [ -n "$source_url" ] && [ -n "$sha256" ] && [ -n "$size_bytes" ] || {
+  printf '%s\n' "model manifest is incomplete: $manifest" >&2
+  exit 1
+}
+
+mkdir -p "$model_dir"
+target="$model_dir/$file_name"
+
+if [ -f "$target" ] && verify "$target"; then
+  chmod 0444 "$target"
+  printf '%s\n' "Verified model: $target"
+  printf '%s\n' "Set MODEL_VERSION=$model_version before starting the worker."
+  exit 0
+fi
+
+if [ -e "$target" ] && [ ! -f "$target" ]; then
+  printf '%s\n' "model destination is not a regular file: $target" >&2
+  exit 1
+fi
+
+tmp=$(mktemp "$model_dir/.${file_name}.XXXXXX")
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+printf '%s\n' "Downloading manifest-pinned model to $target"
+curl --fail --location --retry 3 --output "$tmp" "$source_url"
+
+if ! verify "$tmp"; then
+  printf '%s\n' "downloaded model failed manifest size or SHA-256 verification" >&2
+  exit 1
+fi
+
+chmod 0444 "$tmp"
+mv -f "$tmp" "$target"
+trap - EXIT HUP INT TERM
+printf '%s\n' "Prepared and verified model: $target"
+printf '%s\n' "Set MODEL_VERSION=$model_version before starting the worker."
