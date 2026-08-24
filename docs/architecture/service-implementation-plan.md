@@ -104,11 +104,11 @@ Implemented baseline interfaces include:
       - Dependencies: W4.1.
       - Implementation/reuse: Define a planner interface accepting smoothed measurements and immutable profile configuration. Follow the torso/root signal, combine reliable landmarks with detector fallback bounds, add velocity/acceleration lead room, apply dead zone and hysteresis, zoom out quickly for risk/low confidence, zoom in slowly after a stable high-confidence hold, and clamp every crop to the source. Keep the deterministic controller as the only MVP planner; reserve CVXPY/OSQP for a later evidence-based milestone.
       - Verification: Unit tests cover aspect-ratio and source containment, profile ordering, 75-80% zoom-out risk, 50-60% zoom-in hold, directional lead, low-confidence widening, pan/zoom rate limits, and lost-track full-frame fallback.
-    - **W6.1 Implement frame-accurate crop annotation, output validation, and artifact upload.**
-      - Outcome: Successful jobs produce a playable H.264/AAC MP4 at the display-normalized source dimensions, with the final planned crop rectangle annotated on each original frame and source audio when available.
+    - **W6.1 Implement frame-accurate crop rendering, output validation, and artifact upload.**
+      - Outcome: Successful jobs produce a playable 1080p H.264/AAC MP4 in the requested aspect ratio using the final planned crop on each source frame and source audio when available.
       - Ownership: Media worker owner.
       - Dependencies: W2.1, W5.1, B2.1.
-      - Implementation/reuse: Convert the crop path into frame-accurate FFmpeg annotation commands, rotation-normalize the source, draw the planned rectangle on each original frame, encode with pinned settings, validate output using `ffprobe`, upload output and optional debug artifacts to private object storage, create artifact rows, and mark `completed` only after reads succeed. Preserve idempotency using deterministic artifact keys per job.
+      - Implementation/reuse: Convert the crop path into frame-accurate FFmpeg crop commands, rotation-normalize the source, scale the result to the selected 1080p output dimensions, encode with pinned settings, validate output using `ffprobe`, upload output and optional debug artifacts to private object storage, create artifact rows, and mark `completed` only after reads succeed. Preserve idempotency using deterministic artifact keys per job.
       - Verification: Media integration tests validate source-display dimensions, per-frame bbox position, H.264/AAC, duration tolerance, audio mapping, decodability, artifact rows, and rerun behavior.
     - **W7.1 Add worker progress, telemetry, and cleanup.**
       - Outcome: Operators can see stage progress and timings while temporary files and failed artifacts are cleaned safely.

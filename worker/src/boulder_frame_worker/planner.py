@@ -127,7 +127,10 @@ class DeterministicCropPlanner:
         height = max(required_height, required_width / self.aspect_ratio.value_float)
         width = height * self.aspect_ratio.value_float
         if width > self.full_frame.width or height > self.full_frame.height:
-            return self.full_frame
+            # A requested-aspect crop cannot contain the padded envelope at this scale.
+            # Keep the maximum available field of view but still pan it to the target.
+            width = self.full_frame.width
+            height = self.full_frame.height
         lead = Point(
             measurement.velocity.x * self.config.lead_fraction,
             measurement.velocity.y * self.config.lead_fraction,

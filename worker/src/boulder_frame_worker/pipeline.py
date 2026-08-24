@@ -34,6 +34,7 @@ from .media import (
     FFprobeAdapter,
     MediaMetadata,
     expected_frame_count,
+    output_dimensions,
     validate_output,
 )
 from .planner import CropPlanner, CropRect, DeterministicCropPlanner, FrameMeasurement
@@ -204,12 +205,13 @@ class ProcessingPipeline:
             self._copy_trace(writer, scratch / _STAGE_TRACE)
             self._copy_trace(writer, scratch / _ANALYSIS_TRACE)
             if inputs is not None:
+                output_width, output_height = output_dimensions(inputs.output_settings.aspect_ratio)
                 writer.write(
                     "render_summary",
                     {
                         "output": {
-                            "width": inputs.metadata.display_dimensions[0],
-                            "height": inputs.metadata.display_dimensions[1],
+                            "width": output_width,
+                            "height": output_height,
                         }
                     },
                 )
@@ -347,17 +349,18 @@ class ProcessingPipeline:
             metadata = self.inspector.inspect(inputs.output)
             validate_output(
                 metadata,
-                inputs.metadata.display_dimensions,
+                inputs.output_settings.aspect_ratio,
                 expected_duration_ms=inputs.metadata.duration_ms,
                 duration_tolerance_ms=round(1000 / float(inputs.metadata.frame_rate)),
                 source_has_audio=inputs.metadata.has_audio,
             )
             return metadata
-        return self.renderer.render_crop_annotations(
+        return self.renderer.render_crop_path(
             inputs.source,
             inputs.output,
             self._crop_path(inputs),
             inputs.metadata,
+            inputs.output_settings.aspect_ratio,
             self.inspector,
         )
 

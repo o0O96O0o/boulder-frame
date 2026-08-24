@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Implement an offline service that plans a smooth 1080p reframe from one wide, static-camera sports recording. The current output is an inspection MP4: the display-normalized original video with the planned crop rectangle annotated on every frame. A user uploads a video, selects one athlete, chooses an output aspect ratio and framing profile, waits for processing, and downloads that result.
+Implement an offline service that plans and renders a smooth 1080p reframe from one wide, static-camera sports recording. A user uploads a video, selects one athlete, chooses an output aspect ratio and framing profile, waits for processing, and downloads that result.
 
 This document is the authoritative implementation specification, including the product rationale and algorithm decisions behind these choices.
 
@@ -15,7 +15,7 @@ This document is the authoritative implementation specification, including the p
 3. Select the athlete by tapping/clicking them in a preview frame.
 4. Choose `16:9` or `9:16` and one framing profile.
 5. Start processing and observe the job state.
-6. Download the finished crop-annotation MP4 or view a clear terminal failure.
+6. Download the finished reframed MP4 or view a clear terminal failure.
 
 ### Supported input
 
@@ -31,7 +31,7 @@ This document is the authoritative implementation specification, including the p
 
 ### Output
 
-- Display-normalized source dimensions, with the final crop rectangle drawn on every frame.
+- A 1080p H.264/AAC MP4 in the requested output aspect ratio, preserving source audio when present.
 - H.264 video and source audio when available.
 - A crop path that keeps the selected athlete's available full-body movement in frame and moves smoothly; the output makes that path inspectable before cropped-video rendering is introduced.
 - A download URL to the output asset.
@@ -75,7 +75,7 @@ flowchart LR
     D --> V[Detector and MediaPipe pose]
     V --> T[Single-target tracking and backward smoothing]
     T --> C[Movement envelope and crop planner]
-    C --> R[FFmpeg crop-bbox annotation encode]
+    C --> R[FFmpeg per-frame crop and 1080p scale]
     R -->|output MP4 and debug artifacts| S
     K -->|status progress artifacts| P
     W -->|poll job status and request download| A

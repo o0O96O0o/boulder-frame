@@ -72,7 +72,9 @@ class Inspector:
 
 
 class Renderer:
-    def render_crop_annotations(self, source, destination, crop_path, source_metadata, inspector):
+    def render_crop_path(
+        self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
+    ):
         destination.write_bytes(b"x" * 4)
         return Inspector().inspect(destination)
 
@@ -397,6 +399,7 @@ def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(
         "x": 10,
         "y": 20,
     }
+    assert records[3]["output"] == {"width": 1920, "height": 1080}
 
 
 def test_pipeline_deletes_unlinked_debug_object_after_finalization_failure(tmp_path) -> None:

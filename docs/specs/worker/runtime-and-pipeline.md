@@ -140,7 +140,7 @@ When a source contains action-camera metadata or non-decodable `codec_name=none`
 the worker ignores those tracks and maps only the validated AAC stream by its absolute input-stream
 index. Other decodable audio codecs remain unsupported.
 
-Rotation metadata is read from stream tags or side data. `display_dimensions` swaps width and height for 90/270-degree rotation. The renderer applies that normalization before drawing crop annotations, so output coordinates and pixels use the same display coordinate system.
+Rotation metadata is read from stream tags or side data. `display_dimensions` swaps width and height for 90/270-degree rotation. The renderer applies that normalization before cropping, so output coordinates and pixels use the same display coordinate system.
 
 ## Errors
 
@@ -205,11 +205,11 @@ This releases MediaPipe task dispatchers while their native runtime is still ava
 
 ## Rendering Boundary
 
-`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The annotation script uses FFmpeg `sendcmd` updates so every source frame receives its exact final crop rectangle without expression-size limits. It rotation-normalizes the source, draws the rectangle in lime, maps video and the single validated AAC input stream, encodes H.264/AAC, uses `+faststart`, and preserves video when the optional audio stream ends earlier. `validate_output` requires display-normalized source dimensions and validates codecs. `ProcessingPipeline` generates the annotation filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
+`FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The crop script uses FFmpeg `sendcmd` updates so every source frame receives its exact final crop rectangle without expression-size limits. It rotation-normalizes the source, crops and scales to the requested 1080p output dimensions, maps video and the single validated AAC input stream, encodes H.264/AAC, uses `+faststart`, and preserves video when the optional audio stream ends earlier. `validate_output` requires the requested 1080p dimensions and validates codecs. `ProcessingPipeline` generates the crop filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.
 
 ```mermaid
 flowchart LR
-    P[Planned crop per source frame] --> T[FFmpeg per-frame drawbox commands]
-    T --> R[Original frame annotation encode]
+    P[Planned crop per source frame] --> T[FFmpeg per-frame crop commands]
+    T --> R[1080p crop and scale encode]
     R --> V[ffprobe and decode validation]
 ```

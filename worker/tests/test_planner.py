@@ -54,6 +54,16 @@ def test_consecutive_lost_frames_do_not_expand_beyond_the_full_frame() -> None:
     assert [(crop.width, crop.height) for crop in crops] == [(3840, 2160), (3840, 2160)]
 
 
+def test_maximum_size_portrait_crop_keeps_a_reliable_target_in_frame() -> None:
+    planner = DeterministicCropPlanner(1920, 1080, AspectRatio.PORTRAIT, FramingProfile.SAFE)
+    target = FrameMeasurement(Point(40, 750), Rect(0, 300, 160, 760), 0.5)
+
+    crop = planner.plan([target])[0]
+
+    assert (crop.x, crop.y, crop.width, crop.height) == (0, 0, 607.5, 1080)
+    assert crop.contains(Rect(0, 300, 160, 760))
+
+
 def test_directional_lead_moves_crop_in_velocity_direction() -> None:
     planner = DeterministicCropPlanner(3840, 2160, AspectRatio.LANDSCAPE, FramingProfile.BALANCED)
     still, moving = planner.plan([measurement(), measurement(velocity=Point(200, 0))])

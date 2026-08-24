@@ -117,7 +117,7 @@ The worker records phase timing in the same private bundle. The v1 convention is
 
 - `stage_start`: `stage`, `progress`, and `monotonic_ms`.
 - `stage_end`: `stage`, `progress`, `duration_ms`, `outcome`, and `error_code` on a failed phase.
-- `render_summary`: rotation-normalized output width and height.
+- `render_summary`: requested 1080p output width and height.
 
 The writer enforces the record envelope and sanitization, not a stage schema. Operational records are
 for inspection only. `load_debug_bundle` deliberately streams past every non-`frame` record, including
@@ -178,7 +178,7 @@ The report records the first frame with a failure using this precedence:
 
 The current renderer does not produce the final 1080p reframe. It rotation-normalizes the original
 video and overlays the planned source crop rectangle on every source frame, preserving source display
-dimensions. The resulting H.264/AAC MP4 is an inspection artifact used to verify crop mapping; it is
+dimensions. The resulting H.264/AAC MP4 is the requested 1080p reframe, used to verify crop mapping; it is
 not evidence that a cropped/scaled 1080p output was rendered. The current pipeline records
 `mapping_independently_verified: false`; it does not claim the independent renderer-mapping evidence
 required to emit a `render_mapping` failure.
