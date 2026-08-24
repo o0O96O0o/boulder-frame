@@ -81,6 +81,9 @@ class FakeDetector:
 
 
 class FakePose:
+    def __init__(self) -> None:
+        self.closed = 0
+
     def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate:
         return PoseEstimate(
             root=Point(0.5, 0.5),
@@ -88,6 +91,9 @@ class FakePose:
             bounds=Rect(0.2, 0.1, 0.6, 0.8),
             confidence=0.9,
         )
+
+    def close(self) -> None:
+        self.closed += 1
 
 
 class FinalizingRepository(InMemoryJobRepository):
@@ -163,6 +169,7 @@ def test_runtime_composes_real_pipeline_and_finalizes_successfully(tmp_path) -> 
     config = WorkerConfig.from_mapping(
         {**_runtime_values(), "scratch_root": str(tmp_path), "model_version": MODEL_VERSION}
     )
+    pose = FakePose()
     runtime = compose_runtime(
         config,
         repository,
@@ -170,7 +177,7 @@ def test_runtime_composes_real_pipeline_and_finalizes_successfully(tmp_path) -> 
         S3Storage(FakeStorageClient(), "boulder-frame"),
         frame_reader=FakeFrames(),
         detector=FakeDetector(),
-        pose_estimator=FakePose(),
+        pose_estimator=pose,
         inspector=FakeInspector(),
         renderer=FakeRenderer(),
     )
@@ -180,6 +187,8 @@ def test_runtime_composes_real_pipeline_and_finalizes_successfully(tmp_path) -> 
     assert repository.get(job_id).state is JobState.COMPLETED
     assert repository.finalizations == 1
     assert not (tmp_path / str(job_id)).exists()
+    runtime.close()
+    assert pose.closed == 1
 
 
 def test_runtime_completes_job_when_pose_misses_transition_tracker_to_lost(tmp_path) -> None:

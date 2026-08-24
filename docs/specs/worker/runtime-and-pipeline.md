@@ -164,6 +164,9 @@ provisioned worker terminally rejects a claimed job before a stage handler execu
 display-rotation-normalized BGR frame at a time, using sequential indices and timestamps derived from
 immutable CFR metadata. No model weights are downloaded or inferred from configuration.
 
+On service shutdown, runtime explicitly closes closeable model adapters before interpreter teardown.
+This releases MediaPipe task dispatchers while their native runtime is still available.
+
 ## Rendering Boundary
 
 `FFmpegRenderer` accepts source, destination, a filter script, and a frame rate. The annotation script uses FFmpeg `sendcmd` updates so every source frame receives its exact final crop rectangle without expression-size limits. It rotation-normalizes the source, draws the rectangle in lime, maps video and the single validated AAC input stream, encodes H.264/AAC, and uses `+faststart`. `validate_output` requires display-normalized source dimensions and validates codecs. `ProcessingPipeline` generates the annotation filter, renders and validates the output, uploads and heads it, and finalizes its artifact under the active lease. On a media command failure, the terminal job keeps a user-safe message and code while its correlated worker log includes a bounded internal `diagnostic` from command stderr.

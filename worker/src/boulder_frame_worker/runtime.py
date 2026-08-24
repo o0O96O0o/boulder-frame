@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Event
-from typing import cast
+from typing import Protocol, cast
 
 from .config import UNCONFIGURED_MODEL_VERSION, WorkerConfig
 from .frame_reader import FrameReaderUnavailable, OpenCVFrameReader
@@ -32,6 +32,10 @@ class RuntimeUnavailable(RuntimeError):
     """Configured worker adapters could not be constructed or verified."""
 
 
+class Closable(Protocol):
+    def close(self) -> object: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
     queue_adapter: bool
@@ -47,12 +51,14 @@ class WorkerRuntime:
         repository: JobRepository,
         storage: S3Storage,
         stop: Event | None = None,
+        resources: tuple[Closable, ...] = (),
     ) -> None:
         self.config = config
         self.consumer = consumer
         self.repository = repository
         self.storage = storage
         self.stop = stop or Event()
+        self.resources = resources
         self.capabilities = RuntimeCapabilities(
             queue_adapter=False, database_adapter=False, storage_adapter=False
         )
@@ -79,7 +85,11 @@ class WorkerRuntime:
         self.consumer.serve(self.stop, self.config.concurrency)
 
     def close(self) -> None:
-        self.consumer.close()
+        try:
+            self.consumer.close()
+        finally:
+            for resource in reversed(self.resources):
+                resource.close()
 
 
 def compose_runtime(
@@ -164,4 +174,7 @@ def compose_runtime(
             pipeline.publish_debug,
         ),
     )
-    return WorkerRuntime(config, consumer, repository, storage, stop)
+    resources: tuple[Closable, ...] = ()
+    if pose_estimator is not None and callable(getattr(pose_estimator, "close", None)):
+        resources = (cast(Closable, pose_estimator),)
+    return WorkerRuntime(config, consumer, repository, storage, stop, resources)

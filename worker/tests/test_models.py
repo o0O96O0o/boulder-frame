@@ -144,3 +144,21 @@ def test_pose_landmarker_rejects_non_empty_invalid_landmark_contract() -> None:
 
     with pytest.raises(ModelVerificationError, match="required 33 landmarks"):
         adapter.estimate(np.zeros((10, 10, 3), dtype=np.uint8), Rect(0, 0, 10, 10))
+
+
+def test_pose_landmarker_closes_mediapipe_landmarker_once() -> None:
+    class Landmarker:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    adapter = object.__new__(MediaPipePoseLandmarkerFull)
+    landmarker = Landmarker()
+    adapter._landmarker = landmarker
+
+    adapter.close()
+    adapter.close()
+
+    assert landmarker.closed == 1

@@ -131,10 +131,20 @@ class MediaPipePoseLandmarkerFull:
         )
         self._image_type = mp.Image
         self._image_format = mp.ImageFormat.SRGB
-        self._landmarker = vision.PoseLandmarker.create_from_options(options)
+        self._landmarker: Any | None = vision.PoseLandmarker.create_from_options(options)
+
+    def close(self) -> None:
+        """Release MediaPipe's dispatcher before Python interpreter shutdown."""
+        landmarker = self._landmarker
+        if landmarker is None:
+            return
+        self._landmarker = None
+        landmarker.close()
 
     def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate | None:
         del roi
+        if self._landmarker is None:
+            raise RuntimeError("pose estimator is closed")
         try:
             import numpy as np
         except ImportError as error:
