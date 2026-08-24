@@ -28,6 +28,17 @@ func main() {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+	logger.Info("configuration loaded",
+		"config_path", cfg.SourcePath,
+		"http_addr", cfg.HTTPAddr,
+		"s3_bucket", cfg.S3Bucket,
+		"s3_region", cfg.S3Region,
+		"s3_use_path_style", cfg.S3UsePathStyle,
+		"signed_url_ttl", cfg.URLTTL,
+		"max_upload_bytes", cfg.MaxUploadBytes,
+		"pipeline_version", cfg.PipelineVersion,
+		"model_version", cfg.ModelVersion,
+	)
 	if hasArgument(os.Args[1:], "migrate") && hasArgument(os.Args[1:], "up") {
 		if err := migrate(context.Background(), cfg.DatabaseURL); err != nil {
 			logger.Error("migration failed", "error", err)

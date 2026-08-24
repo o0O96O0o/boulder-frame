@@ -30,6 +30,33 @@ def main(arguments: Sequence[str] | None = None) -> int:
         config = WorkerConfig.from_file(options.config)
     except ConfigError as error:
         parser.error(str(error))
+    logger.info(
+        "configuration loaded",
+        extra={
+            "config_path": options.config,
+            "configuration": {
+                "pipeline_version": config.pipeline_version,
+                "model_version": config.model_version,
+                "model_dir": config.model_dir,
+                "scratch_root": config.scratch_root,
+                "s3_bucket": config.s3_bucket,
+                "s3_region": config.s3_region,
+                "s3_use_path_style": config.s3_use_path_style,
+                "ffmpeg_bin": config.ffmpeg_bin,
+                "ffprobe_bin": config.ffprobe_bin,
+                "worker_id": config.worker_id,
+                "stream_name": config.stream_name,
+                "stream_group": config.stream_group,
+                "stream_consumer": config.stream_consumer,
+                "lease_seconds": config.lease_seconds,
+                "heartbeat_seconds": config.heartbeat_seconds,
+                "concurrency": config.concurrency,
+                "retain_debug_artifacts": config.retain_debug_artifacts,
+                "debug_capture": config.debug_capture,
+                "debug_visual_capture": config.debug_visual_capture,
+            },
+        },
+    )
     capabilities = {
         "ffmpeg": shutil.which(config.ffmpeg_bin) is not None,
         "ffprobe": shutil.which(config.ffprobe_bin) is not None,

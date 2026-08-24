@@ -49,6 +49,10 @@ state changes.
 The external object store owns bucket creation, credentials, CORS, lifecycle retention, and access
 policy. Keep source and output videos private by default.
 
+At startup, the backend and worker log the configuration file path and a safe operational summary,
+including pipeline/model versions, storage bucket/region, and runtime settings. They never log
+connection URLs or credentials.
+
 ## Volumes
 
 - `frontend-node-modules` caches frontend dependencies inside the Compose environment.

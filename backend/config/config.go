@@ -10,6 +10,7 @@ import (
 )
 
 type Config struct {
+	SourcePath        string
 	HTTPAddr          string
 	DatabaseURL       string
 	RedisURL          string
@@ -67,7 +68,8 @@ func Load(paths ...string) (Config, error) {
 		return Config{}, fmt.Errorf("parse configuration %q: %w", path, err)
 	}
 	c := Config{
-		HTTPAddr: raw.HTTPAddr, DatabaseURL: raw.DatabaseURL, RedisURL: raw.RedisURL,
+		SourcePath: path,
+		HTTPAddr:   raw.HTTPAddr, DatabaseURL: raw.DatabaseURL, RedisURL: raw.RedisURL,
 		S3Endpoint: raw.S3Endpoint, S3PresignEndpoint: raw.S3PresignEndpoint,
 		S3Region: raw.S3Region, S3Bucket: raw.S3Bucket, S3AccessKey: raw.S3AccessKey,
 		S3SecretKey: raw.S3SecretKey, S3UsePathStyle: raw.S3UsePathStyle,

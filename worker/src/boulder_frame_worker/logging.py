@@ -27,6 +27,8 @@ class JsonFormatter(logging.Formatter):
             "duration_ms",
             "error_code",
             "diagnostic",
+            "config_path",
+            "configuration",
         ):
             if hasattr(record, key):
                 output_key = "trace-id" if key == "trace_id" else key

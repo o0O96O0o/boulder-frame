@@ -60,3 +60,25 @@ def test_json_formatter_records_stage_duration() -> None:
 
     assert event["stage"] == "analyzing"
     assert event["duration_ms"] == 123
+
+
+def test_json_formatter_records_configuration_loading_details() -> None:
+    logger = logging.getLogger("test_json_formatter")
+    record = logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        0,
+        "configuration loaded",
+        (),
+        None,
+        extra={
+            "config_path": "/workspace/worker/conf/config.json",
+            "configuration": {"model_version": "unconfigured"},
+        },
+    )
+
+    event = json.loads(JsonFormatter().format(record))
+
+    assert event["config_path"] == "/workspace/worker/conf/config.json"
+    assert event["configuration"] == {"model_version": "unconfigured"}
