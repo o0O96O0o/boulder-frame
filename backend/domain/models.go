@@ -157,14 +157,14 @@ type ManifestPhase struct {
 }
 
 var (
-	reviewPhaseOrder = []string{"measurement", "pose", "tracking", "planning", "render"}
-	summaryFieldName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	reviewPhaseOrder  = []string{"measurement", "pose", "tracking", "planning", "render"}
+	summaryFieldName  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	versionIdentifier = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
 
 const (
-	maxManifestVersionLength = 128
-	maxManifestDurationMS    = 7 * 24 * 60 * 60 * 1000
-	maxManifestFrameCount    = 10_000_000
+	maxManifestDurationMS = 7 * 24 * 60 * 60 * 1000
+	maxManifestFrameCount = 10_000_000
 )
 
 func ValidArtifactKind(kind string) bool {
@@ -226,7 +226,7 @@ func ParseEvaluationManifest(data []byte) (EvaluationManifest, error) {
 	if err != nil {
 		return EvaluationManifest{}, errors.New("invalid evaluation review ID")
 	}
-	if !safeManifestText(raw.PipelineVersion, maxManifestVersionLength) || !safeManifestText(raw.ModelVersion, maxManifestVersionLength) || raw.Timing == nil ||
+	if !versionIdentifier.MatchString(raw.PipelineVersion) || !versionIdentifier.MatchString(raw.ModelVersion) || raw.Timing == nil ||
 		raw.Timing.FrameRate == nil || *raw.Timing.FrameRate <= 0 || *raw.Timing.FrameRate > 1000 || math.IsNaN(*raw.Timing.FrameRate) || math.IsInf(*raw.Timing.FrameRate, 0) ||
 		raw.Timing.DurationMS == nil || *raw.Timing.DurationMS <= 0 || *raw.Timing.DurationMS > maxManifestDurationMS ||
 		raw.Timing.FrameCount == nil || *raw.Timing.FrameCount <= 0 || *raw.Timing.FrameCount > maxManifestFrameCount {
@@ -247,7 +247,7 @@ func ParseEvaluationManifest(data []byte) (EvaluationManifest, error) {
 		},
 	}
 	for index, phase := range raw.Phases {
-		intervals, ok := validWarningIntervals(phase.WarningIntervals)
+		intervals, ok := validWarningIntervals(phase.WarningIntervals, result.Timing.DurationMS)
 		if phase.ID != reviewPhaseOrder[index] || seen[phase.ID] || !validPhaseStatus(phase.Status) ||
 			(phase.Detail != nil && (phase.Status != "unavailable" || !safeManifestText(*phase.Detail, 500))) ||
 			!validSummary(phase.Summary) || !ok {
@@ -299,13 +299,13 @@ func validWarningIntervals(raw []struct {
 	EndMS   *int64 `json:"end_ms"`
 	Label   string `json:"label"`
 	Detail  string `json:"detail"`
-}) ([]WarningInterval, bool) {
+}, durationMS int64) ([]WarningInterval, bool) {
 	intervals := make([]WarningInterval, 0, len(raw))
 	if len(raw) > 100 {
 		return nil, false
 	}
 	for _, interval := range raw {
-		if interval.StartMS == nil || *interval.StartMS < 0 || (interval.EndMS != nil && *interval.EndMS < *interval.StartMS) || !safeManifestText(interval.Label, 120) || (interval.Detail != "" && !safeManifestText(interval.Detail, 500)) {
+		if interval.StartMS == nil || *interval.StartMS < 0 || *interval.StartMS > durationMS || (interval.EndMS != nil && (*interval.EndMS < *interval.StartMS || *interval.EndMS > durationMS)) || !safeManifestText(interval.Label, 120) || (interval.Detail != "" && !safeManifestText(interval.Detail, 500)) {
 			return nil, false
 		}
 		intervals = append(intervals, WarningInterval{StartMS: *interval.StartMS, EndMS: interval.EndMS, Label: interval.Label, Detail: interval.Detail})

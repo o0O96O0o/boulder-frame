@@ -7,7 +7,7 @@ export const evaluationResponseFixture: Evaluation = {
   state: 'completed',
   pipeline_version: 'w0.1.0',
   model_version: 'w0.1-model',
-  timing: { frame_rate: 60, duration_ms: 1200, frame_count: 72 },
+  timing: { frame_rate: 60, duration_ms: 12000, frame_count: 720 },
   phases: [
     { id: 'measurement', label: 'Measurement', status: 'ready', summary: { selected_rate: 0.96 }, video_url: 'https://storage.test/review/measurement.mp4?X-Amz-Signature=fixture' },
     { id: 'pose', label: 'Pose', status: 'warning', summary: { pose_available_rate: 0.93, warning_frames: 18 }, warning_intervals: [{ start_ms: 4200, end_ms: 5900, label: 'Low confidence', detail: 'Pose landmarks were intermittently unavailable.' }], video_url: 'https://storage.test/review/pose.mp4?X-Amz-Signature=fixture' },

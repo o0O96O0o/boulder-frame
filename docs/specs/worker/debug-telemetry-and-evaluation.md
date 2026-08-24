@@ -14,8 +14,10 @@ transition. `retain_debug_artifacts` is also default-off, but has a different pu
 job's local scratch directory rather than controlling durable capture. Local scratch is not an artifact
 contract and must not be relied on for evaluation.
 
-Capture is bounded by positive configuration limits: `debug_max_frames` defaults to `10000` frames and
-`debug_max_bytes` defaults to `52428800` bytes (50 MiB). The gzip writer emits records incrementally
+The required scratch crop path contains only frame index, timestamp, and final crop rectangle; it is
+used for rendering/retry and is not telemetry. Capture is bounded by positive configuration limits:
+`debug_max_frames` defaults to `10000` frames and `debug_max_bytes` defaults to `52428800` bytes
+(50 MiB). The optional semantic scratch trace and gzip writer emit records incrementally
 and checks the compressed byte limit while writing, reserving its trailer; the evaluator reads gzip
 JSONL line by line and applies its frame limit without materializing the bundle. A limit breach removes
 the partial bundle and is treated as an optional-publication failure.
@@ -187,16 +189,17 @@ deliverable, not an annotated source video. Current telemetry records
 `mapping_independently_verified: false`; it does not claim the independent renderer-mapping evidence
 required to emit a `render_mapping` failure.
 
-`manifest.json` uses the established v1 evaluation schema. To remain compatible with its strict
-backend parser, immutable pipeline/model and timing metadata are bounded scalar fields in every phase
-`summary`: `pipeline_version`, `model_version`, `trace_frame_count`, and, when source validation is
-available, `source_duration_ms` and `source_frame_rate`. They complement, rather than replace, the
-phase-specific summary counters.
+`manifest.json` uses the established strict v1 evaluation schema. Its root contains exact immutable
+`pipeline_version` and `model_version` identifiers and source `timing` with finite `frame_rate`,
+positive bounded `duration_ms`, and bounded `frame_count`; these values must match the immutable job
+configuration and validated source metadata. Per-phase summaries contain only phase counters and
+`trace_frame_count`.
 
 The separate visual-review design restores annotated source-derived video only as an optional private
 diagnostic. `debug_visual_capture` requires `debug_capture` and has independent duration, dimensions,
 aggregate-byte, and total wall-clock limits. OpenCV decode/encode runs in a killable child process, so a
-blocked capture/read makes that phase unavailable when the shared deadline expires. The render comparison
+blocked capture/read makes that phase unavailable when the shared deadline expires; cleanup always reaps
+and closes a live child, including expiry after start but before its first join. The render comparison
 letterboxes each source/output pane independently and maps source-crop overlays through the source pane;
 it never distorts the two-pane image into the final aspect ratio. It must never replace the final output
 artifact or weaken output-media validation. See [Phase Evaluation Review](../frontend/phase-evaluation.md)

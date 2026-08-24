@@ -77,7 +77,7 @@ func TestJobConfigHashIsStableAndChangesWithConfiguration(t *testing.T) {
 	}
 }
 
-func TestParseEvaluationManifestAcceptsSafeOrderedProjection(t *testing.T) {
+func TestParseEvaluationManifestAcceptsWorkerCompatibleRootMetadata(t *testing.T) {
 	reviewID := uuid.New()
 	endMS := int64(20)
 	manifest := map[string]any{
@@ -92,7 +92,7 @@ func TestParseEvaluationManifestAcceptsSafeOrderedProjection(t *testing.T) {
 			map[string]any{"id": "pose", "status": "partial"},
 			map[string]any{"id": "tracking", "status": "warning", "warning_intervals": []any{map[string]any{"start_ms": 10, "end_ms": endMS, "label": "Tracking lost", "detail": "Subject was briefly occluded"}}},
 			map[string]any{"id": "planning", "status": "unavailable", "detail": "Review capture exceeded its duration limit"},
-			map[string]any{"id": "render", "status": "unavailable"},
+			map[string]any{"id": "render", "status": "warning", "warning_intervals": []any{map[string]any{"start_ms": 1200, "label": "At source end"}}},
 		},
 	}
 	data, err := json.Marshal(manifest)
@@ -100,7 +100,7 @@ func TestParseEvaluationManifestAcceptsSafeOrderedProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := ParseEvaluationManifest(data)
-	if err != nil || got.ReviewID != reviewID || got.PipelineVersion != "w0.1.0" || got.ModelVersion != "w0.1-model" || got.Timing.FrameRate != 60 || got.Timing.DurationMS != 1200 || got.Timing.FrameCount != 72 || !got.TelemetryReady || len(got.Phases) != 5 || got.Phases[2].WarningIntervals[0].EndMS == nil || *got.Phases[2].WarningIntervals[0].EndMS != endMS || got.Phases[3].Detail != "Review capture exceeded its duration limit" {
+	if err != nil || got.ReviewID != reviewID || got.PipelineVersion != "w0.1.0" || got.ModelVersion != "w0.1-model" || got.Timing.FrameRate != 60 || got.Timing.DurationMS != 1200 || got.Timing.FrameCount != 72 || !got.TelemetryReady || len(got.Phases) != 5 || got.Phases[2].WarningIntervals[0].EndMS == nil || *got.Phases[2].WarningIntervals[0].EndMS != endMS || got.Phases[3].Detail != "Review capture exceeded its duration limit" || got.Phases[4].WarningIntervals[0].StartMS != 1200 || got.Phases[4].WarningIntervals[0].EndMS != nil {
 		t.Fatalf("ParseEvaluationManifest() = %#v, %v", got, err)
 	}
 }
@@ -138,17 +138,24 @@ func TestParseEvaluationManifestRejectsUnsafeOrUnorderedData(t *testing.T) {
 	}
 }
 
-func TestParseEvaluationManifestRequiresBoundedLabeledWarningTimestamp(t *testing.T) {
+func TestParseEvaluationManifestRejectsInvalidWarningIntervals(t *testing.T) {
 	reviewID := uuid.New().String()
-	phases := []map[string]any{
-		{"id": "measurement", "status": "warning", "warning_intervals": []any{map[string]any{"start_ms": -1, "label": "Invalid"}}},
-		{"id": "pose", "status": "ready"}, {"id": "tracking", "status": "ready"}, {"id": "planning", "status": "ready"}, {"id": "render", "status": "ready"},
-	}
-	data, err := json.Marshal(map[string]any{"schema_version": 1, "review_id": reviewID, "pipeline_version": "w0.1.0", "model_version": "w0.1-model", "timing": map[string]any{"frame_rate": 60.0, "duration_ms": 1200, "frame_count": 72}, "phases": phases})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ParseEvaluationManifest(data); err == nil {
-		t.Fatal("manifest without a valid warning interval was accepted")
+	for _, interval := range []map[string]any{
+		{"start_ms": -1, "label": "Invalid"},
+		{"start_ms": 1201, "label": "Beyond source end"},
+		{"start_ms": 1200, "end_ms": 1201, "label": "Beyond source end"},
+		{"start_ms": 20, "end_ms": 10, "label": "Reversed"},
+	} {
+		phases := []map[string]any{
+			{"id": "measurement", "status": "warning", "warning_intervals": []any{interval}},
+			{"id": "pose", "status": "ready"}, {"id": "tracking", "status": "ready"}, {"id": "planning", "status": "ready"}, {"id": "render", "status": "ready"},
+		}
+		data, err := json.Marshal(map[string]any{"schema_version": 1, "review_id": reviewID, "pipeline_version": "w0.1.0", "model_version": "w0.1-model", "timing": map[string]any{"frame_rate": 60.0, "duration_ms": 1200, "frame_count": 72}, "phases": phases})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseEvaluationManifest(data); err == nil {
+			t.Fatalf("manifest with invalid warning interval was accepted: %s", data)
+		}
 	}
 }

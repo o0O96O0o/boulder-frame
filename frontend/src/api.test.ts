@@ -37,6 +37,7 @@ describe('API client contract', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/jobs/job-1/evaluation', expect.any(Object))
     expect(evaluation.phases?.[0].video_url).toBe(signedURL)
     expect(evaluation.phases?.[1].warning_intervals).toEqual([{ start_ms: 4200, end_ms: 5900, label: 'Low confidence', detail: 'Pose landmarks were intermittently unavailable.' }])
+    expect(evaluation.phases?.[2].warning_intervals).toEqual([{ start_ms: 8600, label: 'Reacquired', detail: 'Tracking resumed after a brief occlusion.' }])
     expect(evaluation.expires_in_seconds).toBe(900)
     expect(info.mock.calls.flat().join(' ')).not.toContain(signedURL)
   })
@@ -60,6 +61,15 @@ describe('API client contract', () => {
 
     await expect(api.getEvaluation('job-1')).resolves.toEqual({ available: false, telemetry_download_url: telemetryURL, expires_in_seconds: 900 })
   })
+  it('accepts warning interval boundaries at the source duration', async () => {
+    const response = {
+      ...evaluationResponseFixture,
+      phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'pose' ? { ...phase, warning_intervals: [{ start_ms: 12000, end_ms: 12000, label: 'At source end' }] } : phase),
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(response), { status: 200 })))
+
+    await expect(api.getEvaluation('job-1')).resolves.toMatchObject({ phases: expect.arrayContaining([expect.objectContaining({ id: 'pose', warning_intervals: [{ start_ms: 12000, end_ms: 12000, label: 'At source end' }] })]) })
+  })
   it.each([
     ['missing phases', { available: true, review_id: 'review-1', state: 'completed' }],
     ['out-of-order phase', { ...evaluationResponseFixture, phases: [...evaluationResponseFixture.phases!].reverse() }],
@@ -68,6 +78,8 @@ describe('API client contract', () => {
     ['missing manifest timing', { ...evaluationResponseFixture, timing: undefined }],
     ['unsafe model version', { ...evaluationResponseFixture, model_version: 'https://storage.test/model?signature=private' }],
     ['oversized phase detail', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'planning' ? { ...phase, detail: 'x'.repeat(501) } : phase) }],
+    ['warning start beyond source duration', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'pose' ? { ...phase, warning_intervals: [{ start_ms: 12001, label: 'Beyond source end' }] } : phase) }],
+    ['warning end beyond source duration', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'pose' ? { ...phase, warning_intervals: [{ start_ms: 12000, end_ms: 12001, label: 'Beyond source end' }] } : phase) }],
   ])('rejects malformed evaluation payloads: %s without logging signed URLs', async (_, response) => {
     const signedURL = 'https://storage.test/review/render.mp4?signature=private'
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)

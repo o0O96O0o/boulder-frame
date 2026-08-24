@@ -96,7 +96,6 @@ class ReviewRenderer:
         status = destination.with_suffix(".status")
         raw = destination.with_suffix(".avi")
         status.unlink(missing_ok=True)
-        timeout = _remaining_seconds(deadline)
         process = _review_process(
             self.ffmpeg_bin,
             self.limits,
@@ -106,14 +105,14 @@ class ReviewRenderer:
             trace,
             destination,
             phase,
-            timeout,
+            _remaining_seconds(deadline),
             status,
         )
         try:
-            process.join(timeout)
+            process.join(_remaining_seconds(deadline))
             if process.is_alive():
-                _terminate_process(process)
                 raise _ReviewTimeout()
+            _require_remaining(deadline)
             if process.exitcode != 0:
                 raise ValueError("unavailable")
             try:
@@ -125,6 +124,13 @@ class ReviewRenderer:
         finally:
             status.unlink(missing_ok=True)
             raw.unlink(missing_ok=True)
+            # _remaining_seconds can expire immediately after start, before join. Always reap a
+            # live child here so its OpenCV/FFmpeg descendants cannot outlive the review deadline.
+            if process.is_alive():
+                _terminate_process(process)
+            close = getattr(process, "close", None)
+            if callable(close) and not process.is_alive():
+                close()
 
     @staticmethod
     def _render_phase_in_process(

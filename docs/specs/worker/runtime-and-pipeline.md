@@ -104,13 +104,15 @@ uses the active `uploading` lease to atomically upsert the deterministic key
 `processing_jobs.output_asset_id`. It does not complete the job; the existing guarded state transition
 remains completion authority. Retried finalization reuses the same logical output.
 
-`PostgresJobRepository.finalize_debug` similarly supports one verified `application/gzip` debug asset
-at `private/debug/{project_id}/{job_id}/{debug_uuid}.jsonl.gz` while a nonterminal job lease is live.
-After output finalization, `Worker.process` calls `ProcessingPipeline.publish_debug` before transitioning
-to `completed`; a failed durable phase attempts the same publication before its failure is persisted.
-Each publication uses a new UUID key. Failed upload verification/finalization attempts delete their
-newly uploaded object when possible. Debug build/upload/finalization failures are warnings and do not
-change the required output-job result; see [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md).
+`PostgresJobRepository.finalize_review` atomically links one verified UUID-scoped review set while a
+nonterminal lease is live: mandatory `debug_telemetry` and `debug_manifest`, plus any available
+`debug_measurement`, `debug_pose`, `debug_tracking`, `debug_planning`, and `debug_render` phase media.
+Its canonical keys are `private/debug/{project_id}/{job_id}/{review_id}/{name}`. After output
+finalization, `Worker.process` calls `ProcessingPipeline.publish_debug` before transitioning to
+`completed`; a failed durable phase attempts the same publication before its failure is persisted. Each
+publication uses a new review UUID. Failed upload verification/finalization attempts delete every newly
+uploaded object when possible. Debug build/upload/finalization failures are warnings and do not change
+the required output-job result; see [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md).
 
 ## Media Validation
 
@@ -156,22 +158,31 @@ durable stages:
    `ffprobe`, and performs the local VFR-to-CFR branch when required.
 2. `analyzing`: maps the immutable target selection, emits detector/pose observations through injected
    adapters, tracks them, and generates a deterministic crop path.
-3. `rendering`: regenerates the crop path, draws each final crop rectangle on its original display-normalized frame with FFmpeg, and validates the MP4.
+3. `rendering`: reuses the aligned minimal scratch crop path when available, applies each final crop rectangle
+   to its display-normalized frame with FFmpeg, and validates the MP4.
 4. `uploading`: revalidates or recreates the deterministic output, uploads and heads
    `private/output/{project_id}/{job_id}.mp4`, then performs lease-guarded artifact finalization.
 
-When `debug_capture` is enabled, analysis writes source-coordinate frame records and the worker writes
-timing records for each durable phase. The writer/evaluator stream and bound captured frames and
-compressed bytes by `debug_max_frames`/`debug_max_bytes`. After output finalization and before the
-`completed` transition, the worker builds, uploads, and lease-finalizes a UUID-scoped private debug
-bundle while still `uploading`. If a phase fails, it writes the failed stage telemetry and attempts
-publication before persisting the failure, while its nonterminal lease remains active. Scratch writes,
-bundle publication, and cleanup are all best-effort: errors are logged as warnings without changing
-the required output-job result. `Worker.process` sets `completed` after required output finalization
-succeeds. Terminal stage errors persist `failed` and allow the entry to be acknowledged. Transient
-storage or database errors release the PostgreSQL lease and keep the Redis entry pending for recovery.
-Duplicate deliveries of terminal jobs acknowledge without reprocessing; a live foreign lease keeps the
-entry pending.
+Every job writes only its minimal frame-aligned crop path for final rendering and retries. When
+`debug_capture` is enabled, analysis additionally writes source-coordinate semantic frame records and
+the worker writes timing records for each durable phase. The optional semantic trace is bounded by
+`debug_max_frames` and `debug_max_bytes`, cleans partial files on failure, and never blocks a validated
+output. The writer/evaluator stream and bound captured frames and compressed bytes by the same
+`debug_max_frames`/`debug_max_bytes` settings. After output finalization and before the
+`completed` transition, the worker builds, uploads, and lease-finalizes a UUID-scoped private review
+set while still `uploading`. `debug_visual_capture` requires telemetry capture and independently bounds
+review duration, encoded dimensions, aggregate bytes, and a child-process-enforced total deadline; a
+blocked OpenCV read makes only the affected phase unavailable. After a review child starts, its cleanup
+always terminates, joins, and closes a live child even when the deadline expires before its first join.
+The visual renderer reuses the aligned semantic trace and letterboxes source/output panes independently
+for render comparison. If a phase fails,
+the worker writes the failed stage telemetry and attempts publication before persisting the failure,
+while its nonterminal lease remains active. Scratch writes, review publication, and cleanup are all
+best-effort: errors are logged as warnings without changing the required output-job result.
+`Worker.process` sets `completed` after required output finalization succeeds. Terminal stage errors
+persist `failed` and allow the entry to be acknowledged. Transient storage or database errors release
+the PostgreSQL lease and keep the Redis entry pending for recovery. Duplicate deliveries of terminal
+jobs acknowledge without reprocessing; a live foreign lease keeps the entry pending.
 
 ```mermaid
 flowchart LR

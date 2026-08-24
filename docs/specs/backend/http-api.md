@@ -97,8 +97,8 @@ statuses. The API preserves accepted details without adding storage or infrastru
 
 The worker's `manifest.json` is strict schema v1. Its root fields are `schema_version`, `review_id`,
 `pipeline_version`, `model_version`, `timing`, `phases`, and optional `telemetry.status`. The API
-accepts no other fields. `pipeline_version` and `model_version` are 1-128 byte safe plain-text
-identifiers and must exactly equal the job's immutable configuration. `timing` is:
+accepts no other fields. `pipeline_version` and `model_version` are 1-128 character identifiers
+matching `[A-Za-z0-9._-]+` and must exactly equal the job's immutable configuration. `timing` is:
 
 ```json
 {"frame_rate":60,"duration_ms":1200,"frame_count":72}
@@ -110,6 +110,11 @@ visual review. They must contain source timing only, never URLs, keys, secrets, 
 or raw telemetry. A review is visually available only with at least one verified phase MP4. A
 telemetry-only run returns `available: false` plus an optional short-lived telemetry URL, without
 phase details or manifest metadata.
+
+Each phase can include at most 100 `warning_intervals`. Every interval has a non-negative integer
+`start_ms` no greater than `timing.duration_ms`, a required safe `label`, and optional safe `detail`.
+When present, `end_ms` is an integer from `start_ms` through `timing.duration_ms`; it is otherwise
+omitted for an open-ended interval.
 
 ## Errors
 

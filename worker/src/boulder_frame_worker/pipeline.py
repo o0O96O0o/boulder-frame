@@ -12,7 +12,6 @@ from uuid import UUID, uuid4
 from .config import DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
 from .debug import (
     DebugBundleWriter,
-    append_debug_record,
     debug_bundle_header,
     serialize_crop_rect,
     serialize_frame_measurement,
@@ -89,6 +88,7 @@ class UnavailableFrameReader:
 
 PlannerFactory = Callable[[int, int, AspectRatio, FramingProfile], CropPlanner]
 _ANALYSIS_TRACE = "analysis-trace.jsonl"
+_CROP_PATH = "crop-path.jsonl"
 _STAGE_TRACE = "debug-stages.jsonl"
 
 
@@ -340,12 +340,7 @@ class ProcessingPipeline:
         metadata: MediaMetadata | None = None,
     ) -> Path:
         destination.mkdir(parents=True, exist_ok=True)
-        shared_summary = _review_metadata(
-            pipeline_version,
-            model_version,
-            metadata,
-            len(trace),
-        )
+        shared_summary = _review_metadata(len(trace))
         phases = []
         for phase in PHASES:
             visual = visual_phases.get(phase, {})
@@ -370,6 +365,9 @@ class ProcessingPipeline:
                 {
                     "schema_version": 1,
                     "review_id": str(review_id),
+                    "pipeline_version": _manifest_version(pipeline_version),
+                    "model_version": _manifest_version(model_version),
+                    "timing": _manifest_timing(metadata),
                     "telemetry": {"status": "ready"},
                     "phases": phases,
                 },
@@ -419,9 +417,9 @@ class ProcessingPipeline:
         return _Inputs(source, scratch / "output.mp4", metadata, selection, output_settings)
 
     def _crop_path(self, inputs: _Inputs) -> list[CropRect]:
-        trace_path = inputs.source.parent / _ANALYSIS_TRACE
-        if trace_path.is_file():
-            return _load_crop_path(trace_path, inputs.metadata)
+        crop_path = inputs.source.parent / _CROP_PATH
+        if crop_path.is_file():
+            return _load_crop_path(crop_path, inputs.metadata)
         expected = expected_frame_count(inputs.metadata)
         width, height = inputs.metadata.display_dimensions
         selected_index = inputs.metadata.frame_for_time_ms(inputs.selection.frame_time_ms)
@@ -476,40 +474,60 @@ class ProcessingPipeline:
         plan = self.planner_factory(
             width, height, inputs.output_settings.aspect_ratio, inputs.output_settings.profile
         ).plan(planner_measurements)
-        self._write_analysis_trace(
-            trace_path,
+        self._write_crop_path(
+            crop_path,
             observations,
-            tracked,
-            planner_measurements,
             plan,
-            inputs.selection,
-            width,
-            height,
         )
+        if self.debug_capture:
+            try:
+                self._write_analysis_trace(
+                    inputs.source.parent / _ANALYSIS_TRACE,
+                    observations,
+                    tracked,
+                    planner_measurements,
+                    plan,
+                    inputs.selection,
+                    width,
+                    height,
+                    self.debug_max_frames,
+                    self.debug_max_bytes,
+                )
+            except (OSError, ValueError):
+                # Semantic evidence is optional; the crop path remains sufficient to render output.
+                (inputs.source.parent / _ANALYSIS_TRACE).unlink(missing_ok=True)
         return list(plan)
 
-    def _render(self, inputs: _Inputs) -> MediaMetadata:
-        if inputs.output.exists():
-            metadata = self.inspector.inspect(inputs.output)
-            validate_output(
-                metadata,
-                inputs.output_settings.aspect_ratio,
-                expected_duration_ms=inputs.metadata.duration_ms,
-                duration_tolerance_ms=round(1000 / float(inputs.metadata.frame_rate)),
-                source_has_audio=inputs.metadata.has_audio,
-            )
-            self._mark_render_validated(inputs.source.parent / _ANALYSIS_TRACE)
-            return metadata
-        rendered = self.renderer.render_crop_path(
-            inputs.source,
-            inputs.output,
-            self._crop_path(inputs),
-            inputs.metadata,
-            inputs.output_settings.aspect_ratio,
-            self.inspector,
-        )
-        self._mark_render_validated(inputs.source.parent / _ANALYSIS_TRACE)
-        return rendered
+    @staticmethod
+    def _write_crop_path(
+        path: Path,
+        observations: Sequence[RawFrameObservation],
+        plan: CropPlan | Sequence[CropRect],
+    ) -> None:
+        crops = plan.crops if isinstance(plan, CropPlan) else tuple(plan)
+        if len(observations) != len(crops):
+            raise ValueError("crop path records must have matching frame counts")
+        temporary = path.with_suffix(".tmp")
+        temporary.unlink(missing_ok=True)
+        try:
+            with temporary.open("w", encoding="ascii") as destination:
+                for observation, crop in zip(observations, crops, strict=True):
+                    destination.write(
+                        json.dumps(
+                            {
+                                "frame_index": observation.frame_index,
+                                "timestamp_ms": observation.timestamp_ms,
+                                "crop": serialize_crop_rect(crop),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+            temporary.replace(path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
 
     @staticmethod
     def _write_analysis_trace(
@@ -521,64 +539,105 @@ class ProcessingPipeline:
         selection: TargetSelection | None = None,
         source_width: int | None = None,
         source_height: int | None = None,
+        max_frames: int = 10_000,
+        max_bytes: int = 50 * 1024 * 1024,
     ) -> None:
         crops = plan.crops if isinstance(plan, CropPlan) else tuple(plan)
         trace = plan.trace if isinstance(plan, CropPlan) else (None,) * len(crops)
         if not (len(observations) == len(tracked) == len(measurements) == len(crops) == len(trace)):
             raise ValueError("debug analysis records must have matching frame counts")
-        path.unlink(missing_ok=True)
-        for observation, tracked_measurement, measurement, crop, planner_trace in zip(
-            observations, tracked, measurements, crops, trace, strict=True
-        ):
-            append_debug_record(
-                path,
-                "frame",
-                {
-                    "frame_index": observation.frame_index,
-                    "timestamp_ms": observation.timestamp_ms,
-                    "measurement": {
-                        **serialize_raw_frame_observation(observation),
-                        "selection": _selection_trace(
-                            observation,
-                            tracked_measurement,
-                            selection,
-                            source_width,
-                            source_height,
-                        ),
-                    },
-                    "tracking": serialize_tracked_measurement(tracked_measurement),
-                    "planning": {
-                        "input": serialize_frame_measurement(measurement),
-                        "crop": serialize_crop_rect(crop),
-                        **_planner_decision(planner_trace),
-                    },
-                    "render": {
-                        "crop": serialize_crop_rect(crop),
+        if len(observations) > max_frames:
+            raise ValueError("debug analysis records exceed max_frames")
+        temporary = path.with_suffix(".tmp")
+        temporary.unlink(missing_ok=True)
+        try:
+            with temporary.open("w", encoding="ascii") as destination:
+                for observation, tracked_measurement, measurement, crop, planner_trace in zip(
+                    observations, tracked, measurements, crops, trace, strict=True
+                ):
+                    record = {
+                        "record_type": "frame",
+                        "schema_version": 1,
+                        "frame_index": observation.frame_index,
                         "timestamp_ms": observation.timestamp_ms,
-                        "mapping_independently_verified": False,
-                        "output_validated": False,
-                    },
-                },
+                        "measurement": {
+                            **serialize_raw_frame_observation(observation),
+                            "selection": _selection_trace(
+                                observation,
+                                tracked_measurement,
+                                selection,
+                                source_width,
+                                source_height,
+                            ),
+                        },
+                        "tracking": serialize_tracked_measurement(tracked_measurement),
+                        "planning": {
+                            "input": serialize_frame_measurement(measurement),
+                            "crop": serialize_crop_rect(crop),
+                            **_planner_decision(planner_trace),
+                        },
+                        "render": {
+                            "crop": serialize_crop_rect(crop),
+                            "timestamp_ms": observation.timestamp_ms,
+                            "mapping_independently_verified": False,
+                            "output_validated": False,
+                        },
+                    }
+                    encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                    if destination.tell() + len(encoded.encode("ascii")) > max_bytes:
+                        raise ValueError("debug analysis records exceed max_bytes")
+                    destination.write(encoded)
+            temporary.replace(path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def _render(self, inputs: _Inputs) -> MediaMetadata:
+        if inputs.output.exists():
+            metadata = self.inspector.inspect(inputs.output)
+            validate_output(
+                metadata,
+                inputs.output_settings.aspect_ratio,
+                expected_duration_ms=inputs.metadata.duration_ms,
+                duration_tolerance_ms=round(1000 / float(inputs.metadata.frame_rate)),
+                source_has_audio=inputs.metadata.has_audio,
             )
+            self._mark_render_validated(
+                inputs.source.parent / _ANALYSIS_TRACE, self.debug_max_bytes
+            )
+            return metadata
+        rendered = self.renderer.render_crop_path(
+            inputs.source,
+            inputs.output,
+            self._crop_path(inputs),
+            inputs.metadata,
+            inputs.output_settings.aspect_ratio,
+            self.inspector,
+        )
+        self._mark_render_validated(inputs.source.parent / _ANALYSIS_TRACE, self.debug_max_bytes)
+        return rendered
 
     @staticmethod
-    def _mark_render_validated(path: Path) -> None:
+    def _mark_render_validated(path: Path, max_bytes: int) -> None:
         if not path.is_file():
             return
+        temporary = path.with_suffix(".tmp")
+        temporary.unlink(missing_ok=True)
         try:
-            records = []
             with path.open(encoding="ascii") as trace:
-                for line in trace:
-                    record = json.loads(line)
-                    if isinstance(record, dict) and isinstance(record.get("render"), dict):
-                        record["render"]["output_validated"] = True
-                    records.append(record)
-            with path.open("w", encoding="ascii") as trace:
-                for record in records:
-                    trace.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+                with temporary.open("w", encoding="ascii") as destination:
+                    for line in trace:
+                        record = json.loads(line)
+                        if isinstance(record, dict) and isinstance(record.get("render"), dict):
+                            record["render"]["output_validated"] = True
+                        encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                        if destination.tell() + len(encoded.encode("ascii")) > max_bytes:
+                            raise ValueError("debug analysis records exceed max_bytes")
+                        destination.write(encoded)
+            temporary.replace(path)
         except Exception:
             # A diagnostic trace must never invalidate an already validated product output.
-            return
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _copy_trace(writer: DebugBundleWriter, path: Path) -> None:
@@ -691,24 +750,31 @@ def _load_analysis_records(path: Path, metadata: MediaMetadata) -> list[dict[str
 
 def _load_crop_path(path: Path, metadata: MediaMetadata) -> list[CropRect]:
     crops: list[CropRect] = []
-    for record in _load_analysis_records(path, metadata):
-        try:
-            planning = record["planning"]
-            crop = planning["crop"]  # type: ignore[index]
-            if not isinstance(crop, dict):
-                raise TypeError
-            crops.append(
-                CropRect(
-                    float(crop["x"]),
-                    float(crop["y"]),
-                    float(crop["width"]),
-                    float(crop["height"]),
+    with path.open(encoding="ascii") as source:
+        records = (json.loads(line) for line in source)
+        for index, record in enumerate(records):
+            if (
+                not isinstance(record, dict)
+                or record.get("frame_index") != index
+                or record.get("timestamp_ms") != metadata.timestamp_for_frame(index)
+            ):
+                raise terminal(ErrorCode.INVALID_MEDIA, "Crop path is inconsistent.")
+            try:
+                crop = record["crop"]
+                if not isinstance(crop, dict):
+                    raise TypeError
+                crops.append(
+                    CropRect(
+                        float(crop["x"]),
+                        float(crop["y"]),
+                        float(crop["width"]),
+                        float(crop["height"]),
+                    )
                 )
-            )
-        except (KeyError, TypeError, ValueError) as error:
-            raise terminal(
-                ErrorCode.INVALID_MEDIA, "Video analysis trace is inconsistent."
-            ) from error
+            except (KeyError, TypeError, ValueError) as error:
+                raise terminal(ErrorCode.INVALID_MEDIA, "Crop path is inconsistent.") from error
+    if len(crops) != expected_frame_count(metadata):
+        raise terminal(ErrorCode.INVALID_MEDIA, "Crop path is incomplete.")
     return crops
 
 
@@ -747,30 +813,31 @@ def _review_unavailable_detail(value: object) -> str:
     return safe[:80] or "unavailable"
 
 
-def _review_metadata(
-    pipeline_version: str,
-    model_version: str,
-    metadata: MediaMetadata | None,
-    frame_count: int,
-) -> dict[str, object]:
-    result: dict[str, object] = {
-        "pipeline_version": _safe_manifest_version(pipeline_version),
-        "model_version": _safe_manifest_version(model_version),
-        "trace_frame_count": frame_count,
+def _review_metadata(frame_count: int) -> dict[str, object]:
+    return {"trace_frame_count": frame_count}
+
+
+def _manifest_version(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value):
+        raise ValueError("manifest version is invalid")
+    return value
+
+
+def _manifest_timing(metadata: MediaMetadata | None) -> dict[str, object]:
+    if metadata is None:
+        raise ValueError("manifest timing is unavailable")
+    frame_count = expected_frame_count(metadata)
+    if not (0 < float(metadata.frame_rate) <= 1000):
+        raise ValueError("manifest frame rate is invalid")
+    if not (0 < metadata.duration_ms <= 7 * 24 * 60 * 60 * 1000):
+        raise ValueError("manifest duration is invalid")
+    if not (0 < frame_count <= 10_000_000):
+        raise ValueError("manifest frame count is invalid")
+    return {
+        "frame_rate": float(metadata.frame_rate),
+        "duration_ms": metadata.duration_ms,
+        "frame_count": frame_count,
     }
-    if metadata is not None:
-        result.update(
-            {
-                "source_duration_ms": metadata.duration_ms,
-                "source_frame_rate": float(metadata.frame_rate),
-            }
-        )
-    return result
-
-
-def _safe_manifest_version(value: str) -> str:
-    bounded = value[:120]
-    return bounded if re.fullmatch(r"[A-Za-z0-9._-]+", bounded) else "unavailable"
 
 
 def _review_summary(trace: Sequence[Mapping[str, object]], phase: str) -> dict[str, object]:

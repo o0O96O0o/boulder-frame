@@ -45,6 +45,9 @@ human-oriented projection, not a replacement for telemetry. Schema v1 contains i
 `timing.frame_count`; the versions must equal the immutable job configuration. It contains ordered
 phase availability, summary counters, warning intervals, and the first unavailable/failure reason.
 It contains neither object URLs, source identifiers, source bytes, raw frames, nor credentials.
+Each warning interval starts within the inclusive source range `0..timing.duration_ms`; an optional
+end is also within that range and cannot precede its start. The browser rejects an otherwise
+successful evaluation response that violates these bounds.
 
 The pipeline must emit semantic phase trace values rather than reconstruct them in the renderer. In
 particular, the planner returns a `CropPlan` containing crops plus, for each frame, the composed

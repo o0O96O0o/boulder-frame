@@ -1,5 +1,4 @@
 import shutil
-import shutil
 import subprocess
 from fractions import Fraction
 from importlib.util import find_spec
@@ -207,9 +206,7 @@ def test_render_comparison_letterboxes_each_pane_and_maps_source_crop(
         },
     }
 
-    frame = ReviewRenderer._annotate(
-        cv2, np, source, record, "render", 0, output, (), (320, 180)
-    )
+    frame = ReviewRenderer._annotate(cv2, np, source, record, "render", 0, output, (), (320, 180))
 
     assert frame.shape == (180, 320, 3)
     assert tuple(frame[70, 40]) == (255, 255, 0)  # source crop maps into its letterboxed pane
@@ -227,7 +224,9 @@ def test_review_deadline_is_total_and_expires_without_waiting_for_another_ffmpeg
         review._remaining_seconds(10.0)
 
 
-def test_review_decode_timeout_terminates_blocked_process_without_waiting(monkeypatch, tmp_path) -> None:
+def test_review_decode_timeout_terminates_blocked_process_without_waiting(
+    monkeypatch, tmp_path
+) -> None:
     class BlockedProcess:
         pid = None
 
@@ -256,6 +255,59 @@ def test_review_decode_timeout_terminates_blocked_process_without_waiting(monkey
         )
 
     assert len(terminated) == 1
+
+
+def test_review_cleanup_terminates_and_closes_child_when_deadline_expires_before_join(
+    monkeypatch, tmp_path
+) -> None:
+    class StartedProcess:
+        pid = None
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.closed = False
+
+        def join(self, timeout) -> None:
+            raise AssertionError("expired deadline must not join the child")
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def close(self) -> None:
+            self.closed = True
+
+    process = StartedProcess()
+
+    def terminate(child) -> None:
+        assert child is process
+        child.alive = False
+
+    monkeypatch.setattr(review, "_review_process", lambda *args: process)
+    monkeypatch.setattr(review, "_terminate_process", terminate)
+    remaining_calls = iter((1, subprocess.TimeoutExpired("review", 0)))
+
+    def remaining(deadline):
+        value = next(remaining_calls)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(review, "_remaining_seconds", remaining)
+    renderer = ReviewRenderer("ffmpeg", ReviewLimits(1000, 320, 180, 1_000_000, 1))
+    metadata = MediaMetadata(160, 90, 1000, Fraction(1, 1), "h264", None, 0, False)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        renderer._render_phase(
+            tmp_path / "source.mp4",
+            tmp_path / "output.mp4",
+            metadata,
+            [],
+            tmp_path / "render.mp4",
+            "render",
+            99,
+        )
+
+    assert process.closed
 
 
 def test_review_unavailable_reason_never_exposes_arbitrary_exception_text() -> None:

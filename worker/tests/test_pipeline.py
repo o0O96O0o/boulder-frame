@@ -399,19 +399,129 @@ def test_render_reuses_aligned_scratch_crop_trace_without_running_models(tmp_pat
     scratch = tmp_path / "job"
     scratch.mkdir()
     (scratch / "source").write_bytes(b"source")
-    append_debug_record(
-        scratch / "analysis-trace.jsonl",
-        "frame",
-        {
-            "frame_index": 0,
-            "timestamp_ms": 0,
-            "planning": {"crop": {"x": 0, "y": 0, "width": 1920, "height": 1080}},
-        },
+    (scratch / "crop-path.jsonl").write_text(
+        '{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":0,"timestamp_ms":0}\n',
+        encoding="ascii",
     )
 
     pipeline.rendering(_record(), scratch)
 
     assert renderer.crops == [CropRect(0, 0, 1920, 1080)]
+
+
+def test_normal_pipeline_persists_only_minimal_crop_path(tmp_path) -> None:
+    class OneFrameInspector:
+        def inspect(self, path: Path) -> MediaMetadata:
+            return MediaMetadata(1920, 1080, 1000, 1, "h264", None, 0, False)
+
+    class Frames:
+        def read(self, source: Path, metadata: MediaMetadata):
+            yield DecodedFrame(0, 0, Pixels())
+
+    class Pixels:
+        def __getitem__(self, item):
+            return self
+
+    class Detector:
+        def detect(self, frame: object) -> list[Detection]:
+            return [Detection(Rect(100, 100, 200, 400), 0.9)]
+
+    class Pose:
+        def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate:
+            return PoseEstimate(Point(0.5, 0.5), (), Rect(0.2, 0.1, 0.6, 0.8), 0.9)
+
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=OneFrameInspector(),
+        renderer=Renderer(),
+        frame_reader=Frames(),
+        detector=Detector(),
+        pose_estimator=Pose(),
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    (scratch / "source").write_bytes(b"source")
+
+    pipeline._crop_path(pipeline._inputs(_record(), scratch))
+
+    crop_path = scratch / "crop-path.jsonl"
+    assert crop_path.is_file()
+    crop_record = json.loads(crop_path.read_text(encoding="ascii"))
+    assert crop_record["frame_index"] == 0
+    assert crop_record["timestamp_ms"] == 0
+    assert set(crop_record["crop"]) == {"x", "y", "width", "height"}
+    assert not (scratch / "analysis-trace.jsonl").exists()
+
+
+def test_optional_semantic_trace_limit_removes_partial_file_without_blocking_crop_path(
+    tmp_path,
+) -> None:
+    observation = RawFrameObservation(0, 0, Detection(Rect(10, 20, 30, 40), 0.9), None)
+    tracked = TrackedMeasurement(
+        0, Point(25, 40), None, Rect(10, 20, 30, 40), 0.9, 1.0, TrackingState.TRACKED, 0
+    )
+    path = tmp_path / "analysis-trace.jsonl"
+
+    with pytest.raises(ValueError, match="max_bytes"):
+        ProcessingPipeline._write_analysis_trace(
+            path,
+            [observation],
+            [tracked],
+            [FrameMeasurement(Point(25, 40), None, 0.9)],
+            [CropRect(0, 0, 100, 100)],
+            max_bytes=1,
+        )
+
+    assert not path.exists()
+    assert not path.with_suffix(".tmp").exists()
+
+
+def test_semantic_trace_write_failure_does_not_block_the_crop_path(monkeypatch, tmp_path) -> None:
+    class OneFrameInspector:
+        def inspect(self, path: Path) -> MediaMetadata:
+            return MediaMetadata(1920, 1080, 1000, 1, "h264", None, 0, False)
+
+    class Frames:
+        def read(self, source: Path, metadata: MediaMetadata):
+            yield DecodedFrame(0, 0, Pixels())
+
+    class Pixels:
+        def __getitem__(self, item):
+            return self
+
+    class Detector:
+        def detect(self, frame: object) -> list[Detection]:
+            return [Detection(Rect(100, 100, 200, 400), 0.9)]
+
+    class Pose:
+        def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate:
+            return PoseEstimate(Point(0.5, 0.5), (), Rect(0.2, 0.1, 0.6, 0.8), 0.9)
+
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=OneFrameInspector(),
+        renderer=Renderer(),
+        frame_reader=Frames(),
+        detector=Detector(),
+        pose_estimator=Pose(),
+        debug_capture=True,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_write_analysis_trace",
+        lambda *args: (_ for _ in ()).throw(OSError("scratch unavailable")),
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    (scratch / "source").write_bytes(b"source")
+
+    crops = pipeline._crop_path(pipeline._inputs(_record(), scratch))
+
+    assert len(crops) == 1
+    assert (scratch / "crop-path.jsonl").is_file()
+    assert not (scratch / "analysis-trace.jsonl").exists()
 
 
 def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(tmp_path) -> None:
@@ -477,6 +587,9 @@ def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(
     )
     assert manifest["schema_version"] == 1
     assert manifest["review_id"] == str(review_id)
+    assert manifest["pipeline_version"] == "pipeline"
+    assert manifest["model_version"] == "model"
+    assert manifest["timing"] == {"duration_ms": 1000, "frame_count": 30, "frame_rate": 30.0}
     assert manifest["telemetry"] == {"status": "ready"}
     assert [phase["id"] for phase in manifest["phases"]] == [
         "measurement",
@@ -489,12 +602,9 @@ def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(
     assert manifest["phases"][0]["summary"] == {
         "detected_frames": 0,
         "frames": 0,
-        "model_version": "model",
-        "pipeline_version": "pipeline",
-        "source_duration_ms": 1000,
-        "source_frame_rate": 30.0,
         "trace_frame_count": 0,
     }
+    _assert_backend_manifest_contract(manifest)
 
 
 def test_pipeline_deletes_unlinked_debug_object_after_finalization_failure(tmp_path) -> None:
@@ -559,12 +669,18 @@ def test_review_manifest_has_ordered_api_phases_and_safe_warning_fields(tmp_path
             }
         ],
         {"measurement": {"status": "ready"}},
+        "pipeline",
+        "model",
+        MediaMetadata(160, 90, 1000, 1, "h264", None, 0, False),
     )
 
     data = json.loads(manifest.read_text())
 
     assert data["schema_version"] == 1
     assert data["review_id"] == str(review_id)
+    assert data["pipeline_version"] == "pipeline"
+    assert data["model_version"] == "model"
+    assert data["timing"] == {"duration_ms": 1000, "frame_count": 1, "frame_rate": 1.0}
     assert data["telemetry"] == {"status": "ready"}
     assert [phase["id"] for phase in data["phases"]] == [
         "measurement",
@@ -579,8 +695,6 @@ def test_review_manifest_has_ordered_api_phases_and_safe_warning_fields(tmp_path
     assert data["phases"][0]["summary"] == {
         "detected_frames": 0,
         "frames": 1,
-        "model_version": "unavailable",
-        "pipeline_version": "unavailable",
         "trace_frame_count": 1,
     }
     assert data["phases"][0]["warning_intervals"] == [
@@ -591,6 +705,7 @@ def test_review_manifest_has_ordered_api_phases_and_safe_warning_fields(tmp_path
             "detail": "No detector bounds were recorded.",
         }
     ]
+    _assert_backend_manifest_contract(data)
 
 
 def test_review_manifest_bounds_unavailable_phase_detail(tmp_path) -> None:
@@ -599,6 +714,9 @@ def test_review_manifest_bounds_unavailable_phase_detail(tmp_path) -> None:
         uuid4(),
         [],
         {"measurement": {"status": "unavailable", "detail": " reason\n" * 100}},
+        "pipeline",
+        "model",
+        MediaMetadata(160, 90, 1000, 1, "h264", None, 0, False),
     )
 
     phase = json.loads(manifest.read_text())["phases"][0]
@@ -607,3 +725,30 @@ def test_review_manifest_bounds_unavailable_phase_detail(tmp_path) -> None:
     assert len(phase["detail"]) == 80
     assert "\n" not in phase["detail"]
     assert phase["detail"].startswith("reason")
+
+
+def _assert_backend_manifest_contract(manifest: object) -> None:
+    """Mirror the strict Go parser's root v1 contract without importing Go."""
+    assert isinstance(manifest, dict)
+    assert set(manifest) == {
+        "schema_version",
+        "review_id",
+        "pipeline_version",
+        "model_version",
+        "timing",
+        "telemetry",
+        "phases",
+    }
+    assert manifest["schema_version"] == 1
+    assert isinstance(manifest["pipeline_version"], str)
+    assert isinstance(manifest["model_version"], str)
+    assert len(manifest["pipeline_version"]) <= 128
+    assert len(manifest["model_version"]) <= 128
+    assert manifest["pipeline_version"].replace("-", "").replace("_", "").replace(".", "").isalnum()
+    assert manifest["model_version"].replace("-", "").replace("_", "").replace(".", "").isalnum()
+    timing = manifest["timing"]
+    assert isinstance(timing, dict)
+    assert set(timing) == {"frame_rate", "duration_ms", "frame_count"}
+    assert isinstance(timing["frame_rate"], float | int) and 0 < timing["frame_rate"] <= 1000
+    assert isinstance(timing["duration_ms"], int) and 0 < timing["duration_ms"] <= 604_800_000
+    assert isinstance(timing["frame_count"], int) and 0 < timing["frame_count"] <= 10_000_000

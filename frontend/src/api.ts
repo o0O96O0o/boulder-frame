@@ -101,8 +101,8 @@ function isBoundedText(value: unknown, maximum: number): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum
 }
 
-function isSafeManifestText(value: unknown, maximum: number): value is string {
-  return isBoundedText(value, maximum) && !/\s|:\/\/|www\.|x-amz-|private\/debug\/|access_key|secret|token|password|authorization|credential|signature/i.test(value)
+function isVersionIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value)
 }
 
 function isSafeURL(value: unknown): value is string {
@@ -121,10 +121,10 @@ function isSummary(value: unknown): value is EvaluationPhase['summary'] {
     (typeof entry === 'string' && entry.length > 0 && entry.length <= maxEvaluationDetailCharacters || typeof entry === 'number' && Number.isFinite(entry) || typeof entry === 'boolean' || entry === null))
 }
 
-function isWarningIntervals(value: unknown): value is EvaluationWarningInterval[] {
+function isWarningIntervals(value: unknown, durationMS: number): value is EvaluationWarningInterval[] {
   if (!Array.isArray(value) || value.length > 100) return false
-  return value.every((interval) => isRecord(interval) && typeof interval.start_ms === 'number' && Number.isInteger(interval.start_ms) && interval.start_ms >= 0 &&
-    (interval.end_ms === undefined || typeof interval.end_ms === 'number' && Number.isInteger(interval.end_ms) && interval.end_ms >= interval.start_ms) &&
+  return value.every((interval) => isRecord(interval) && typeof interval.start_ms === 'number' && Number.isInteger(interval.start_ms) && interval.start_ms >= 0 && interval.start_ms <= durationMS &&
+    (interval.end_ms === undefined || typeof interval.end_ms === 'number' && Number.isInteger(interval.end_ms) && interval.end_ms >= interval.start_ms && interval.end_ms <= durationMS) &&
     isBoundedText(interval.label, 120) && (interval.detail === undefined || isBoundedText(interval.detail, maxEvaluationDetailCharacters)))
 }
 
@@ -142,13 +142,14 @@ function parseEvaluation(value: unknown): Evaluation {
     throw new ApiError('The review response was invalid. Refresh the review or try again later.', 200, 'invalid_evaluation_response')
   }
   if (!value.available) return { available: false, telemetry_download_url: value.telemetry_download_url as string | undefined, expires_in_seconds: expiresInSeconds as number | undefined }
-  if (typeof value.review_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.review_id) || !['completed', 'failed'].includes(value.state as string) || !isSafeManifestText(value.pipeline_version, 128) || !isSafeManifestText(value.model_version, 128) || !isEvaluationTiming(value.timing) || !Array.isArray(value.phases) || value.phases.length !== evaluationPhaseIDs.length) {
+  const timing = value.timing
+  if (typeof value.review_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.review_id) || !['completed', 'failed'].includes(value.state as string) || !isVersionIdentifier(value.pipeline_version) || !isVersionIdentifier(value.model_version) || !isEvaluationTiming(timing) || !Array.isArray(value.phases) || value.phases.length !== evaluationPhaseIDs.length) {
     throw new ApiError('The review response was invalid. Refresh the review or try again later.', 200, 'invalid_evaluation_response')
   }
   const phases: EvaluationPhase[] = []
   for (const [index, phase] of value.phases.entries()) {
     if (!isRecord(phase) || phase.id !== evaluationPhaseIDs[index] || phase.label !== evaluationPhaseLabels[index] || !evaluationPhaseStatuses.includes(phase.status as EvaluationPhaseStatus) ||
-      (phase.summary !== undefined && !isSummary(phase.summary)) || (phase.warning_intervals !== undefined && !isWarningIntervals(phase.warning_intervals)) ||
+      (phase.summary !== undefined && !isSummary(phase.summary)) || (phase.warning_intervals !== undefined && !isWarningIntervals(phase.warning_intervals, timing.duration_ms)) ||
       (phase.video_url !== undefined && !isSafeURL(phase.video_url)) || (phase.detail !== undefined && (!isBoundedText(phase.detail, maxEvaluationDetailCharacters) || phase.status !== 'unavailable')) ||
       (phase.status === 'unavailable' && phase.video_url !== undefined) || (phase.status !== 'unavailable' && phase.video_url === undefined)) {
       throw new ApiError('The review response was invalid. Refresh the review or try again later.', 200, 'invalid_evaluation_response')
@@ -163,7 +164,7 @@ function parseEvaluation(value: unknown): Evaluation {
       warning_intervals: phase.warning_intervals as EvaluationWarningInterval[] | undefined,
     })
   }
-  return { available: true, review_id: value.review_id, state: value.state as Evaluation['state'], pipeline_version: value.pipeline_version as string, model_version: value.model_version as string, timing: value.timing as EvaluationTiming, phases, telemetry_download_url: value.telemetry_download_url as string | undefined, expires_in_seconds: expiresInSeconds as number | undefined }
+  return { available: true, review_id: value.review_id, state: value.state as Evaluation['state'], pipeline_version: value.pipeline_version as string, model_version: value.model_version as string, timing, phases, telemetry_download_url: value.telemetry_download_url as string | undefined, expires_in_seconds: expiresInSeconds as number | undefined }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
