@@ -88,8 +88,11 @@ does not provide TLS or authentication; use it only on a trusted network.
 Run migrations explicitly against the configured external PostgreSQL database:
 
 ```sh
-docker compose run --rm backend migrate up
+./deploy/bin/migrate
 ```
+
+This applies every pending migration and records each successful file in `schema_migrations`; it is
+safe to run repeatedly. `./deploy/bin/local migrate` is an equivalent wrapper.
 
 Inspect or stop the modules:
 
@@ -101,3 +104,12 @@ docker compose down
 
 The worker scratch directory and frontend dependency cache are local Compose volumes. Source videos,
 outputs, and durable metadata remain in their configured external services.
+
+## Debug Review Troubleshooting
+
+`debug_capture` is read when the worker starts and affects only jobs processed by that worker after
+startup. It cannot add review artifacts to an already terminal job. For a job whose evaluation returns
+`{"available":false}`, first confirm that the configured worker processed that exact UUID by finding
+its `task request` and `debug review published` log records. If the latter is instead `debug review
+publish failed`, its JSON `error` field identifies the non-blocking storage or finalization failure;
+the completed output remains valid.

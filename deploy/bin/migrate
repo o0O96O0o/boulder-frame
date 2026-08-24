@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+
+if [ ! -f .env ]; then
+  printf '%s\n' "migration configuration is missing: $root/.env" >&2
+  exit 1
+fi
+
+# The backend migrator records applied files and runs every pending SQL migration atomically.
+exec docker compose --env-file .env -f docker-compose.yml run --rm backend migrate up

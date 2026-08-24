@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -190,6 +191,41 @@ def test_worker_records_all_phase_timings_before_publishing_debug_bundle(tmp_pat
         "uploading",
     ]
     assert all(record["duration_ms"] >= 0 for record in captured if "duration_ms" in record)
+
+
+def test_worker_logs_debug_publish_failure_without_failing_the_job(tmp_path: Path) -> None:
+    class LogRecords(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.records: list[logging.LogRecord] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record)
+
+    record = JobRecord(id=uuid4())
+    repository = InMemoryJobRepository([record])
+    worker = Worker(
+        WorkerConfig("test", "unconfigured", tmp_path, debug_capture=True),
+        repository,
+        worker_id="worker",
+    )
+    task = JobTask(record.id, "00000000-0000-0000-0000-000000000042")
+    logs = LogRecords()
+    worker.logger.addHandler(logs)
+
+    def failed_publish(record: JobRecord, scratch: Path) -> None:
+        del record, scratch
+        raise OSError("debug bucket is unavailable")
+
+    try:
+        assert worker.process(task, no_op, no_op, no_op, no_op, failed_publish)
+    finally:
+        worker.logger.removeHandler(logs)
+
+    warning = next(record for record in logs.records if record.msg == "debug review publish failed")
+    assert warning.job_id == str(task.job_id)
+    assert warning.exc_info is not None
+    assert repository.get(task.job_id).state is JobState.COMPLETED
 
 
 def test_worker_heartbeats_database_lease_during_a_stage(tmp_path: Path) -> None:

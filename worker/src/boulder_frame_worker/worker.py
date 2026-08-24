@@ -285,6 +285,12 @@ class Worker:
             publish_debug(record, scratch)
         except Exception:
             self.logger.warning(
-                "debug telemetry publish failed",
+                "debug review publish failed",
+                extra={"trace_id": trace_id, "job_id": str(record.id)},
+                exc_info=True,
+            )
+        else:
+            self.logger.info(
+                "debug review published",
                 extra={"trace_id": trace_id, "job_id": str(record.id)},
             )

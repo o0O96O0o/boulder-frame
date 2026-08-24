@@ -19,9 +19,11 @@ directory at the container's `MODEL_DIR`.
 Useful commands:
 
 ```sh
-docker compose run --rm backend migrate up
+./deploy/bin/migrate
 docker compose ps
 docker compose down
 ```
+
+`migrate` applies every pending SQL migration once, in filename order. It is safe to run repeatedly.
 
 Do not commit `.env`. Configure the external database, queue, and object store separately.
