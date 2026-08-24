@@ -63,6 +63,22 @@ func TestPhaseEvaluationMigrationMigratesLegacyDebugAndDefinesReviewRoles(t *tes
 	}
 }
 
+func TestDetectorOnlyReviewRoleMigrationRetiresObsoleteRoles(t *testing.T) {
+	sqlBytes, err := os.ReadFile("migrations/004_detector_only_review_roles.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(sqlBytes)
+	for _, expected := range []string{
+		"'debug_detection'", "'debug_framing'", "'debug_render'",
+		"'debug_measurement'", "'debug_pose'", "'debug_tracking'", "'debug_planning'",
+	} {
+		if !strings.Contains(contents, expected) {
+			t.Fatalf("detector-only review migration does not contain %q", expected)
+		}
+	}
+}
+
 func TestPhaseEvaluationMigrationPostgresBehavior(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -104,24 +120,26 @@ func TestPhaseEvaluationMigrationPostgresBehavior(t *testing.T) {
 	if _, err := conn.Exec(ctx, `INSERT INTO job_artifacts (id,job_id,asset_id,kind) VALUES ($1,$2,$3,'debug')`, artifactID, jobID, assetID); err != nil {
 		t.Fatal(err)
 	}
-	sqlBytes, err := os.ReadFile("migrations/003_phase_evaluation.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(ctx, string(sqlBytes)); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"003_phase_evaluation.sql", "004_detector_only_review_roles.sql"} {
+		sqlBytes, err := os.ReadFile(filepath.Join("migrations", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Exec(ctx, string(sqlBytes)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
 	}
 	var kind string
 	if err := conn.QueryRow(ctx, `SELECT kind FROM job_artifacts WHERE id=$1`, artifactID).Scan(&kind); err != nil || kind != "debug_telemetry" {
 		t.Fatalf("legacy artifact kind = %q, %v", kind, err)
 	}
-	if _, err := conn.Exec(ctx, `INSERT INTO job_artifacts (id,job_id,asset_id,kind) VALUES ($1,$2,$3,'debug_manifest')`, uuid.New(), jobID, assetID); err != nil {
-		t.Fatalf("debug_manifest should be accepted: %v", err)
+	if _, err := conn.Exec(ctx, `INSERT INTO job_artifacts (id,job_id,asset_id,kind) VALUES ($1,$2,$3,'debug_detection')`, uuid.New(), jobID, assetID); err != nil {
+		t.Fatalf("debug_detection should be accepted: %v", err)
 	}
-	if _, err := conn.Exec(ctx, `INSERT INTO job_artifacts (id,job_id,asset_id,kind) VALUES ($1,$2,$3,'debug')`, uuid.New(), jobID, assetID); err == nil {
-		t.Fatal("legacy debug role was accepted after migration")
+	if _, err := conn.Exec(ctx, `INSERT INTO job_artifacts (id,job_id,asset_id,kind) VALUES ($1,$2,$3,'debug_pose')`, uuid.New(), jobID, assetID); err == nil {
+		t.Fatal("retired pose role was accepted after migration")
 	}
-	if _, err := conn.Exec(ctx, `INSERT INTO job_artifacts (id,job_id,asset_id,kind) VALUES ($1,$2,$3,'debug_manifest')`, uuid.New(), jobID, assetID); err == nil {
+	if _, err := conn.Exec(ctx, `INSERT INTO job_artifacts (id,job_id,asset_id,kind) VALUES ($1,$2,$3,'debug_detection')`, uuid.New(), jobID, assetID); err == nil {
 		t.Fatal("duplicate review role was accepted after migration")
 	}
 }

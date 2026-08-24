@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "model_version": "w0.1-ssd-mobilenetv1-12-onnx-mediapipe-pose-full-1",
+  "model_version": "w0.2-ssd-mobilenetv1-12-onnx-detector-only-1",
   "artifacts": [
     {
       "id": "person_detector",
@@ -13,17 +13,6 @@
       "size_bytes": 29461455,
       "license": "MIT",
       "license_url": "https://github.com/onnx/models/blob/4f43949841cb55a0b98dc8fcd045431ccafd9f96/validated/vision/object_detection_segmentation/ssd-mobilenetv1/README.md#license"
-    },
-    {
-      "id": "pose_landmarker",
-      "file_name": "pose_landmarker_full.task",
-      "role": "single-person 33-landmark pose estimator",
-      "version": "Pose Landmarker Full float16, artifact version 1",
-      "source_url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
-      "sha256": "5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1",
-      "size_bytes": 9398198,
-      "license": "Apache-2.0",
-      "license_url": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20BlazePose%20GHUM%203D.pdf"
     }
   ]
 }

@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from .config import DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
@@ -17,16 +17,15 @@ from .debug import (
     serialize_frame_measurement,
     serialize_planner_trace,
     serialize_raw_frame_observation,
-    serialize_tracked_measurement,
 )
 from .errors import ErrorCode, WorkerError, terminal
 from .measurement import (
+    Detection,
     PersonDetector,
-    PoseEstimator,
     RawFrameObservation,
+    SelectionReferenceKind,
     TargetFrameAnalyzer,
     UnavailableDetector,
-    UnavailablePoseEstimator,
 )
 from .media import (
     CFRNormalizer,
@@ -51,7 +50,6 @@ from .repository import OutputAsset, ReviewArtifact, output_storage_key, review_
 from .review import PHASES, ReviewRenderer
 from .state import JobConfiguration, JobRecord, SourceAsset
 from .storage import S3Storage
-from .tracking import SingleTargetTracker, TargetTracker, TrackedMeasurement, TrackingState
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,8 +112,6 @@ class ProcessingPipeline:
         normalizer: CFRNormalizer | None = None,
         frame_reader: FrameReader | None = None,
         detector: PersonDetector | None = None,
-        pose_estimator: PoseEstimator | None = None,
-        tracker: TargetTracker | None = None,
         planner_factory: PlannerFactory = DeterministicCropPlanner,
         debug_capture: bool = False,
         debug_max_frames: int = 10_000,
@@ -129,10 +125,7 @@ class ProcessingPipeline:
         self.renderer = renderer
         self.normalizer = normalizer or FFmpegCFRNormalizer()
         self.frame_reader = frame_reader or UnavailableFrameReader()
-        self.analyzer = TargetFrameAnalyzer(
-            detector or UnavailableDetector(), pose_estimator or UnavailablePoseEstimator()
-        )
-        self.tracker = tracker or SingleTargetTracker()
+        self.analyzer = TargetFrameAnalyzer(detector or UnavailableDetector())
         self.planner_factory = planner_factory
         self.debug_capture = debug_capture
         self.debug_max_frames = debug_max_frames
@@ -423,8 +416,9 @@ class ProcessingPipeline:
         expected = expected_frame_count(inputs.metadata)
         width, height = inputs.metadata.display_dimensions
         selected_index = inputs.metadata.frame_for_time_ms(inputs.selection.frame_time_ms)
-        normalized_x, normalized_y = inputs.selection.normalized_x, inputs.selection.normalized_y
-        observations = []
+        tap_normalized_x = inputs.selection.normalized_x
+        tap_normalized_y = inputs.selection.normalized_y
+        detections: list[tuple[Detection, ...]] = []
         frames = iter(self.frame_reader.read(inputs.source, inputs.metadata))
         try:
             for index, frame in enumerate(frames):
@@ -436,60 +430,52 @@ class ProcessingPipeline:
                     raise terminal(
                         ErrorCode.INVALID_MEDIA, "Video frames could not be analyzed consistently."
                     )
-                if frame.index == selected_index:
-                    observation = self.analyzer.observe_selected(
-                        frame.pixels,
-                        frame_index=frame.index,
-                        timestamp_ms=frame.timestamp_ms,
-                        normalized_x=normalized_x,
-                        normalized_y=normalized_y,
-                        source_width=width,
-                        source_height=height,
-                    )
-                else:
-                    observation = self.analyzer.observe(
-                        frame.pixels,
-                        frame_index=frame.index,
-                        timestamp_ms=frame.timestamp_ms,
-                        normalized_x=normalized_x,
-                        normalized_y=normalized_y,
-                        source_width=width,
-                        source_height=height,
-                    )
-                if observation.root is not None:
-                    root = observation.root
-                    normalized_x, normalized_y = root.x / width, root.y / height
-                observations.append(observation)
+                detections.append(tuple(self.analyzer.detector.detect(frame.pixels)))
                 del frame
         finally:
             close = getattr(frames, "close", None)
             if callable(close):
                 close()
-        if len(observations) != expected:
+        if len(detections) != expected:
             raise terminal(
                 ErrorCode.INVALID_MEDIA, "Video frames could not be analyzed consistently."
             )
-        tracked = self.tracker.track(observations)
-        planner_measurements = _planner_measurements(tracked)
+        observations: list[RawFrameObservation | None] = [None] * expected
+        observations[selected_index] = self.analyzer.select_selected(
+            detections[selected_index],
+            frame_index=selected_index,
+            timestamp_ms=inputs.metadata.timestamp_for_frame(selected_index),
+            normalized_x=tap_normalized_x,
+            normalized_y=tap_normalized_y,
+            source_width=width,
+            source_height=height,
+            capture_association_evidence=self.debug_capture,
+        )
+        self._associate_from_selected(observations, detections, selected_index, 1, inputs.metadata)
+        self._associate_from_selected(observations, detections, selected_index, -1, inputs.metadata)
+        finalized_observations = [
+            observation for observation in observations if observation is not None
+        ]
+        if len(finalized_observations) != expected:
+            raise terminal(
+                ErrorCode.INVALID_MEDIA, "Video frames could not be analyzed consistently."
+            )
+        planner_measurements = _planner_measurements(finalized_observations)
         plan = self.planner_factory(
             width, height, inputs.output_settings.aspect_ratio, inputs.output_settings.profile
         ).plan(planner_measurements)
         self._write_crop_path(
             crop_path,
-            observations,
+            finalized_observations,
             plan,
         )
         if self.debug_capture:
             try:
                 self._write_analysis_trace(
                     inputs.source.parent / _ANALYSIS_TRACE,
-                    observations,
-                    tracked,
+                    finalized_observations,
                     planner_measurements,
                     plan,
-                    inputs.selection,
-                    width,
-                    height,
                     self.debug_max_frames,
                     self.debug_max_bytes,
                 )
@@ -497,6 +483,32 @@ class ProcessingPipeline:
                 # Semantic evidence is optional; the crop path remains sufficient to render output.
                 (inputs.source.parent / _ANALYSIS_TRACE).unlink(missing_ok=True)
         return list(plan)
+
+    def _associate_from_selected(
+        self,
+        observations: list[RawFrameObservation | None],
+        detections: Sequence[Sequence[Detection]],
+        selected_index: int,
+        direction: int,
+        metadata: MediaMetadata,
+    ) -> None:
+        selected = observations[selected_index]
+        assert selected is not None and selected.detector_bounds is not None
+        reference_bounds = selected.detector_bounds
+        stop = len(detections) if direction > 0 else -1
+        for index in range(selected_index + direction, stop, direction):
+            observation = self.analyzer.associate(
+                detections[index],
+                frame_index=index,
+                timestamp_ms=metadata.timestamp_for_frame(index),
+                reference=reference_bounds.center,
+                reference_kind=SelectionReferenceKind.PRIOR_DETECTOR_BOX_CENTER,
+                reference_bounds=reference_bounds,
+                capture_association_evidence=self.debug_capture,
+            )
+            observations[index] = observation
+            if observation.detector_bounds is not None:
+                reference_bounds = observation.detector_bounds
 
     @staticmethod
     def _write_crop_path(
@@ -533,18 +545,14 @@ class ProcessingPipeline:
     def _write_analysis_trace(
         path: Path,
         observations: Sequence[RawFrameObservation],
-        tracked: Sequence[TrackedMeasurement],
         measurements: Sequence[FrameMeasurement],
         plan: CropPlan | Sequence[CropRect],
-        selection: TargetSelection | None = None,
-        source_width: int | None = None,
-        source_height: int | None = None,
         max_frames: int = 10_000,
         max_bytes: int = 50 * 1024 * 1024,
     ) -> None:
         crops = plan.crops if isinstance(plan, CropPlan) else tuple(plan)
         trace = plan.trace if isinstance(plan, CropPlan) else (None,) * len(crops)
-        if not (len(observations) == len(tracked) == len(measurements) == len(crops) == len(trace)):
+        if not (len(observations) == len(measurements) == len(crops) == len(trace)):
             raise ValueError("debug analysis records must have matching frame counts")
         if len(observations) > max_frames:
             raise ValueError("debug analysis records exceed max_frames")
@@ -552,26 +560,18 @@ class ProcessingPipeline:
         temporary.unlink(missing_ok=True)
         try:
             with temporary.open("w", encoding="ascii") as destination:
-                for observation, tracked_measurement, measurement, crop, planner_trace in zip(
-                    observations, tracked, measurements, crops, trace, strict=True
+                for observation, measurement, crop, planner_trace in zip(
+                    observations, measurements, crops, trace, strict=True
                 ):
                     record = {
                         "record_type": "frame",
                         "schema_version": 1,
                         "frame_index": observation.frame_index,
                         "timestamp_ms": observation.timestamp_ms,
-                        "measurement": {
+                        "detection": {
                             **serialize_raw_frame_observation(observation),
-                            "selection": _selection_trace(
-                                observation,
-                                tracked_measurement,
-                                selection,
-                                source_width,
-                                source_height,
-                            ),
                         },
-                        "tracking": serialize_tracked_measurement(tracked_measurement),
-                        "planning": {
+                        "framing": {
                             "input": serialize_frame_measurement(measurement),
                             "crop": serialize_crop_rect(crop),
                             **_planner_decision(planner_trace),
@@ -691,38 +691,11 @@ def _output_settings(configuration: JobConfiguration) -> OutputSettings:
         ) from error
 
 
-def _planner_measurements(tracked: Sequence[TrackedMeasurement]) -> list[FrameMeasurement]:
-    result: list[FrameMeasurement] = []
-    prior_root = None
-    prior_timestamp = None
-    for measurement in tracked:
-        velocity = _velocity(prior_root, prior_timestamp, measurement)
-        result.append(
-            FrameMeasurement(
-                root=measurement.root,
-                bounds=measurement.pose_bounds,
-                detector_bounds=measurement.detector_bounds,
-                confidence=measurement.confidence,
-                covariance=measurement.covariance,
-                velocity=velocity,
-                lost=measurement.state is TrackingState.LOST,
-            )
-        )
-        if measurement.root is not None:
-            prior_root, prior_timestamp = measurement.root, measurement.timestamp_ms
-    return result
-
-
-def _velocity(prior_root: object, prior_timestamp: int | None, measurement: TrackedMeasurement):
-    from .measurement import Point
-
-    if prior_root is None or prior_timestamp is None or measurement.root is None:
-        return Point(0, 0)
-    elapsed = (measurement.timestamp_ms - prior_timestamp) / 1000
-    if elapsed <= 0:
-        return Point(0, 0)
-    root = cast(Point, prior_root)
-    return Point((measurement.root.x - root.x) / elapsed, (measurement.root.y - root.y) / elapsed)
+def _planner_measurements(observations: Sequence[RawFrameObservation]) -> list[FrameMeasurement]:
+    return [
+        FrameMeasurement(observation.detector_bounds, observation.confidence)
+        for observation in observations
+    ]
 
 
 def _sha256(path: Path) -> str:
@@ -782,30 +755,6 @@ def _planner_decision(trace: PlannerFrameTrace | None) -> dict[str, object]:
     return {} if trace is None else {"decision": serialize_planner_trace(trace)}
 
 
-def _selection_trace(
-    observation: RawFrameObservation,
-    tracked: TrackedMeasurement,
-    selection: TargetSelection | None,
-    source_width: int | None,
-    source_height: int | None,
-) -> dict[str, object]:
-    if observation.detection is None:
-        return {"selected": False, "state": "unavailable"}
-    outcome = str(observation.selection_outcome or "")
-    state = (
-        "tap_match"
-        if outcome.startswith("selected_")
-        else ("reacquired" if tracked.reacquired else "continued")
-    )
-    result: dict[str, object] = {"selected": True, "state": state}
-    if state == "tap_match" and selection is not None and source_width and source_height:
-        result["marker"] = {
-            "x": selection.normalized_x * source_width,
-            "y": selection.normalized_y * source_height,
-        }
-    return result
-
-
 def _review_unavailable_detail(value: object) -> str:
     if not isinstance(value, str):
         return "unavailable"
@@ -841,30 +790,39 @@ def _manifest_timing(metadata: MediaMetadata | None) -> dict[str, object]:
 
 
 def _review_summary(trace: Sequence[Mapping[str, object]], phase: str) -> dict[str, object]:
-    if phase == "measurement":
+    if phase == "detection":
         detected = sum(
-            _mapping(_mapping(record.get("measurement")).get("detection")).get("bounds") is not None
+            _mapping(_mapping(record.get("detection")).get("detection")).get("bounds") is not None
             for record in trace
         )
         return {"frames": len(trace), "detected_frames": detected}
-    if phase == "pose":
-        posed = sum(
-            _mapping(_mapping(record.get("measurement")).get("pose")).get("root") is not None
-            for record in trace
-        )
-        return {"frames": len(trace), "pose_root_frames": posed}
-    if phase == "tracking":
-        reacquired = sum(
-            bool(_mapping(record.get("tracking")).get("reacquired")) for record in trace
-        )
-        lost = sum(_mapping(record.get("tracking")).get("state") == "lost" for record in trace)
-        return {"frames": len(trace), "lost_frames": lost, "reacquisitions": reacquired}
-    if phase == "planning":
+    if phase == "framing":
         risks = sum(
-            bool(_mapping(_mapping(record.get("planning")).get("decision")).get("containment_risk"))
+            bool(
+                _mapping(_mapping(record.get("framing")).get("decision")).get(
+                    "containment_override"
+                )
+            )
             for record in trace
         )
-        return {"frames": len(trace), "containment_risk_frames": risks}
+        misses = sum(
+            bool(_mapping(_mapping(record.get("framing")).get("decision")).get("detection_missed"))
+            for record in trace
+        )
+        limited = sum(
+            bool(
+                _mapping(_mapping(record.get("framing")).get("decision")).get(
+                    "source_aspect_limited"
+                )
+            )
+            for record in trace
+        )
+        return {
+            "frames": len(trace),
+            "containment_override_frames": risks,
+            "missed_frames": misses,
+            "source_aspect_limited_frames": limited,
+        }
     verified = sum(
         bool(_mapping(record.get("render")).get("mapping_independently_verified"))
         for record in trace
@@ -876,21 +834,20 @@ def _review_warning_intervals(
     trace: Sequence[Mapping[str, object]], phase: str
 ) -> list[dict[str, object]]:
     def warning(record: Mapping[str, object]) -> tuple[str, str] | None:
-        measurement = _mapping(record.get("measurement"))
-        if phase == "measurement" and _mapping(measurement.get("detection")).get("bounds") is None:
+        detection = _mapping(record.get("detection"))
+        if phase == "detection" and _mapping(detection.get("detection")).get("bounds") is None:
             return "Detection unavailable", "No detector bounds were recorded."
-        if phase == "pose" and _mapping(measurement.get("pose")).get("root") is None:
-            return "Pose unavailable", "No pose root was recorded."
-        if phase == "tracking":
-            tracking = _mapping(record.get("tracking"))
-            if tracking.get("state") == "lost":
-                return "Tracking lost", "Tracker state was lost."
-            if tracking.get("reacquired") is True:
-                return "Reacquired", "Tracker reacquired the selected athlete."
-        if phase == "planning" and bool(
-            _mapping(_mapping(record.get("planning")).get("decision")).get("containment_risk")
+        if phase == "framing" and bool(
+            _mapping(_mapping(record.get("framing")).get("decision")).get("detection_missed")
         ):
-            return "Containment risk", "Planner recorded containment risk."
+            return "Detection missed", "Crop widened without extrapolating athlete position."
+        if phase == "framing" and bool(
+            _mapping(_mapping(record.get("framing")).get("decision")).get("source_aspect_limited")
+        ):
+            return (
+                "Source/aspect limited",
+                "The largest valid crop cannot contain this detector box.",
+            )
         return None
 
     intervals: list[dict[str, object]] = []

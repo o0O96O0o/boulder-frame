@@ -79,9 +79,11 @@ the PostgreSQL job row remains the source of truth if the stream and database te
 
 `MODEL_VERSION=unset-until-pinned` in the local environment is normalized to `unconfigured` by both
 services. That intentional safe state starts the worker and lets a matching job reach terminal
-`model_unavailable`. The W0.1 baseline starts only after its configured local artifacts and decoder
+`model_unavailable`. The W0.2 detector runtime starts only after its configured artifact and decoder
 dependencies verify/load; missing or invalid configured artifacts prevent consumption by failing worker
-startup. A provisioned baseline can process only jobs whose immutable model version matches it.
+startup. A provisioned runtime can process only jobs whose immutable model version matches it. Existing
+W0.1 jobs fail model-version compatibility and users must create a new W0.2 job; retrying them cannot
+succeed.
 
 ## Retry and Idempotency Rules
 

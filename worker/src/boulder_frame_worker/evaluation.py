@@ -2,10 +2,10 @@
 
 Version 1 consumes the canonical writer's gzip JSON Lines records: a
 ``debug_bundle_header`` header followed by ``frame`` records. A frame contains
-``measurement`` (``detection``, ``pose``, ``selection``), ``tracking``,
-``planning`` (``input``, ``crop``), and ``render`` (``crop``, ``timestamp_ms``).
-Ground truth remains a separate, human-reviewed JSON document; neither format
-permits raw image or video payloads.
+``detection`` (current detector box and association evidence), ``framing``
+(detector input and crop), and ``render`` (crop and timestamp). Ground truth
+remains a separate, human-reviewed JSON document; neither format permits raw
+image or video payloads.
 """
 
 from __future__ import annotations
@@ -31,10 +31,9 @@ class EvaluationValidationError(ValueError):
 
 
 class FailureClass(StrEnum):
-    MEASUREMENT = "measurement"
+    DETECTION = "detection"
     SELECTION = "selection"
-    TRACKING = "tracking"
-    PLANNING = "planning"
+    FRAMING = "framing"
     RENDER_MAPPING = "render_mapping"
     INSUFFICIENT_ANNOTATION = "insufficient_annotation"
 
@@ -109,13 +108,11 @@ class DebugFrame:
     timestamp_ms: int
     detection: Rect | None
     selected: bool | None
-    pose_root: Point | None
-    tracker_root: Point | None
-    tracker_state: str | None
     crop: Rect | None
     rendered_crop: Rect | None
     rendered_timestamp_ms: int | None
     render_mapping_independently_verified: bool = False
+    source_aspect_limited: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,14 +158,8 @@ class FrameMetrics:
     detection_available: bool | None
     detection_iou: float | None
     selection_correct: bool | None
-    pose_available: bool | None
-    pose_root_error: float | None
-    tracker_available: bool | None
-    tracker_root_error: float | None
-    tracking_recovery_ms: int | None
     crop_contains_subject: bool | None
-    cropped_landmarks: int | None
-    visible_landmarks: int | None
+    source_aspect_limited: bool | None
     edge_risk: bool | None
     subject_scale: float | None
     pan_velocity: float | None
@@ -316,12 +307,11 @@ def evaluate(bundle: DebugBundle, annotations: AnnotationSet) -> EvaluationRepor
         raise EvaluationValidationError("debug and annotation source metadata do not match")
     annotation_by_index = {frame.frame_index: frame for frame in annotations.frames}
     motion = _motion_metrics(bundle.frames, bundle.header.source)
-    recovery = _recovery_times(bundle.frames, annotation_by_index)
     frames: list[FrameMetrics] = []
     for debug in bundle.frames:
         annotation = annotation_by_index.get(debug.frame_index)
         values = _frame_metrics(
-            debug, annotation, motion.get(debug.frame_index), recovery.get(debug.frame_index)
+            debug, annotation, motion.get(debug.frame_index)
         )
         frames.append(values)
     recorded_indices = {frame.frame_index for frame in bundle.frames}
@@ -338,10 +328,7 @@ def evaluate(bundle: DebugBundle, annotations: AnnotationSet) -> EvaluationRepor
                         None,
                         None,
                         None,
-                        None,
-                        None,
                     ),
-                    None,
                     None,
                     FailureClass.INSUFFICIENT_ANNOTATION,
                 )
@@ -385,26 +372,21 @@ def _debug_frame(record: object) -> DebugFrame:
     if data.get("record_type") != "frame":
         raise EvaluationValidationError("debug records after header must be frames")
     _schema_version(data, "debug frame")
-    measurement = _required_mapping(data, "measurement")
-    tracking = _required_mapping(data, "tracking")
-    planning = _required_mapping(data, "planning")
+    detection_section = _required_mapping(data, "detection")
+    framing = _required_mapping(data, "framing")
     render = _required_mapping(data, "render")
-    _require_keys(measurement, "measurement", "detection", "pose", "selection")
-    _require_keys(tracking, "tracking", "root", "state")
-    _require_keys(planning, "planning", "input", "crop")
+    _require_keys(detection_section, "detection", "detection")
+    _require_keys(framing, "framing", "input", "crop")
     _require_keys(render, "render", "crop", "timestamp_ms")
-    detection = _nested_rect(measurement, "detection")
-    pose = _optional_mapping(measurement.get("pose"), "pose")
-    selection = _optional_mapping(measurement.get("selection"), "selection")
+    detection = _nested_rect(detection_section, "detection")
+    selection = _optional_mapping(detection_section.get("selection"), "selection")
+    decision = _optional_mapping(framing.get("decision"), "framing.decision")
     return DebugFrame(
         _non_negative_int(data.get("frame_index"), "frame_index"),
         _non_negative_int(data.get("timestamp_ms"), "timestamp_ms"),
         detection,
         None if selection is None else _boolean(selection.get("selected"), "selection.selected"),
-        None if pose is None else _point(pose.get("root"), "pose.root"),
-        None if tracking.get("root") is None else _point(tracking.get("root"), "tracking.root"),
-        None if tracking.get("state") is None else _string(tracking.get("state"), "tracking.state"),
-        None if planning.get("crop") is None else _rect(planning.get("crop"), "planning.crop"),
+        None if framing.get("crop") is None else _rect(framing.get("crop"), "framing.crop"),
         None if render.get("crop") is None else _rect(render.get("crop"), "render.crop"),
         None
         if render.get("timestamp_ms") is None
@@ -412,6 +394,11 @@ def _debug_frame(record: object) -> DebugFrame:
         _boolean(
             render.get("mapping_independently_verified", False),
             "render.mapping_independently_verified",
+        ),
+        False
+        if decision is None
+        else _boolean(
+            decision.get("source_aspect_limited", False), "framing.source_aspect_limited"
         ),
     )
 
@@ -457,12 +444,11 @@ def _frame_metrics(
         float | None, float | None, float | None, float | None, float | None, float | None
     ]
     | None,
-    recovery_ms: int | None,
 ) -> FrameMetrics:
     if annotation is None or annotation.ambiguous:
-        return _empty_metrics(debug, motion, recovery_ms, FailureClass.INSUFFICIENT_ANNOTATION)
+        return _empty_metrics(debug, motion, FailureClass.INSUFFICIENT_ANNOTATION)
     if not annotation.visible or annotation.bounds is None:
-        return _empty_metrics(debug, motion, recovery_ms, None)
+        return _empty_metrics(debug, motion, None)
     detection_iou = None if debug.detection is None else _iou(debug.detection, annotation.bounds)
     detection_available = debug.detection is not None
     selected = detection_available if debug.selected is None else debug.selected
@@ -471,25 +457,15 @@ def _frame_metrics(
         if not detection_available
         else selected and detection_iou is not None and detection_iou >= SELECTION_IOU_THRESHOLD
     )
-    pose_error = _distance(debug.pose_root, annotation.root)
-    tracker_error = _distance(debug.tracker_root, annotation.root)
-    tracker_available = debug.tracker_root is not None and debug.tracker_state != "lost"
     crop = debug.crop
     contained = None if crop is None else crop.contains_rect(annotation.bounds)
-    cropped_landmarks = (
-        None
-        if crop is None
-        else sum(not crop.contains_point(point) for point in annotation.landmarks)
-    )
     edge_risk = None if crop is None else _edge_risk(crop, annotation.bounds)
     scale = None if crop is None else annotation.bounds.area / crop.area
     failure = _failure(
         annotation,
         detection_available,
         selection_correct,
-        tracker_available,
         contained,
-        cropped_landmarks,
         debug,
     )
     pan_v, pan_a, pan_j, zoom_v, zoom_a, zoom_j = motion or (None,) * 6
@@ -499,14 +475,8 @@ def _frame_metrics(
         detection_available,
         detection_iou,
         selection_correct,
-        debug.pose_root is not None,
-        pose_error,
-        tracker_available,
-        tracker_error,
-        recovery_ms,
         contained,
-        cropped_landmarks,
-        len(annotation.landmarks),
+        debug.source_aspect_limited,
         edge_risk,
         scale,
         pan_v,
@@ -525,7 +495,6 @@ def _empty_metrics(
         float | None, float | None, float | None, float | None, float | None, float | None
     ]
     | None,
-    recovery_ms: int | None,
     failure: FailureClass | None,
 ) -> FrameMetrics:
     pan_v, pan_a, pan_j, zoom_v, zoom_a, zoom_j = motion or (None,) * 6
@@ -536,13 +505,7 @@ def _empty_metrics(
         None,
         None,
         None,
-        None,
-        debug.tracker_root is not None and debug.tracker_state != "lost",
-        None,
-        recovery_ms,
-        None,
-        None,
-        None,
+        debug.source_aspect_limited,
         None,
         None,
         pan_v,
@@ -559,19 +522,15 @@ def _failure(
     annotation: AnnotationFrame,
     detection_available: bool,
     selection_correct: bool | None,
-    tracker_available: bool,
     contained: bool | None,
-    cropped_landmarks: int | None,
     debug: DebugFrame,
 ) -> FailureClass | None:
     if not detection_available:
-        return FailureClass.MEASUREMENT
+        return FailureClass.DETECTION
     if selection_correct is False:
         return FailureClass.SELECTION
-    if not tracker_available:
-        return FailureClass.TRACKING
-    if contained is False or (cropped_landmarks is not None and cropped_landmarks > 0):
-        return FailureClass.PLANNING
+    if contained is False:
+        return FailureClass.FRAMING
     if debug.render_mapping_independently_verified and (
         (
             debug.rendered_crop is not None
@@ -643,23 +602,6 @@ def _motion_metrics(
     return result
 
 
-def _recovery_times(
-    frames: Sequence[DebugFrame], annotations: Mapping[int, AnnotationFrame]
-) -> dict[int, int]:
-    result: dict[int, int] = {}
-    loss_started_at: int | None = None
-    for frame in frames:
-        annotation = annotations.get(frame.frame_index)
-        visible = annotation is not None and annotation.visible and not annotation.ambiguous
-        unavailable = frame.tracker_root is None or frame.tracker_state == "lost"
-        if visible and unavailable and loss_started_at is None:
-            loss_started_at = frame.timestamp_ms
-        elif visible and not unavailable and loss_started_at is not None:
-            result[frame.frame_index] = frame.timestamp_ms - loss_started_at
-            loss_started_at = None
-    return result
-
-
 def _aggregate(frames: Iterable[FrameMetrics]) -> dict[str, float | int | None]:
     values = tuple(frames)
     visible = tuple(frame for frame in values if frame.detection_available is not None)
@@ -675,20 +617,11 @@ def _aggregate(frames: Iterable[FrameMetrics]) -> dict[str, float | int | None]:
         "mean_detection_iou": _mean(frame.detection_iou for frame in visible),
         "selection_precision": _rate(true_positives, true_positives + false_positives),
         "selection_recall": _rate(true_positives, true_positives + false_negatives),
-        "pose_availability": _rate(
-            sum(frame.pose_available is True for frame in visible), len(visible)
-        ),
-        "mean_pose_root_error": _mean(frame.pose_root_error for frame in visible),
-        "tracker_availability": _rate(
-            sum(frame.tracker_available is True for frame in visible), len(visible)
-        ),
-        "mean_tracker_root_error": _mean(frame.tracker_root_error for frame in visible),
-        "mean_tracking_recovery_ms": _mean(frame.tracking_recovery_ms for frame in values),
         "crop_containment": _rate(
             sum(frame.crop_contains_subject is True for frame in visible), len(visible)
         ),
-        "limb_crop_rate": _rate(
-            sum((frame.cropped_landmarks or 0) > 0 for frame in visible), len(visible)
+        "source_aspect_limited_rate": _rate(
+            sum(frame.source_aspect_limited is True for frame in visible), len(visible)
         ),
         "edge_risk_rate": _rate(sum(frame.edge_risk is True for frame in visible), len(visible)),
         "mean_subject_scale": _mean(frame.subject_scale for frame in visible),

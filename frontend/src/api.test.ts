@@ -36,8 +36,7 @@ describe('API client contract', () => {
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/jobs/job-1/evaluation', expect.any(Object))
     expect(evaluation.phases?.[0].video_url).toBe(signedURL)
-    expect(evaluation.phases?.[1].warning_intervals).toEqual([{ start_ms: 4200, end_ms: 5900, label: 'Low confidence', detail: 'Pose landmarks were intermittently unavailable.' }])
-    expect(evaluation.phases?.[2].warning_intervals).toEqual([{ start_ms: 8600, label: 'Reacquired', detail: 'Tracking resumed after a brief occlusion.' }])
+    expect(evaluation.phases?.[1].warning_intervals).toEqual([{ start_ms: 4200, end_ms: 5900, label: 'Detection missed', detail: 'The crop widened toward the full frame.' }])
     expect(evaluation.expires_in_seconds).toBe(900)
     expect(info.mock.calls.flat().join(' ')).not.toContain(signedURL)
   })
@@ -45,8 +44,8 @@ describe('API client contract', () => {
     const first = 'https://storage.test/first.mp4?signature=old'
     const fresh = 'https://storage.test/second.mp4?signature=fresh'
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'measurement' ? { ...phase, video_url: first } : phase) }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'measurement' ? { ...phase, video_url: fresh } : phase) }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'detection' ? { ...phase, video_url: first } : phase) }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'detection' ? { ...phase, video_url: fresh } : phase) }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
     await api.getEvaluation('job-1')
@@ -64,22 +63,22 @@ describe('API client contract', () => {
   it('accepts warning interval boundaries at the source duration', async () => {
     const response = {
       ...evaluationResponseFixture,
-      phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'pose' ? { ...phase, warning_intervals: [{ start_ms: 12000, end_ms: 12000, label: 'At source end' }] } : phase),
+      phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'framing' ? { ...phase, warning_intervals: [{ start_ms: 12000, end_ms: 12000, label: 'At source end' }] } : phase),
     }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(response), { status: 200 })))
 
-    await expect(api.getEvaluation('job-1')).resolves.toMatchObject({ phases: expect.arrayContaining([expect.objectContaining({ id: 'pose', warning_intervals: [{ start_ms: 12000, end_ms: 12000, label: 'At source end' }] })]) })
+    await expect(api.getEvaluation('job-1')).resolves.toMatchObject({ phases: expect.arrayContaining([expect.objectContaining({ id: 'framing', warning_intervals: [{ start_ms: 12000, end_ms: 12000, label: 'At source end' }] })]) })
   })
   it.each([
     ['missing phases', { available: true, review_id: 'review-1', state: 'completed' }],
     ['out-of-order phase', { ...evaluationResponseFixture, phases: [...evaluationResponseFixture.phases!].reverse() }],
     ['ready phase without media', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'render' ? { ...phase, video_url: undefined } : phase) }],
-    ['unavailable phase URL', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'planning' ? { ...phase, video_url: 'https://storage.test/review/planning.mp4?signature=private' } : phase) }],
+    ['unavailable phase URL', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'framing' ? { ...phase, status: 'unavailable', video_url: 'https://storage.test/review/framing.mp4?signature=private' } : phase) }],
     ['missing manifest timing', { ...evaluationResponseFixture, timing: undefined }],
     ['unsafe model version', { ...evaluationResponseFixture, model_version: 'https://storage.test/model?signature=private' }],
-    ['oversized phase detail', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'planning' ? { ...phase, detail: 'x'.repeat(501) } : phase) }],
-    ['warning start beyond source duration', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'pose' ? { ...phase, warning_intervals: [{ start_ms: 12001, label: 'Beyond source end' }] } : phase) }],
-    ['warning end beyond source duration', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'pose' ? { ...phase, warning_intervals: [{ start_ms: 12000, end_ms: 12001, label: 'Beyond source end' }] } : phase) }],
+    ['oversized phase detail', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'framing' ? { ...phase, status: 'unavailable', video_url: undefined, detail: 'x'.repeat(501) } : phase) }],
+    ['warning start beyond source duration', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'framing' ? { ...phase, warning_intervals: [{ start_ms: 12001, label: 'Beyond source end' }] } : phase) }],
+    ['warning end beyond source duration', { ...evaluationResponseFixture, phases: evaluationResponseFixture.phases!.map((phase) => phase.id === 'framing' ? { ...phase, warning_intervals: [{ start_ms: 12000, end_ms: 12001, label: 'Beyond source end' }] } : phase) }],
   ])('rejects malformed evaluation payloads: %s without logging signed URLs', async (_, response) => {
     const signedURL = 'https://storage.test/review/render.mp4?signature=private'
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)

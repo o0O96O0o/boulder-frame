@@ -82,10 +82,8 @@ class ReviewArtifact:
         if self.role not in {
             "debug_telemetry",
             "debug_manifest",
-            "debug_measurement",
-            "debug_pose",
-            "debug_tracking",
-            "debug_planning",
+            "debug_detection",
+            "debug_framing",
             "debug_render",
         }:
             raise DebugNotValidatedError("review artifact role is unsupported")
@@ -517,8 +515,8 @@ WITH owned_job AS (
   DELETE FROM job_artifacts
   WHERE job_id = (SELECT id FROM owned_job)
     AND kind IN (
-      'debug_telemetry', 'debug_manifest', 'debug_measurement', 'debug_pose',
-      'debug_tracking', 'debug_planning', 'debug_render'
+      'debug_telemetry', 'debug_manifest', 'debug_detection', 'debug_framing',
+      'debug_render'
     )
     AND kind NOT IN (SELECT role FROM artifact_input)
 )

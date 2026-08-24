@@ -34,7 +34,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "ffmpeg": shutil.which(config.ffmpeg_bin) is not None,
         "ffprobe": shutil.which(config.ffprobe_bin) is not None,
         "detector": False,
-        "pose_estimator": False,
         "queue_adapter": False,
         "database_adapter": False,
         "storage_adapter": False,

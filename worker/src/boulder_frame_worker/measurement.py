@@ -1,10 +1,11 @@
-"""Deterministic interfaces for target association and pose-coordinate transforms."""
+"""Detector-only target association in decoded source-pixel coordinates."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from math import hypot
 from typing import Protocol
 
 from .errors import ErrorCode, terminal
@@ -46,86 +47,114 @@ class Detection:
 
 
 class SelectionOutcome(StrEnum):
-    """How a detector candidate was associated with the requested athlete."""
-
     SELECTED_CONTAINING_TAP = "selected_containing_tap"
     SELECTED_NEAREST_TAP = "selected_nearest_tap"
-    TRACKED_CONTAINING_REFERENCE = "tracked_containing_reference"
-    TRACKED_NEAREST_REFERENCE = "tracked_nearest_reference"
+    ASSOCIATED_CONTAINING_REFERENCE = "associated_containing_reference"
+    ASSOCIATED_NEAREST_REFERENCE = "associated_nearest_reference"
     NO_DETECTIONS = "no_detections"
+    NO_ACCEPTED_CANDIDATE = "no_accepted_candidate"
+
+
+class SelectionReferenceKind(StrEnum):
+    TAP = "tap"
+    PRIOR_DETECTOR_BOX_CENTER = "prior_detector_box_center"
+
+
+class SelectionStrategy(StrEnum):
+    CONTAINING_REFERENCE_THEN_NEAREST_CENTER = "containing_reference_then_nearest_center"
+
+
+MAX_ASSOCIATION_CANDIDATES = 32
+# A candidate center may move by at most 1.5 times the last accepted detector-box diagonal.
+# This makes the gate independent of source resolution without allowing a large, distant
+# candidate to loosen the gate or extrapolating a target position.
+MAX_ASSOCIATION_CENTER_DISTANCE_DIAGONALS = 1.5
 
 
 @dataclass(frozen=True, slots=True)
-class PoseMeasurement:
-    """A pose expressed in decoded source-pixel coordinates."""
+class DetectionCandidate:
+    original_index: int
+    detection: Detection
+    contains_reference: bool
+    center_distance: float
+    selected: bool
 
-    root: Point
-    landmarks: tuple[Point, ...]
-    bounds: Rect
-    confidence: float
+    def __post_init__(self) -> None:
+        if self.original_index < 0 or self.center_distance < 0:
+            raise ValueError("candidate index and center distance must not be negative")
 
 
 @dataclass(frozen=True, slots=True)
-class PoseEstimate:
-    """A pose model result expressed as normalized coordinates within its input ROI."""
+class AssociationEvidence:
+    """Bounded evidence for deterministic detector-box association."""
 
-    root: Point
-    landmarks: tuple[Point, ...]
-    bounds: Rect
-    confidence: float
+    reference: Point
+    reference_kind: SelectionReferenceKind
+    strategy: SelectionStrategy
+    outcome: SelectionOutcome
+    candidate_count: int
+    candidates: tuple[DetectionCandidate, ...]
+    candidates_truncated: bool
+
+    def __post_init__(self) -> None:
+        if self.candidate_count < 0 or len(self.candidates) > MAX_ASSOCIATION_CANDIDATES:
+            raise ValueError("association candidate count is invalid")
+        if self.candidate_count < len(self.candidates):
+            raise ValueError("association candidate count is smaller than retained candidates")
+        if self.candidates_truncated != (self.candidate_count > len(self.candidates)):
+            raise ValueError("association candidate truncation state is invalid")
+        indexes = [candidate.original_index for candidate in self.candidates]
+        if indexes != sorted(indexes) or len(set(indexes)) != len(indexes):
+            raise ValueError("retained association candidates must have unique sorted indexes")
+        selected = [candidate for candidate in self.candidates if candidate.selected]
+        if self.outcome is SelectionOutcome.NO_DETECTIONS:
+            if self.candidate_count or selected:
+                raise ValueError("no-detection association cannot select a candidate")
+        elif self.outcome is SelectionOutcome.NO_ACCEPTED_CANDIDATE:
+            if selected:
+                raise ValueError("rejected association cannot select a candidate")
+        elif len(selected) != 1:
+            raise ValueError("detected association must retain exactly one selected candidate")
 
 
 @dataclass(frozen=True, slots=True)
 class RawFrameObservation:
-    """The one target-associated detector/pose result for an analysis frame."""
+    """The selected detector box, or an explicit later-frame detector miss."""
 
     frame_index: int
     timestamp_ms: int
     detection: Detection | None
-    pose: PoseMeasurement | None
-    selection_outcome: SelectionOutcome | None = None
+    selection_outcome: SelectionOutcome
+    association: AssociationEvidence | None = None
 
     def __post_init__(self) -> None:
         if self.frame_index < 0 or self.timestamp_ms < 0:
             raise ValueError("frame index and timestamp must not be negative")
+        if self.association is not None:
+            if self.selection_outcome is not self.association.outcome:
+                raise ValueError("observation selection outcome must match association evidence")
+            selected = next(
+                (
+                    candidate.detection
+                    for candidate in self.association.candidates
+                    if candidate.selected
+                ),
+                None,
+            )
+            if self.detection != selected:
+                raise ValueError("observation detection must match selected association candidate")
 
     @property
     def detector_bounds(self) -> Rect | None:
         return None if self.detection is None else self.detection.bounds
 
     @property
-    def pose_bounds(self) -> Rect | None:
-        return None if self.pose is None else self.pose.bounds
-
-    @property
-    def root(self) -> Point | None:
-        return None if self.pose is None else self.pose.root
-
-    @property
-    def landmarks(self) -> tuple[Point, ...]:
-        return () if self.pose is None else self.pose.landmarks
-
-    @property
     def confidence(self) -> float:
-        if self.pose is not None and self.detection is not None:
-            return min(self.pose.confidence, self.detection.confidence)
-        if self.pose is not None:
-            return self.pose.confidence
-        if self.detection is not None:
-            return self.detection.confidence
-        return 0
+        return 0 if self.detection is None else self.detection.confidence
 
 
 class PersonDetector(Protocol):
     def detect(self, frame: object) -> Sequence[Detection]: ...
-
-
-class PoseEstimator(Protocol):
-    def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate | None: ...
-
-
-class FrameCropper(Protocol):
-    def crop(self, frame: object, roi: Rect) -> object: ...
 
 
 class UnavailableDetector:
@@ -135,40 +164,11 @@ class UnavailableDetector:
         )
 
 
-class UnavailablePoseEstimator:
-    def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate | None:
-        raise terminal(
-            ErrorCode.MODEL_UNAVAILABLE, "Pose estimation is not configured for this worker."
-        )
-
-
-class SourceFrameCropper:
-    """Minimal array-like frame cropper kept separate from detector/pose adapters."""
-
-    def crop(self, frame: object, roi: Rect) -> object:
-        try:
-            return frame[int(roi.y) : int(roi.bottom), int(roi.x) : int(roi.right)]  # type: ignore[index]
-        except (IndexError, TypeError) as error:
-            raise ValueError("frame does not support source-pixel ROI cropping") from error
-
-
 class TargetFrameAnalyzer:
-    """Associates one selected athlete and produces source-coordinate raw observations."""
+    """Runs full-frame detection and associates the selected athlete deterministically."""
 
-    def __init__(
-        self,
-        detector: PersonDetector,
-        pose_estimator: PoseEstimator,
-        *,
-        roi_padding: float = 0.25,
-        cropper: FrameCropper | None = None,
-    ) -> None:
-        if not 0 <= roi_padding <= 1:
-            raise ValueError("ROI padding must be between zero and one")
+    def __init__(self, detector: PersonDetector) -> None:
         self.detector = detector
-        self.pose_estimator = pose_estimator
-        self.roi_padding = roi_padding
-        self.cropper = cropper or SourceFrameCropper()
 
     def observe_selected(
         self,
@@ -180,21 +180,53 @@ class TargetFrameAnalyzer:
         normalized_y: float,
         source_width: int,
         source_height: int,
+        capture_association_evidence: bool = True,
     ) -> RawFrameObservation:
-        detection, outcome = select_target_with_outcome(
+        return self.select_selected(
             self.detector.detect(frame),
-            source_tap(normalized_x, normalized_y, source_width, source_height),
-            containing_outcome=SelectionOutcome.SELECTED_CONTAINING_TAP,
-            nearest_outcome=SelectionOutcome.SELECTED_NEAREST_TAP,
-        )
-        roi = expand_roi(detection.bounds, self.roi_padding, source_width, source_height)
-        estimate = self.pose_estimator.estimate(self.cropper.crop(frame, roi), roi)
-        return RawFrameObservation(
             frame_index=frame_index,
             timestamp_ms=timestamp_ms,
-            detection=detection,
-            pose=None if estimate is None else pose_to_source(estimate, roi),
-            selection_outcome=outcome,
+            normalized_x=normalized_x,
+            normalized_y=normalized_y,
+            source_width=source_width,
+            source_height=source_height,
+            capture_association_evidence=capture_association_evidence,
+        )
+
+    def select_selected(
+        self,
+        detections: Sequence[Detection],
+        *,
+        frame_index: int,
+        timestamp_ms: int,
+        normalized_x: float,
+        normalized_y: float,
+        source_width: int,
+        source_height: int,
+        capture_association_evidence: bool = True,
+    ) -> RawFrameObservation:
+        reference = source_tap(normalized_x, normalized_y, source_width, source_height)
+        detection, association = select_target_with_association(
+            detections,
+            reference,
+            reference_kind=SelectionReferenceKind.TAP,
+            containing_outcome=SelectionOutcome.SELECTED_CONTAINING_TAP,
+            nearest_outcome=SelectionOutcome.SELECTED_NEAREST_TAP,
+            capture_evidence=capture_association_evidence,
+            terminal_on_empty=True,
+        )
+        assert detection is not None
+        return RawFrameObservation(
+            frame_index,
+            timestamp_ms,
+            detection,
+            _selection_outcome(
+                association,
+                SelectionOutcome.SELECTED_CONTAINING_TAP,
+                SelectionOutcome.SELECTED_NEAREST_TAP,
+                detection.bounds.contains(reference),
+            ),
+            association,
         )
 
     def observe(
@@ -203,35 +235,82 @@ class TargetFrameAnalyzer:
         *,
         frame_index: int,
         timestamp_ms: int,
-        normalized_x: float,
-        normalized_y: float,
-        source_width: int,
-        source_height: int,
+        reference: Point,
+        reference_kind: SelectionReferenceKind,
+        capture_association_evidence: bool = True,
     ) -> RawFrameObservation:
-        """Return an empty observation for later-frame detector gaps."""
-        detections = self.detector.detect(frame)
-        if not detections:
+        return self.associate(
+            self.detector.detect(frame),
+            frame_index=frame_index,
+            timestamp_ms=timestamp_ms,
+            reference=reference,
+            reference_kind=reference_kind,
+            reference_bounds=None,
+            capture_association_evidence=capture_association_evidence,
+        )
+
+    def associate(
+        self,
+        detections: Sequence[Detection],
+        *,
+        frame_index: int,
+        timestamp_ms: int,
+        reference: Point,
+        reference_kind: SelectionReferenceKind,
+        reference_bounds: Rect | None,
+        capture_association_evidence: bool = True,
+    ) -> RawFrameObservation:
+        accepted = (
+            detections
+            if reference_bounds is None
+            else tuple(
+                detection
+                for detection in detections
+                if _within_association_gate(detection.bounds, reference_bounds)
+            )
+        )
+        if detections and not accepted:
             return RawFrameObservation(
                 frame_index,
                 timestamp_ms,
                 None,
-                None,
-                SelectionOutcome.NO_DETECTIONS,
+                SelectionOutcome.NO_ACCEPTED_CANDIDATE,
+                _rejected_association_evidence(
+                    detections, reference, reference_kind, capture_association_evidence
+                ),
             )
-        detection, outcome = select_target_with_outcome(
-            detections,
-            source_tap(normalized_x, normalized_y, source_width, source_height),
-            containing_outcome=SelectionOutcome.TRACKED_CONTAINING_REFERENCE,
-            nearest_outcome=SelectionOutcome.TRACKED_NEAREST_REFERENCE,
+        detection, association = select_target_with_association(
+            accepted,
+            reference,
+            reference_kind=reference_kind,
+            containing_outcome=SelectionOutcome.ASSOCIATED_CONTAINING_REFERENCE,
+            nearest_outcome=SelectionOutcome.ASSOCIATED_NEAREST_REFERENCE,
+            capture_evidence=capture_association_evidence,
+            terminal_on_empty=False,
         )
-        roi = expand_roi(detection.bounds, self.roi_padding, source_width, source_height)
-        estimate = self.pose_estimator.estimate(self.cropper.crop(frame, roi), roi)
+        if detection is None:
+            return RawFrameObservation(
+                frame_index,
+                timestamp_ms,
+                None,
+                (
+                    SelectionOutcome.NO_DETECTIONS
+                    if not accepted
+                    else SelectionOutcome.NO_ACCEPTED_CANDIDATE
+                ),
+                association,
+            )
         return RawFrameObservation(
-            frame_index=frame_index,
-            timestamp_ms=timestamp_ms,
-            detection=detection,
-            pose=None if estimate is None else pose_to_source(estimate, roi),
-            selection_outcome=outcome,
+            frame_index,
+            timestamp_ms,
+            detection,
+            _selection_outcome(
+                association,
+                SelectionOutcome.ASSOCIATED_CONTAINING_REFERENCE,
+                SelectionOutcome.ASSOCIATED_NEAREST_REFERENCE,
+                detection.bounds.contains(reference),
+            ),
+            association,
         )
 
 
@@ -244,63 +323,157 @@ def source_tap(normalized_x: float, normalized_y: float, width: int, height: int
 
 
 def select_target(detections: Sequence[Detection], tap: Point) -> Detection:
-    return select_target_with_outcome(
+    selected, _ = select_target_with_association(
         detections,
         tap,
+        reference_kind=SelectionReferenceKind.TAP,
         containing_outcome=SelectionOutcome.SELECTED_CONTAINING_TAP,
         nearest_outcome=SelectionOutcome.SELECTED_NEAREST_TAP,
-    )[0]
+        terminal_on_empty=True,
+    )
+    assert selected is not None
+    return selected
 
 
-def select_target_with_outcome(
+def select_target_with_association(
     detections: Sequence[Detection],
-    tap: Point,
+    reference: Point,
     *,
+    reference_kind: SelectionReferenceKind,
     containing_outcome: SelectionOutcome,
     nearest_outcome: SelectionOutcome,
-) -> tuple[Detection, SelectionOutcome]:
+    capture_evidence: bool = True,
+    terminal_on_empty: bool,
+) -> tuple[Detection | None, AssociationEvidence | None]:
     if not detections:
-        raise terminal(ErrorCode.NO_SELECTED_ATHLETE, "No athlete was found at the selected frame.")
-    containing = [detection for detection in detections if detection.bounds.contains(tap)]
-    candidates = containing or list(detections)
-    return (
-        min(
-            candidates,
-            key=lambda detection: (
-                (detection.bounds.center.x - tap.x) ** 2 + (detection.bounds.center.y - tap.y) ** 2
-            ),
-        ),
-        containing_outcome if containing else nearest_outcome,
+        if terminal_on_empty:
+            raise terminal(
+                ErrorCode.NO_SELECTED_ATHLETE, "No athlete was found at the selected frame."
+            )
+        return None, _no_detection_evidence(reference, reference_kind, capture_evidence)
+    selected = _select(detections, reference)
+    outcome = containing_outcome if selected.bounds.contains(reference) else nearest_outcome
+    if not capture_evidence:
+        return selected, None
+    selected_index = next(
+        index for index, detection in enumerate(detections) if detection is selected
+    )
+    candidates = tuple(
+        DetectionCandidate(
+            index,
+            detection,
+            detection.bounds.contains(reference),
+            _center_distance(detection, reference),
+            index == selected_index,
+        )
+        for index, detection in enumerate(detections)
+    )
+    retained = _retained_candidates(candidates, selected_index)
+    return selected, AssociationEvidence(
+        reference,
+        reference_kind,
+        SelectionStrategy.CONTAINING_REFERENCE_THEN_NEAREST_CENTER,
+        outcome,
+        len(candidates),
+        retained,
+        len(retained) < len(candidates),
     )
 
 
-def expand_roi(
-    bounds: Rect, padding_fraction: float, source_width: int, source_height: int
-) -> Rect:
-    if not 0 <= padding_fraction <= 1:
-        raise ValueError("ROI padding must be between zero and one")
-    width = bounds.width * (1 + 2 * padding_fraction)
-    height = bounds.height * (1 + 2 * padding_fraction)
-    x = max(0, min(bounds.center.x - width / 2, source_width - width))
-    y = max(0, min(bounds.center.y - height / 2, source_height - height))
-    return Rect(x, y, min(width, source_width), min(height, source_height))
+def _no_detection_evidence(
+    reference: Point, reference_kind: SelectionReferenceKind, capture: bool
+) -> AssociationEvidence | None:
+    if not capture:
+        return None
+    return AssociationEvidence(
+        reference,
+        reference_kind,
+        SelectionStrategy.CONTAINING_REFERENCE_THEN_NEAREST_CENTER,
+        SelectionOutcome.NO_DETECTIONS,
+        0,
+        (),
+        False,
+    )
 
 
-def roi_to_source(point: Point, roi: Rect) -> Point:
-    """Transforms normalized ROI coordinates emitted by a pose model to source pixels."""
-    return Point(roi.x + point.x * roi.width, roi.y + point.y * roi.height)
+def _rejected_association_evidence(
+    detections: Sequence[Detection],
+    reference: Point,
+    reference_kind: SelectionReferenceKind,
+    capture: bool,
+) -> AssociationEvidence | None:
+    if not capture:
+        return None
+    candidates = tuple(
+        DetectionCandidate(
+            index,
+            detection,
+            detection.bounds.contains(reference),
+            _center_distance(detection, reference),
+            False,
+        )
+        for index, detection in enumerate(detections)
+    )
+    retained = _retained_candidates(candidates, 0)
+    return AssociationEvidence(
+        reference,
+        reference_kind,
+        SelectionStrategy.CONTAINING_REFERENCE_THEN_NEAREST_CENTER,
+        SelectionOutcome.NO_ACCEPTED_CANDIDATE,
+        len(candidates),
+        retained,
+        len(retained) < len(candidates),
+    )
 
 
-def rect_to_source(bounds: Rect, roi: Rect) -> Rect:
-    """Transforms a normalized ROI rectangle emitted by a pose model to source pixels."""
-    top_left = roi_to_source(Point(bounds.x, bounds.y), roi)
-    return Rect(top_left.x, top_left.y, bounds.width * roi.width, bounds.height * roi.height)
+def _within_association_gate(candidate: Rect, reference: Rect) -> bool:
+    return hypot(
+        candidate.center.x - reference.center.x, candidate.center.y - reference.center.y
+    ) <= MAX_ASSOCIATION_CENTER_DISTANCE_DIAGONALS * hypot(reference.width, reference.height)
 
 
-def pose_to_source(estimate: PoseEstimate, roi: Rect) -> PoseMeasurement:
-    return PoseMeasurement(
-        root=roi_to_source(estimate.root, roi),
-        landmarks=tuple(roi_to_source(point, roi) for point in estimate.landmarks),
-        bounds=rect_to_source(estimate.bounds, roi),
-        confidence=estimate.confidence,
+def _select(detections: Sequence[Detection], reference: Point) -> Detection:
+    containing = [detection for detection in detections if detection.bounds.contains(reference)]
+    return min(
+        containing or detections,
+        key=lambda detection: _center_distance_squared(detection, reference),
+    )
+
+
+def _center_distance(detection: Detection, reference: Point) -> float:
+    center = detection.bounds.center
+    return hypot(center.x - reference.x, center.y - reference.y)
+
+
+def _center_distance_squared(detection: Detection, reference: Point) -> float:
+    center = detection.bounds.center
+    return (center.x - reference.x) ** 2 + (center.y - reference.y) ** 2
+
+
+def _selection_outcome(
+    association: AssociationEvidence | None,
+    containing_outcome: SelectionOutcome,
+    nearest_outcome: SelectionOutcome,
+    selected_contains_reference: bool,
+) -> SelectionOutcome:
+    return (
+        association.outcome
+        if association is not None
+        else containing_outcome
+        if selected_contains_reference
+        else nearest_outcome
+    )
+
+
+def _retained_candidates(
+    candidates: tuple[DetectionCandidate, ...], selected_index: int
+) -> tuple[DetectionCandidate, ...]:
+    if len(candidates) <= MAX_ASSOCIATION_CANDIDATES:
+        return candidates
+    retained_indexes = set(range(MAX_ASSOCIATION_CANDIDATES))
+    retained_indexes.add(selected_index)
+    if len(retained_indexes) > MAX_ASSOCIATION_CANDIDATES:
+        retained_indexes.remove(MAX_ASSOCIATION_CANDIDATES - 1)
+    return tuple(
+        candidate for candidate in candidates if candidate.original_index in retained_indexes
     )

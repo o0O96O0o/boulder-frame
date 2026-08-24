@@ -221,11 +221,11 @@ func TestCompletedJobDownloadAllowsOutputWithoutFilename(t *testing.T) {
 }
 
 func evaluationManifest(reviewID uuid.UUID) []byte {
-	return []byte(`{"schema_version":1,"review_id":"` + reviewID.String() + `","pipeline_version":"w0.1.0","model_version":"w0.1-model","timing":{"frame_rate":60,"duration_ms":1200,"frame_count":72},"telemetry":{"status":"ready"},"phases":[{"id":"measurement","status":"ready","summary":{"selected_rate":0.9,"mapping_verified":false}},{"id":"pose","status":"partial"},{"id":"tracking","status":"warning","warning_intervals":[{"start_ms":3,"end_ms":7,"label":"Tracking lost","detail":"Subject was briefly occluded"}]},{"id":"planning","status":"unavailable","detail":"Review capture exceeded its duration limit"},{"id":"render","status":"unavailable"}]}`)
+	return []byte(`{"schema_version":1,"review_id":"` + reviewID.String() + `","pipeline_version":"w0.2.0","model_version":"w0.2-ssd-mobilenetv1-12-onnx-detector-only-1","timing":{"frame_rate":60,"duration_ms":1200,"frame_count":72},"telemetry":{"status":"ready"},"phases":[{"id":"detection","status":"ready","summary":{"detected_frames":72,"detection_rate":0.9}},{"id":"framing","status":"warning","warning_intervals":[{"start_ms":3,"end_ms":7,"label":"Detection missed","detail":"The crop widened toward the full frame."}]},{"id":"render","status":"unavailable"}]}`)
 }
 
 func evaluationConfig() domain.JobConfig {
-	return domain.JobConfig{PipelineVersion: "w0.1.0", ModelVersion: "w0.1-model"}
+	return domain.JobConfig{PipelineVersion: "w0.2.0", ModelVersion: "w0.2-ssd-mobilenetv1-12-onnx-detector-only-1"}
 }
 
 func reviewArtifact(projectID, jobID, reviewID uuid.UUID, role, name, contentType string) domain.ReviewArtifact {
@@ -273,9 +273,8 @@ func TestEvaluationProjectsVerifiedPartialFailedReviewWithoutLeaks(t *testing.T)
 	artifacts := []domain.ReviewArtifact{
 		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json"),
 		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugTelemetry, "telemetry.jsonl.gz", "application/gzip"),
-		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugMeasurement, "measurement.mp4", "video/mp4"),
-		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugPose, "pose.mp4", "video/mp4"),
-		// Tracking is manifest-declared but unavailable in persistence.
+		reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugDetection, "detection.mp4", "video/mp4"),
+		// Framing is manifest-declared but unavailable in persistence.
 	}
 	var logs bytes.Buffer
 	h := &Handler{
@@ -292,8 +291,7 @@ func TestEvaluationProjectsVerifiedPartialFailedReviewWithoutLeaks(t *testing.T)
 	for _, expected := range []string{
 		`"available":true`, `"state":"failed"`, `"review_id":"` + reviewID.String(),
 		`"video_url":"https://download.test"`, `"telemetry_download_url":"https://download.test"`,
-		`"expires_in_seconds":60`, `"id":"tracking","label":"Tracking","status":"unavailable"`,
-		`"id":"planning","label":"Planning","status":"unavailable","detail":"Review capture exceeded its duration limit"`,
+		`"expires_in_seconds":60`, `"id":"framing","label":"Framing","status":"unavailable"`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("response missing %s: %s", expected, body)
@@ -327,7 +325,7 @@ func TestEvaluationHandlesMalformedManifestAndStorageFailure(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			artifacts := []domain.ReviewArtifact{artifact}
 			if test.media {
-				artifacts = append(artifacts, reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugMeasurement, "measurement.mp4", "video/mp4"))
+				artifacts = append(artifacts, reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugDetection, "detection.mp4", "video/mp4"))
 			}
 			h := &Handler{Repo: &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: artifacts}, Store: test.store, Owner: domain.OwnerDevelopment, URLTTL: time.Minute}
 			rec := httptest.NewRecorder()
@@ -344,7 +342,7 @@ func TestEvaluationHandlesMalformedManifestAndStorageFailure(t *testing.T) {
 
 func TestEvaluationRejectsSensitiveManifestWithoutLeakingIt(t *testing.T) {
 	projectID, jobID, reviewID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New(), uuid.New()
-	manifest := []byte(`{"schema_version":1,"review_id":"` + reviewID.String() + `","phases":[{"id":"measurement","status":"unavailable","detail":"https://storage.test/private/debug?X-Amz-Signature=secret"},{"id":"pose","status":"ready"},{"id":"tracking","status":"ready"},{"id":"planning","status":"ready"},{"id":"render","status":"ready"}]}`)
+	manifest := []byte(`{"schema_version":1,"review_id":"` + reviewID.String() + `","phases":[{"id":"detection","status":"unavailable","detail":"https://storage.test/private/debug?X-Amz-Signature=secret"},{"id":"framing","status":"ready"},{"id":"render","status":"ready"}]}`)
 	var logs bytes.Buffer
 	h := &Handler{
 		Repo:  &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: []domain.ReviewArtifact{reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json")}},
@@ -365,7 +363,7 @@ func TestEvaluationRejectsSensitiveManifestWithoutLeakingIt(t *testing.T) {
 
 func TestEvaluationRejectsManifestVersionMismatchWithoutLeaks(t *testing.T) {
 	projectID, jobID, reviewID := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.New(), uuid.New()
-	manifest := bytes.Replace(evaluationManifest(reviewID), []byte(`"model_version":"w0.1-model"`), []byte(`"model_version":"other-model"`), 1)
+	manifest := bytes.Replace(evaluationManifest(reviewID), []byte(`"model_version":"w0.2-ssd-mobilenetv1-12-onnx-detector-only-1"`), []byte(`"model_version":"other-model"`), 1)
 	h := &Handler{
 		Repo:  &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: []domain.ReviewArtifact{reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json")}},
 		Store: fakeStore{manifest: manifest, readInfo: storage.ObjectInfo{Size: 100, ContentType: "application/json"}},
@@ -401,7 +399,7 @@ func TestEvaluationRejectsDuplicateOrMismatchedReviewArtifacts(t *testing.T) {
 	manifest := reviewArtifact(projectID, jobID, reviewID, domain.ArtifactDebugManifest, "manifest.json", "application/json")
 	for _, artifacts := range [][]domain.ReviewArtifact{
 		{manifest, manifest},
-		{manifest, reviewArtifact(projectID, jobID, uuid.New(), domain.ArtifactDebugMeasurement, "measurement.mp4", "video/mp4")},
+		{manifest, reviewArtifact(projectID, jobID, uuid.New(), domain.ArtifactDebugDetection, "detection.mp4", "video/mp4")},
 	} {
 		h := &Handler{
 			Repo:  &fakeRepo{project: domain.Project{ID: projectID}, job: domain.Job{ID: jobID, ProjectID: projectID, State: domain.JobCompleted, Configuration: evaluationConfig()}, reviewArtifacts: artifacts},

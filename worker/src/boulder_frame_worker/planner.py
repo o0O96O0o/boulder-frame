@@ -1,10 +1,8 @@
-"""Source-bounded deterministic virtual-camera geometry and baseline planner."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, overload
 
 from .measurement import Point, Rect
 from .protocol import AspectRatio, FramingProfile
@@ -40,30 +38,27 @@ class CropRect:
 
 @dataclass(frozen=True, slots=True)
 class FrameMeasurement:
-    root: Point | None
-    bounds: Rect | None
-    confidence: float
-    velocity: Point = Point(0, 0)
-    lost: bool = False
-    detector_bounds: Rect | None = None
-    covariance: float | None = None
+    detector_bounds: Rect | None
+    confidence: float = 0
+
+    @property
+    def missed(self) -> bool:
+        return self.detector_bounds is None
 
 
 @dataclass(frozen=True, slots=True)
 class PlannerFrameTrace:
-    """Authoritative planner inputs and decision for one source frame."""
-
-    envelope: Rect | None
-    lead_room: Point
-    uncertainty_padding: float
-    containment_risk: bool
-    zoom_action: str
+    target_height_fraction: float
+    desired_crop: CropRect
+    detection_missed: bool
+    smoothing_applied: bool
+    containment_override: bool
+    source_aspect_limited: bool
+    action: str
 
 
 @dataclass(frozen=True, slots=True)
 class CropPlan(Sequence[CropRect]):
-    """A frame-aligned crop path plus the diagnostic decisions that produced it."""
-
     crops: tuple[CropRect, ...]
     trace: tuple[PlannerFrameTrace, ...]
 
@@ -74,29 +69,21 @@ class CropPlan(Sequence[CropRect]):
     def __len__(self) -> int:
         return len(self.crops)
 
+    @overload
+    def __getitem__(self, index: int) -> CropRect: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[CropRect]: ...
+
     def __getitem__(self, index: int | slice) -> CropRect | tuple[CropRect, ...]:
         return self.crops[index]
 
 
-@dataclass(frozen=True, slots=True)
-class PlannerConfig:
-    base_padding: float
-    uncertainty_padding: float
-    lead_fraction: float
-    max_zoom_out_factor: float = 1.75
-    max_zoom_in_factor: float = 0.96
-    high_confidence: float = 0.8
-    stable_hold_frames: int = 3
-    max_pan_fraction: float = 0.18
-    pan_dead_zone_fraction: float = 0.01
-    envelope_radius: int = 2
-
-
-PROFILE_CONFIGS: dict[FramingProfile, PlannerConfig] = {
-    FramingProfile.TIGHT: PlannerConfig(0.10, 0.10, 0.08),
-    FramingProfile.BALANCED: PlannerConfig(0.18, 0.16, 0.12),
-    FramingProfile.SAFE: PlannerConfig(0.28, 0.25, 0.16),
-    FramingProfile.FULL_MOVEMENT: PlannerConfig(0.40, 0.35, 0.20),
+PROFILE_TARGET_HEIGHT_FRACTIONS: dict[FramingProfile, float] = {
+    FramingProfile.TIGHT: 0.60,
+    FramingProfile.BALANCED: 0.50,
+    FramingProfile.SAFE: 0.40,
+    FramingProfile.FULL_MOVEMENT: 0.33,
 }
 
 
@@ -119,13 +106,20 @@ def full_frame_crop(source_width: int, source_height: int, aspect_ratio: AspectR
 def clamp_crop(crop: CropRect, source_width: int, source_height: int) -> CropRect:
     if crop.width > source_width or crop.height > source_height:
         raise ValueError("crop cannot exceed source dimensions")
-    x = min(max(crop.x, 0), source_width - crop.width)
-    y = min(max(crop.y, 0), source_height - crop.height)
-    return CropRect(x, y, crop.width, crop.height)
+    return CropRect(
+        min(max(crop.x, 0), source_width - crop.width),
+        min(max(crop.y, 0), source_height - crop.height),
+        crop.width,
+        crop.height,
+    )
 
 
 class DeterministicCropPlanner:
-    """Future-aware, source-bounded local controller; it deliberately uses no optimizer."""
+    """Causal detector-box controller with no target-position extrapolation."""
+
+    center_alpha = 0.35
+    height_alpha = 0.25
+    miss_widen_alpha = 0.35
 
     def __init__(
         self,
@@ -139,194 +133,121 @@ class DeterministicCropPlanner:
         self.source_width = source_width
         self.source_height = source_height
         self.aspect_ratio = aspect_ratio
-        self.config = PROFILE_CONFIGS[profile]
+        self.target_height_fraction = PROFILE_TARGET_HEIGHT_FRACTIONS[profile]
         self.full_frame = full_frame_crop(source_width, source_height, aspect_ratio)
 
-    def _desired_crop(
-        self, measurement: FrameMeasurement, envelope: Rect | None
-    ) -> tuple[CropRect, Point, float]:
-        if measurement.lost or measurement.root is None or envelope is None:
-            return self.full_frame, Point(0, 0), 0
-        uncertainty = self.config.uncertainty_padding * (1 - max(0, min(measurement.confidence, 1)))
-        if measurement.covariance is not None:
-            uncertainty += min(
-                0.25, measurement.covariance / max(self.source_width, self.source_height)
-            )
-        padding = self.config.base_padding + uncertainty
-        required_width = envelope.width * (1 + 2 * padding)
-        required_height = envelope.height * (1 + 2 * padding)
-        height = max(required_height, required_width / self.aspect_ratio.value_float)
-        width = height * self.aspect_ratio.value_float
-        if width > self.full_frame.width or height > self.full_frame.height:
-            # A requested-aspect crop cannot contain the padded envelope at this scale.
-            # Keep the maximum available field of view but still pan it to the target.
-            width = self.full_frame.width
-            height = self.full_frame.height
-        lead = Point(
-            measurement.velocity.x * self.config.lead_fraction,
-            measurement.velocity.y * self.config.lead_fraction,
-        )
-        center = Point(measurement.root.x + lead.x, measurement.root.y + lead.y)
-        return (
-            clamp_crop(
-                CropRect(center.x - width / 2, center.y - height / 2, width, height),
-                self.source_width,
-                self.source_height,
-            ),
-            lead,
-            uncertainty,
-        )
-
     def plan(self, measurements: Sequence[FrameMeasurement]) -> CropPlan:
-        smoothed = self._smooth(measurements)
         crops: list[CropRect] = []
-        trace: list[PlannerFrameTrace] = []
+        traces: list[PlannerFrameTrace] = []
         previous: CropRect | None = None
-        stable_frames = 0
-        pan_delta = Point(0, 0)
-        for index, measurement in enumerate(smoothed):
-            envelope = self._movement_envelope(smoothed, index)
-            desired, lead, uncertainty = self._desired_crop(measurement, envelope)
-            zoom_action = "hold"
-            if previous is None:
+        for measurement in measurements:
+            detection = measurement.detector_bounds
+            if detection is None:
+                desired = self.full_frame if previous is None else self._widen(previous)
                 crop = desired
-                zoom_action = "full_frame" if measurement.lost else "initial"
-            elif measurement.lost or measurement.confidence < self.config.high_confidence:
-                # Low-confidence observations may widen immediately but must never zoom in.
-                crop = self._rate_limited(previous, desired, 1.0)
-                stable_frames = 0
-                zoom_action = "zoom_out" if crop.height > previous.height else "hold"
-            else:
-                stable_frames += 1
-                factor = (
-                    self.config.max_zoom_in_factor
-                    if stable_frames >= self.config.stable_hold_frames
-                    else 1.0
-                )
-                crop = self._rate_limited(previous, desired, factor)
-                if crop.height > previous.height:
-                    zoom_action = "zoom_out"
-                elif crop.height < previous.height:
-                    zoom_action = "zoom_in"
-            if previous is not None:
-                crop, pan_delta = self._pan_limited(previous, crop, pan_delta)
-                # Containment is more important than a motion limit when the athlete moves abruptly.
-                containment_risk = envelope is not None and not crop.contains(envelope)
-                if containment_risk:
-                    crop = desired
-                    pan_delta = Point(
-                        crop.center.x - previous.center.x, crop.center.y - previous.center.y
+                action = "full_frame" if previous is None else "widen_on_miss"
+                traces.append(
+                    PlannerFrameTrace(
+                        self.target_height_fraction,
+                        desired,
+                        True,
+                        previous is not None,
+                        False,
+                        False,
+                        action,
                     )
+                )
             else:
-                containment_risk = False
+                desired = self._desired_crop(detection)
+                smoothed = desired if previous is None else self._smooth(previous, desired)
+                crop, source_aspect_limited = self._contain(smoothed, detection)
+                contained = crop != smoothed and not source_aspect_limited
+                traces.append(
+                    PlannerFrameTrace(
+                        self.target_height_fraction,
+                        desired,
+                        False,
+                        previous is not None,
+                        contained,
+                        source_aspect_limited,
+                        "source_aspect_limited"
+                        if source_aspect_limited
+                        else "containment_override"
+                        if contained
+                        else "smoothed"
+                        if previous
+                        else "initial",
+                    )
+                )
             crop = clamp_crop(crop, self.source_width, self.source_height)
             crops.append(crop)
-            trace.append(
-                PlannerFrameTrace(
-                    envelope,
-                    lead,
-                    uncertainty,
-                    containment_risk,
-                    "full_frame" if measurement.lost else zoom_action,
-                )
-            )
             previous = crop
-        return CropPlan(tuple(crops), tuple(trace))
+        return CropPlan(tuple(crops), tuple(traces))
 
-    def _smooth(self, measurements: Sequence[FrameMeasurement]) -> list[FrameMeasurement]:
-        """Apply a causal pass followed by a backward pass because the source is recorded."""
-        forward: list[Point | None] = []
-        previous: Point | None = None
-        for measurement in measurements:
-            if measurement.lost or measurement.root is None:
-                forward.append(None)
-                previous = None
-            elif previous is None:
-                previous = measurement.root
-                forward.append(previous)
-            else:
-                previous = Point(
-                    previous.x * 0.35 + measurement.root.x * 0.65,
-                    previous.y * 0.35 + measurement.root.y * 0.65,
-                )
-                forward.append(previous)
-        backward: list[Point | None] = [None] * len(measurements)
-        following: Point | None = None
-        for index in range(len(measurements) - 1, -1, -1):
-            point = forward[index]
-            if point is None:
-                following = None
-            elif following is None:
-                following = point
-                backward[index] = point
-            else:
-                following = Point(
-                    point.x * 0.65 + following.x * 0.35,
-                    point.y * 0.65 + following.y * 0.35,
-                )
-                backward[index] = following
-        return [
-            FrameMeasurement(
-                root=backward[index],
-                bounds=measurement.bounds,
-                confidence=measurement.confidence,
-                velocity=measurement.velocity,
-                lost=measurement.lost,
-                detector_bounds=measurement.detector_bounds,
-                covariance=measurement.covariance,
-            )
-            for index, measurement in enumerate(measurements)
-        ]
-
-    def _movement_envelope(
-        self, measurements: Sequence[FrameMeasurement], index: int
-    ) -> Rect | None:
-        bounds: list[Rect] = []
-        start = max(0, index - self.config.envelope_radius)
-        stop = min(len(measurements), index + self.config.envelope_radius + 1)
-        for measurement in measurements[start:stop]:
-            if not measurement.lost:
-                bound = measurement.bounds or measurement.detector_bounds
-                if bound is not None:
-                    bounds.append(bound)
-        if not bounds:
-            return None
-        left = min(bound.x for bound in bounds)
-        top = min(bound.y for bound in bounds)
-        right = max(bound.right for bound in bounds)
-        bottom = max(bound.bottom for bound in bounds)
-        return Rect(left, top, right - left, bottom - top)
-
-    def _rate_limited(self, previous: CropRect, desired: CropRect, zoom_factor: float) -> CropRect:
-        # A larger height is a zoom out, so it may move by a larger factor than a zoom in.
-        if desired.height >= previous.height:
-            height = min(desired.height, previous.height * self.config.max_zoom_out_factor)
-        else:
-            height = max(desired.height, previous.height * zoom_factor)
+    def _desired_crop(self, detection: Rect) -> CropRect:
+        height = min(self.full_frame.height, detection.height / self.target_height_fraction)
         width = height * self.aspect_ratio.value_float
-        center = desired.center
-        return CropRect(center.x - width / 2, center.y - height / 2, width, height)
-
-    def _pan_limited(
-        self, previous: CropRect, desired: CropRect, prior_delta: Point
-    ) -> tuple[CropRect, Point]:
-        delta = Point(desired.center.x - previous.center.x, desired.center.y - previous.center.y)
-        dead_zone = previous.height * self.config.pan_dead_zone_fraction
-        if abs(delta.x) <= dead_zone:
-            delta = Point(0, delta.y)
-        if abs(delta.y) <= dead_zone:
-            delta = Point(delta.x, 0)
-        maximum = previous.height * self.config.max_pan_fraction
-        delta = Point(
-            min(max(delta.x, prior_delta.x - maximum), prior_delta.x + maximum),
-            min(max(delta.y, prior_delta.y - maximum), prior_delta.y + maximum),
+        if width > self.full_frame.width:
+            width, height = self.full_frame.width, self.full_frame.height
+        center = detection.center
+        return clamp_crop(
+            CropRect(center.x - width / 2, center.y - height / 2, width, height),
+            self.source_width,
+            self.source_height,
         )
+
+    def _smooth(self, previous: CropRect, desired: CropRect) -> CropRect:
+        height = previous.height + (desired.height - previous.height) * self.height_alpha
+        width = height * self.aspect_ratio.value_float
+        center = Point(
+            previous.center.x + (desired.center.x - previous.center.x) * self.center_alpha,
+            previous.center.y + (desired.center.y - previous.center.y) * self.center_alpha,
+        )
+        return clamp_crop(
+            CropRect(center.x - width / 2, center.y - height / 2, width, height),
+            self.source_width,
+            self.source_height,
+        )
+
+    def _widen(self, previous: CropRect) -> CropRect:
+        height = (
+            previous.height + (self.full_frame.height - previous.height) * self.miss_widen_alpha
+        )
+        width = height * self.aspect_ratio.value_float
+        center = previous.center
+        return clamp_crop(
+            CropRect(center.x - width / 2, center.y - height / 2, width, height),
+            self.source_width,
+            self.source_height,
+        )
+
+    def _contain(self, crop: CropRect, detection: Rect) -> tuple[CropRect, bool]:
+        if detection.width > self.full_frame.width or detection.height > self.full_frame.height:
+            # No valid crop of the requested aspect can contain this box. Preserve as much of
+            # the current detection as source/aspect bounds allow without falsely claiming it.
+            return (
+                clamp_crop(
+                    CropRect(
+                        detection.center.x - self.full_frame.width / 2,
+                        detection.center.y - self.full_frame.height / 2,
+                        self.full_frame.width,
+                        self.full_frame.height,
+                    ),
+                    self.source_width,
+                    self.source_height,
+                ),
+                True,
+            )
+        required_height = max(
+            crop.height, detection.height, detection.width / self.aspect_ratio.value_float
+        )
+        height = min(required_height, self.full_frame.height)
+        width = height * self.aspect_ratio.value_float
+        x = min(crop.x, detection.x)
+        x = max(x, detection.right - width)
+        y = min(crop.y, detection.y)
+        y = max(y, detection.bottom - height)
         return (
-            CropRect(
-                previous.center.x + delta.x - desired.width / 2,
-                previous.center.y + delta.y - desired.height / 2,
-                desired.width,
-                desired.height,
-            ),
-            delta,
+            clamp_crop(CropRect(x, y, width, height), self.source_width, self.source_height),
+            False,
         )

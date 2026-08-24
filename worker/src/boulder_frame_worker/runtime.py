@@ -2,15 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Event
-from typing import Protocol, cast
+from typing import cast
 
 from .config import UNCONFIGURED_MODEL_VERSION, WorkerConfig
 from .frame_reader import FrameReaderUnavailable, OpenCVFrameReader
-from .measurement import PersonDetector, PoseEstimator
+from .measurement import PersonDetector
 from .media import CFRNormalizer, FFmpegCFRNormalizer, FFmpegRenderer, FFprobeAdapter
 from .models import (
     MODEL_VERSION,
-    MediaPipePoseLandmarkerFull,
     ModelVerificationError,
     OnnxSsdMobileNetV1Detector,
 )
@@ -25,16 +24,11 @@ from .repository import PostgresJobRepository
 from .review import ReviewLimits, ReviewRenderer
 from .state import JobRepository
 from .storage import S3Storage
-from .tracking import TargetTracker
 from .worker import Worker
 
 
 class RuntimeUnavailable(RuntimeError):
     """Configured worker adapters could not be constructed or verified."""
-
-
-class Closable(Protocol):
-    def close(self) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,14 +46,12 @@ class WorkerRuntime:
         repository: JobRepository,
         storage: S3Storage,
         stop: Event | None = None,
-        resources: tuple[Closable, ...] = (),
     ) -> None:
         self.config = config
         self.consumer = consumer
         self.repository = repository
         self.storage = storage
         self.stop = stop or Event()
-        self.resources = resources
         self.capabilities = RuntimeCapabilities(
             queue_adapter=False, database_adapter=False, storage_adapter=False
         )
@@ -86,11 +78,7 @@ class WorkerRuntime:
         self.consumer.serve(self.stop, self.config.concurrency)
 
     def close(self) -> None:
-        try:
-            self.consumer.close()
-        finally:
-            for resource in reversed(self.resources):
-                resource.close()
+        self.consumer.close()
 
 
 def compose_runtime(
@@ -101,8 +89,6 @@ def compose_runtime(
     stop: Event | None = None,
     frame_reader: FrameReader | None = None,
     detector: PersonDetector | None = None,
-    pose_estimator: PoseEstimator | None = None,
-    tracker: TargetTracker | None = None,
     planner_factory: PlannerFactory | None = None,
     inspector: FFprobeAdapter | None = None,
     renderer: FFmpegRenderer | None = None,
@@ -137,10 +123,9 @@ def compose_runtime(
             raise RuntimeUnavailable(message) from error
     if config.model_version not in {UNCONFIGURED_MODEL_VERSION, MODEL_VERSION}:
         raise RuntimeUnavailable(f"unsupported model_version: {config.model_version}")
-    if detector is None and pose_estimator is None and config.model_version == MODEL_VERSION:
+    if detector is None and config.model_version == MODEL_VERSION:
         try:
             loaded_detector = OnnxSsdMobileNetV1Detector(config.model_dir)
-            loaded_pose_estimator = MediaPipePoseLandmarkerFull(config.model_dir)
             loaded_frame_reader = frame_reader or OpenCVFrameReader()
         except (FrameReaderUnavailable, ModelVerificationError) as error:
             raise RuntimeUnavailable(
@@ -148,7 +133,6 @@ def compose_runtime(
             ) from error
         else:
             detector = loaded_detector
-            pose_estimator = loaded_pose_estimator
             frame_reader = loaded_frame_reader
     pipeline = ProcessingPipeline(
         storage,
@@ -161,8 +145,6 @@ def compose_runtime(
         ),
         frame_reader=frame_reader,
         detector=detector,
-        pose_estimator=pose_estimator,
-        tracker=tracker,
         planner_factory=planner_factory or DeterministicCropPlanner,
         debug_capture=config.debug_capture,
         debug_max_frames=config.debug_max_frames,
@@ -195,7 +177,4 @@ def compose_runtime(
             pipeline.publish_debug,
         ),
     )
-    resources: tuple[Closable, ...] = ()
-    if pose_estimator is not None and callable(getattr(pose_estimator, "close", None)):
-        resources = (cast(Closable, pose_estimator),)
-    return WorkerRuntime(config, consumer, repository, storage, stop, resources)
+    return WorkerRuntime(config, consumer, repository, storage, stop)

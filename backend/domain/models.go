@@ -17,29 +17,27 @@ import (
 )
 
 const (
-	OwnerDevelopment         = "development-owner"
-	AssetSource              = "source"
-	AssetOutput              = "output"
-	AssetDebug               = "debug"
-	ArtifactOutput           = "output"
-	ArtifactDebugTelemetry   = "debug_telemetry"
-	ArtifactDebugManifest    = "debug_manifest"
-	ArtifactDebugMeasurement = "debug_measurement"
-	ArtifactDebugPose        = "debug_pose"
-	ArtifactDebugTracking    = "debug_tracking"
-	ArtifactDebugPlanning    = "debug_planning"
-	ArtifactDebugRender      = "debug_render"
-	UploadPending            = "pending"
-	UploadUploaded           = "uploaded"
-	UploadInvalid            = "invalid"
-	JobQueued                = "queued"
-	JobValidating            = "validating"
-	JobAnalyzing             = "analyzing"
-	JobRendering             = "rendering"
-	JobUploading             = "uploading"
-	JobCompleted             = "completed"
-	JobFailed                = "failed"
-	JobCancelled             = "cancelled"
+	OwnerDevelopment       = "development-owner"
+	AssetSource            = "source"
+	AssetOutput            = "output"
+	AssetDebug             = "debug"
+	ArtifactOutput         = "output"
+	ArtifactDebugTelemetry = "debug_telemetry"
+	ArtifactDebugManifest  = "debug_manifest"
+	ArtifactDebugDetection = "debug_detection"
+	ArtifactDebugFraming   = "debug_framing"
+	ArtifactDebugRender    = "debug_render"
+	UploadPending          = "pending"
+	UploadUploaded         = "uploaded"
+	UploadInvalid          = "invalid"
+	JobQueued              = "queued"
+	JobValidating          = "validating"
+	JobAnalyzing           = "analyzing"
+	JobRendering           = "rendering"
+	JobUploading           = "uploading"
+	JobCompleted           = "completed"
+	JobFailed              = "failed"
+	JobCancelled           = "cancelled"
 )
 
 type Project struct {
@@ -157,7 +155,7 @@ type ManifestPhase struct {
 }
 
 var (
-	reviewPhaseOrder  = []string{"measurement", "pose", "tracking", "planning", "render"}
+	reviewPhaseOrder  = []string{"detection", "framing", "render"}
 	summaryFieldName  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 	versionIdentifier = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
@@ -170,21 +168,19 @@ const (
 func ValidArtifactKind(kind string) bool {
 	return map[string]bool{
 		ArtifactOutput: true, ArtifactDebugTelemetry: true, ArtifactDebugManifest: true,
-		ArtifactDebugMeasurement: true, ArtifactDebugPose: true, ArtifactDebugTracking: true,
-		ArtifactDebugPlanning: true, ArtifactDebugRender: true,
+		ArtifactDebugDetection: true, ArtifactDebugFraming: true, ArtifactDebugRender: true,
 	}[kind]
 }
 func ValidReviewArtifactRole(role string) bool {
 	return role == ArtifactDebugTelemetry || role == ArtifactDebugManifest ||
-		role == ArtifactDebugMeasurement || role == ArtifactDebugPose ||
-		role == ArtifactDebugTracking || role == ArtifactDebugPlanning || role == ArtifactDebugRender
+		role == ArtifactDebugDetection || role == ArtifactDebugFraming || role == ArtifactDebugRender
 }
 func ReviewArtifactRoleForPhase(phase string) string {
 	return "debug_" + phase
 }
 func ReviewPhaseLabel(phase string) string {
 	return map[string]string{
-		"measurement": "Measurement", "pose": "Pose", "tracking": "Tracking", "planning": "Planning", "render": "Render",
+		"detection": "Detection", "framing": "Framing", "render": "Render",
 	}[phase]
 }
 func ParseEvaluationManifest(data []byte) (EvaluationManifest, error) {

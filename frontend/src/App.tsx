@@ -5,13 +5,13 @@ import { appConfig } from './config'
 import { mapPointerToNormalized, normalizedToContainPoint } from './coordinates'
 
 const profiles: { value: Profile; label: string; detail: string }[] = [
-  { value: 'tight', label: 'Tight', detail: 'Closer framing, stable movement' },
-  { value: 'balanced', label: 'Balanced', detail: 'A confident everyday default' },
-  { value: 'safe', label: 'Safe', detail: 'Extra room for quick movement' },
-  { value: 'full_movement', label: 'Full movement', detail: 'Prioritizes every limb and landing' },
+  { value: 'tight', label: 'Tight', detail: 'Athlete fills 60% of crop height' },
+  { value: 'balanced', label: 'Balanced', detail: 'Athlete fills 50% of crop height' },
+  { value: 'safe', label: 'Safe', detail: 'Athlete fills 40% of crop height' },
+  { value: 'full_movement', label: 'Full movement', detail: 'Athlete fills 33% of crop height' },
 ]
 const terminalStates = new Set(['completed', 'failed', 'cancelled'])
-const stageLabels: Record<string, string> = { queued: 'Queued', validating: 'Checking source', analyzing: 'Finding movement', rendering: 'Rendering crop', uploading: 'Packaging result', completed: 'Ready to download', failed: 'Processing failed', cancelled: 'Cancelled' }
+const stageLabels: Record<string, string> = { queued: 'Queued', validating: 'Checking source', analyzing: 'Detecting athlete and framing', rendering: 'Rendering crop', uploading: 'Packaging result', completed: 'Ready to download', failed: 'Processing failed', cancelled: 'Cancelled' }
 const maxUploadBytes = appConfig.max_upload_bytes
 const maxUploadLabel = `${Math.round(maxUploadBytes / 1024 / 1024 / 1024)} GB`
 

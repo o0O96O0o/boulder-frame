@@ -1,16 +1,30 @@
-# Worker Specifications
+# Worker
 
-The worker is a Python 3.12 process responsible for media validation, CV measurement, tracking, movement-envelope construction, crop planning, rendering, and artifact upload. It is stateless between jobs; durable state belongs in PostgreSQL and object storage.
+The Python 3.12 worker owns source validation, ONNX person detection, deterministic detector-box
+framing, FFmpeg rendering, and artifact upload. It is stateless between jobs; PostgreSQL owns durable
+job state and object storage owns video assets.
 
 ## Documents
 
-- [Runtime and Pipeline](runtime-and-pipeline.md): configuration, task boundary, media validation, and current adapter status.
-- [Model Manifest](models.md): pinned detector and pose artifacts, licenses, checksums, runtime contracts, and operator provisioning.
-- [Measurements and Planner](measurements-and-planner.md): target association, coordinate systems, tracking interfaces, crop geometry, profiles, and fallback behavior.
-- [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md): default-off capture configuration, private JSONL bundle format/redaction, evaluation annotations and metrics, and current integration limits.
+- [Runtime and Pipeline](runtime-and-pipeline.md): configuration, task boundary, media validation, and durable processing.
+- [Model Manifest](models.md): W0.2 detector artifact, license, checksum, tensor contract, and provisioning.
+- [Detection and Framing](measurements-and-planner.md): selection association, source coordinates, fixed profile fractions, smoothing, and miss behavior.
+- [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md): bounded private telemetry and detector-only visual-review contract.
 
-## Current Status
+## Current Contract
 
-Implemented worker components include Redis Streams consumption, PostgreSQL-backed claims/leases, pending-delivery recovery, and terminal acknowledgement, alongside source download, FFprobe validation, target coordinate mapping, ROI geometry, injectable raw observations, single-target tracking, deterministic crop planning, FFmpeg frame-accurate crop/1080p scale rendering and validation, deterministic upload/head, lease-guarded output finalization, state/lease semantics, and structured worker errors. The pipeline always retains only the aligned, minimal scratch crop path needed to render or retry the product output. Default-off `debug_capture` separately records bounded source-coordinate semantic analysis and phase timings, then best-effort publishes a UUID-scoped private review set under the active lease after success or before a stage failure is persisted. The set uses `debug_telemetry`, `debug_manifest`, and available `debug_{phase}` roles under `private/debug/{project_id}/{job_id}/{review_id}/`; `finalize_review` atomically replaces those roles and cleanup removes newly uploaded objects after failed finalization where possible. `debug_visual_capture` additionally requires `debug_capture` and bounds duration, output dimensions, aggregate bytes, and a killable total decode/encode deadline; phase video reuses the bounded semantic trace rather than re-running inference or crop planning. Manifest v1 emits exact immutable `pipeline_version` and `model_version`, plus bounded source `timing`, at its root for strict backend projection. Capture/finalization failures never change the required output job outcome. The evaluator streams frames, ignores operational records, and marks annotations with no telemetry as insufficient. The output MP4 is a 1080p render in the requested aspect ratio using the final per-frame crop path. The CLI exposes `--check` and `--serve`. The checked-in model manifest selects an ONNX SSD-MobilenetV1 detector and MediaPipe Pose Landmarker Full; after those exact local files verify and load, OpenCV streams rotation-normalized BGR CFR frames into analysis. No external weights are bundled or downloaded. The local `unset-until-pinned` sentinel is the safe `unconfigured` runtime state, where matching jobs fail with `model_unavailable`; configured W0.1 with missing artifacts fails startup, and provisioned W0.1 rejects immutable job model-version mismatches before stage handlers run.
+The worker consumes Redis Streams tasks under a PostgreSQL lease, downloads and validates the source,
+normalizes supported VFR input only in job scratch, detects the selected athlete, derives a smooth
+detector-box crop path, renders and validates 1080p H.264/AAC output, and finalizes it under the
+active lease. It uses model version
+`w0.2-ssd-mobilenetv1-12-onnx-detector-only-1`; a matching unconfigured runtime fails jobs safely
+with `model_unavailable`, while a configured W0.2 runtime with an unavailable decoder or invalid
+artifact fails startup.
 
-Production enables the public-access-block check; a trusted development environment may explicitly set `debug_require_private_storage: false` while using `debug_capture`.
+When `debug_capture` is enabled, the worker writes bounded source-coordinate detector/framing/render
+telemetry and phase timing. `debug_visual_capture` additionally renders optional bounded review media.
+Each review set has `debug_telemetry`, `debug_manifest`, and only available `debug_detection`,
+`debug_framing`, and `debug_render` artifacts at
+`private/debug/{project_id}/{job_id}/{review_id}/`. Capture and review-finalization failures are
+best-effort and never alter a validated product output. The implementation contains only detector
+measurements and current-box framing decisions.

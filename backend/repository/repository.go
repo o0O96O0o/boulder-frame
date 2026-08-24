@@ -140,7 +140,7 @@ func (p *PG) ListReviewArtifacts(ctx context.Context, id uuid.UUID) ([]domain.Re
 		COALESCE(a.width,0),COALESCE(a.height,0),COALESCE(a.frame_rate,0),COALESCE(a.duration_ms,0),a.created_at
 		FROM job_artifacts ja
 		JOIN assets a ON a.id=ja.asset_id
-		WHERE ja.job_id=$1 AND ja.kind IN ('debug_telemetry','debug_manifest','debug_measurement','debug_pose','debug_tracking','debug_planning','debug_render')
+		WHERE ja.job_id=$1 AND ja.kind IN ('debug_telemetry','debug_manifest','debug_detection','debug_framing','debug_render')
 		ORDER BY ja.created_at`, id)
 	if err != nil {
 		return nil, err

@@ -48,8 +48,8 @@ Run detached:
 docker compose up --build -d
 ```
 
-The worker is built as `linux/amd64`, including on Apple Silicon hosts. The pinned MediaPipe wheel
-does not support Linux ARM64; Docker/Podman must have x86_64 emulation available.
+The worker is built as `linux/amd64`, including on Apple Silicon hosts. The pinned ONNX Runtime
+deployment target is x86_64; Docker/Podman must have x86_64 emulation available.
 
 The application binds to all host interfaces for trusted-network access. With the configured values
 from `.env`, the endpoints are:
@@ -77,7 +77,3 @@ docker compose down
 
 The worker scratch directory and frontend dependency cache are local Compose volumes. Source videos,
 outputs, and durable metadata remain in their configured external services.
-
-## Deployed Server
-
-We have deploy infras like redis and database on root@76.13.185.64 with pass `+vc4j2VIUIAlygsd`

@@ -21,7 +21,7 @@ export interface Job {
   configuration: JobConfiguration; output_asset_id?: string | null; error?: SafeError | null
   created_at: string; started_at?: string | null; completed_at?: string | null
 }
-export type EvaluationPhaseID = 'measurement' | 'pose' | 'tracking' | 'planning' | 'render'
+export type EvaluationPhaseID = 'detection' | 'framing' | 'render'
 export type EvaluationPhaseStatus = 'ready' | 'partial' | 'unavailable' | 'warning'
 export interface EvaluationWarningInterval { start_ms: number; end_ms?: number; label: string; detail?: string }
 export interface EvaluationPhase {
@@ -53,8 +53,8 @@ export class ApiError extends Error {
 const apiBase = appConfig.api_base_url.replace(/\/$/, '')
 const maxLoggedBodyCharacters = 64 * 1024
 const maxEvaluationDetailCharacters = 500
-const evaluationPhaseIDs: EvaluationPhaseID[] = ['measurement', 'pose', 'tracking', 'planning', 'render']
-const evaluationPhaseLabels = ['Measurement', 'Pose', 'Tracking', 'Planning', 'Render']
+const evaluationPhaseIDs: EvaluationPhaseID[] = ['detection', 'framing', 'render']
+const evaluationPhaseLabels = ['Detection', 'Framing', 'Render']
 const evaluationPhaseStatuses: EvaluationPhaseStatus[] = ['ready', 'partial', 'unavailable', 'warning']
 
 function traceId(): string {

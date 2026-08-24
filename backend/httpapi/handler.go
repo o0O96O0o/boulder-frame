@@ -447,14 +447,10 @@ func reviewArtifactSpec(role string) (name, contentType string, ok bool) {
 		return "telemetry.jsonl.gz", "application/gzip", true
 	case domain.ArtifactDebugManifest:
 		return "manifest.json", "application/json", true
-	case domain.ArtifactDebugMeasurement:
-		return "measurement.mp4", "video/mp4", true
-	case domain.ArtifactDebugPose:
-		return "pose.mp4", "video/mp4", true
-	case domain.ArtifactDebugTracking:
-		return "tracking.mp4", "video/mp4", true
-	case domain.ArtifactDebugPlanning:
-		return "planning.mp4", "video/mp4", true
+	case domain.ArtifactDebugDetection:
+		return "detection.mp4", "video/mp4", true
+	case domain.ArtifactDebugFraming:
+		return "framing.mp4", "video/mp4", true
 	case domain.ArtifactDebugRender:
 		return "render.mp4", "video/mp4", true
 	default:

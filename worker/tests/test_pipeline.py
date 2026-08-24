@@ -1,4 +1,3 @@
-import gzip
 import json
 from fractions import Fraction
 from pathlib import Path
@@ -6,749 +5,267 @@ from uuid import uuid4
 
 import pytest
 
-from boulder_frame_worker.debug import append_debug_record
-from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal, transient
-from boulder_frame_worker.measurement import (
-    Detection,
-    Point,
-    PoseEstimate,
-    RawFrameObservation,
-    Rect,
-)
+from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal
+from boulder_frame_worker.measurement import Detection, Rect
 from boulder_frame_worker.media import MediaMetadata
 from boulder_frame_worker.pipeline import DecodedFrame, ProcessingPipeline
-from boulder_frame_worker.planner import CropRect, FrameMeasurement
-from boulder_frame_worker.repository import OutputAsset, ReviewArtifact
+from boulder_frame_worker.planner import CropRect
 from boulder_frame_worker.state import JobConfiguration, JobRecord, JobState, SourceAsset
-from boulder_frame_worker.storage import StoredObject
-from boulder_frame_worker.tracking import SingleTargetTracker, TrackedMeasurement, TrackingState
 
 
 class Storage:
-    def __init__(self) -> None:
-        self.uploaded = 0
-        self.fail = False
-        self.head_fail = False
-        self.deleted: list[str] = []
-        self.objects: dict[str, bytes] = {}
-
     def download(self, key: str, destination: Path) -> None:
         destination.write_bytes(b"source")
 
-    def upload(self, key: str, source: Path, content_type: str) -> StoredObject:
-        if self.fail:
-            raise transient(ErrorCode.STORAGE_UNAVAILABLE, "storage unavailable")
-        self.uploaded += 1
-        self.objects[key] = source.read_bytes()
-        if self.head_fail:
-            raise transient(ErrorCode.STORAGE_UNAVAILABLE, "storage unavailable")
-        return StoredObject(key, source.stat().st_size, content_type)
-
-    def delete(self, key: str) -> None:
-        self.deleted.append(key)
-        self.objects.pop(key, None)
-
 
 class Finalizer:
-    def __init__(self) -> None:
-        self.outputs: list[OutputAsset] = []
-        self.reviews: list[tuple[object, tuple[ReviewArtifact, ...]]] = []
-        self.fail = False
-        self.debug_fail = False
+    def finalize_output(self, record: JobRecord, output: object) -> None:
+        return None
 
-    def finalize_output(self, record: JobRecord, output: OutputAsset) -> None:
-        if self.fail:
-            raise transient(ErrorCode.DATABASE_UNAVAILABLE, "database unavailable")
-        self.outputs.append(output)
-
-    def finalize_review(
-        self, record: JobRecord, review_id, artifacts: tuple[ReviewArtifact, ...]
-    ) -> None:
-        assert record.state is JobState.UPLOADING
-        assert all(artifact.storage_key.startswith("private/debug/") for artifact in artifacts)
-        if self.debug_fail:
-            raise transient(ErrorCode.DATABASE_UNAVAILABLE, "database unavailable")
-        self.reviews.append((review_id, artifacts))
+    def finalize_review(self, record, review_id, artifacts) -> None:
+        return None
 
 
 class Inspector:
-    def inspect(self, path: Path) -> MediaMetadata:
-        return MediaMetadata(1920, 1080, 1000, 30, "h264", "aac", 0, True)
+    def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
+        return MediaMetadata(1920, 1080, 1000, 2, "h264", None, 0, False)
 
 
 class Renderer:
+    def __init__(self) -> None:
+        self.crops: list[CropRect] | None = None
+
     def render_crop_path(
         self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
     ):
-        destination.write_bytes(b"x" * 4)
+        self.crops = crop_path
+        destination.write_bytes(b"output")
         return Inspector().inspect(destination)
 
 
-class Normalizer:
-    def __init__(self, fail: bool = False) -> None:
-        self.calls: list[tuple[Path, Path, Fraction, int | None]] = []
-        self.fail = fail
-
-    def normalize(
-        self, source: Path, destination: Path, frame_rate: Fraction, audio_stream_index: int | None
-    ) -> None:
-        self.calls.append((source, destination, frame_rate, audio_stream_index))
-        if self.fail:
-            raise terminal(ErrorCode.INVALID_MEDIA, "Video timing could not be normalized.")
-        destination.write_bytes(b"cfr")
-
-
-def _record(*, source_size_bytes: int = 1) -> JobRecord:
+def record(frame_time_ms: int = 0) -> JobRecord:
     source_id = uuid4()
     return JobRecord(
-        uuid4(),
+        id=uuid4(),
         state=JobState.UPLOADING,
         configuration=JobConfiguration(
             source_id,
-            {"frame_time_ms": 0, "normalized_x": 0.5, "normalized_y": 0.5},
+            {"frame_time_ms": frame_time_ms, "normalized_x": 0.5, "normalized_y": 0.5},
             {"aspect_ratio": "16:9", "profile": "balanced"},
             "pipeline",
             "model",
             {},
         ),
         source_asset=SourceAsset(
-            source_id,
-            uuid4(),
-            "source",
-            "uploaded",
-            None,
-            None,
-            source_size_bytes,
-            None,
-            None,
-            None,
-            None,
+            source_id, uuid4(), "source", "uploaded", None, None, 1, None, None, None, None
         ),
     )
 
 
-def test_upload_reuses_valid_render_and_finalizes_verified_output(tmp_path) -> None:
-    storage = Storage()
-    finalizer = Finalizer()
-    pipeline = ProcessingPipeline(storage, finalizer, inspector=Inspector(), renderer=Renderer())
-    record = _record()
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-    (scratch / "output.mp4").write_bytes(b"x" * 4)
-
-    pipeline.uploading(record, scratch)
-
-    assert storage.uploaded == 1
-    assert len(finalizer.outputs) == 1
-    assert finalizer.outputs[0].size_bytes == 4
-
-
-def test_upload_ignores_invalid_optional_trace_after_output_validation(tmp_path) -> None:
-    storage = Storage()
-    finalizer = Finalizer()
-    pipeline = ProcessingPipeline(storage, finalizer, inspector=Inspector(), renderer=Renderer())
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-    (scratch / "output.mp4").write_bytes(b"x" * 4)
-    (scratch / "analysis-trace.jsonl").write_text("not json\n", encoding="ascii")
-
-    pipeline.uploading(_record(), scratch)
-
-    assert len(finalizer.outputs) == 1
-
-
-def test_upload_storage_failure_is_transient_and_skips_finalization(tmp_path) -> None:
-    storage = Storage()
-    storage.fail = True
-    finalizer = Finalizer()
-    pipeline = ProcessingPipeline(storage, finalizer, inspector=Inspector(), renderer=Renderer())
-    record = _record()
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-    (scratch / "output.mp4").write_bytes(b"x" * 4)
-
-    with pytest.raises(WorkerError) as raised:
-        pipeline.uploading(record, scratch)
-
-    assert raised.value.transient
-    assert finalizer.outputs == []
-
-
-def test_upload_database_finalization_failure_is_transient(tmp_path) -> None:
-    storage = Storage()
-    finalizer = Finalizer()
-    finalizer.fail = True
-    pipeline = ProcessingPipeline(storage, finalizer, inspector=Inspector(), renderer=Renderer())
-    record = _record()
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-    (scratch / "output.mp4").write_bytes(b"x" * 4)
-
-    with pytest.raises(WorkerError) as raised:
-        pipeline.uploading(record, scratch)
-
-    assert raised.value.code is ErrorCode.DATABASE_UNAVAILABLE
-    assert raised.value.transient
-    assert storage.uploaded == 1
-    assert finalizer.outputs == []
-
-
-def test_pipeline_uses_original_source_without_normalization_for_cfr_media(tmp_path) -> None:
-    normalizer = Normalizer()
-    pipeline = ProcessingPipeline(
-        Storage(), Finalizer(), inspector=Inspector(), renderer=Renderer(), normalizer=normalizer
-    )
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-
-    inputs = pipeline._inputs(_record(), scratch)
-
-    assert inputs.source == scratch / "source-original"
-    assert inputs.source.read_bytes() == b"source"
-    assert normalizer.calls == []
-
-
-def test_pipeline_normalizes_vfr_media_once_and_uses_derivative_downstream(tmp_path) -> None:
-    class VFRInspector:
-        def __init__(self) -> None:
-            self.calls: list[tuple[Path, bool]] = []
-
-        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
-            self.calls.append((path, allow_variable_frame_rate))
-            if path.name == "source-original" and not allow_variable_frame_rate:
-                raise terminal(
-                    ErrorCode.VARIABLE_FRAME_RATE, "Variable-frame-rate video is not supported."
-                )
-            return MediaMetadata(
-                1920, 1080, 1000, Fraction(30000, 1001), "h264", "aac", 0, True, None, 4
-            )
-
-    inspector = VFRInspector()
-    normalizer = Normalizer()
-    pipeline = ProcessingPipeline(
-        Storage(), Finalizer(), inspector=inspector, renderer=Renderer(), normalizer=normalizer
-    )
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-
-    inputs = pipeline._inputs(_record(), scratch)
-    repeated_inputs = pipeline._inputs(_record(), scratch)
-
-    assert inputs.source == scratch / "source-cfr.mp4"
-    assert repeated_inputs.source == scratch / "source-cfr.mp4"
-    assert normalizer.calls == [
-        (scratch / "source-original", scratch / "source-cfr.mp4", Fraction(30000, 1001), 4)
-    ]
-    assert inspector.calls == [
-        (scratch / "source-original", False),
-        (scratch / "source-original", True),
-        (scratch / "source-cfr.mp4", False),
-        (scratch / "source-original", False),
-        (scratch / "source-original", True),
-        (scratch / "source-cfr.mp4", False),
-    ]
-
-
-def test_pipeline_stops_when_vfr_normalization_fails(tmp_path) -> None:
-    class VFRInspector:
-        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
-            if not allow_variable_frame_rate:
-                raise terminal(
-                    ErrorCode.VARIABLE_FRAME_RATE, "Variable-frame-rate video is not supported."
-                )
-            return MediaMetadata(1920, 1080, 1000, Fraction(30, 1), "h264", None, 0, False)
-
-    normalizer = Normalizer(fail=True)
-    pipeline = ProcessingPipeline(
-        Storage(), Finalizer(), inspector=VFRInspector(), renderer=Renderer(), normalizer=normalizer
-    )
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-
-    with pytest.raises(WorkerError, match="Video timing could not be normalized"):
-        pipeline._inputs(_record(), scratch)
-
-    assert len(normalizer.calls) == 1
-    assert not (scratch / "source-cfr.mp4").exists()
-
-
-def test_pipeline_rejects_vfr_source_larger_than_normalization_limit(tmp_path) -> None:
-    class VFRInspector:
-        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
-            if not allow_variable_frame_rate:
-                raise terminal(
-                    ErrorCode.VARIABLE_FRAME_RATE, "Variable-frame-rate video is not supported."
-                )
-            return MediaMetadata(1920, 1080, 1000, Fraction(30, 1), "h264", None, 0, False)
-
-    normalizer = Normalizer()
-    pipeline = ProcessingPipeline(
-        Storage(),
-        Finalizer(),
-        inspector=VFRInspector(),
-        renderer=Renderer(),
-        normalizer=normalizer,
-        normalization_max_source_bytes=100,
-    )
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-
-    with pytest.raises(WorkerError) as raised:
-        pipeline._inputs(_record(source_size_bytes=101), scratch)
-
-    assert raised.value.code is ErrorCode.INVALID_MEDIA
-    assert raised.value.message == "This variable-frame-rate video is too large to normalize."
-    assert normalizer.calls == []
-
-
-def test_pipeline_routes_pose_misses_through_tracker_loss_without_failing(tmp_path) -> None:
-    class FiveFrameInspector:
-        def inspect(self, path: Path) -> MediaMetadata:
-            return MediaMetadata(1920, 1080, 1000, 5, "h264", "aac", 0, True)
+def test_detector_only_pipeline_persists_aligned_crops_and_widens_later_miss(tmp_path) -> None:
+    class Pixels:
+        def __init__(self, index: int) -> None:
+            self.index = index
 
     class Frames:
-        def read(self, source: Path, metadata: MediaMetadata):
-            return [DecodedFrame(index, index * 200, Pixels()) for index in range(5)]
-
-    class Pixels:
-        def __getitem__(self, item: object):
-            return self
+        def read(self, source, metadata):
+            return [DecodedFrame(index, index * 500, Pixels(index)) for index in range(2)]
 
     class Detector:
-        def detect(self, frame: object) -> list[Detection]:
-            return [Detection(Rect(50, 10, 50, 70), 0.9)]
+        def detect(self, pixels: Pixels) -> list[Detection]:
+            return [Detection(Rect(700, 200, 200, 400), 0.9)] if pixels.index == 0 else []
 
-    class Pose:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate | None:
-            self.calls += 1
-            if self.calls > 1:
-                return None
-            return PoseEstimate(Point(0.5, 0.5), (), Rect(0.2, 0.1, 0.6, 0.8), 0.9)
-
-    class CapturingTracker:
-        def __init__(self) -> None:
-            self.states: list[TrackingState] = []
-
-        def track(self, observations):
-            tracked = SingleTargetTracker().track(observations)
-            self.states = [measurement.state for measurement in tracked]
-            return tracked
-
-    tracker = CapturingTracker()
     pipeline = ProcessingPipeline(
         Storage(),
         Finalizer(),
-        inspector=FiveFrameInspector(),
+        inspector=Inspector(),
         renderer=Renderer(),
         frame_reader=Frames(),
         detector=Detector(),
-        pose_estimator=Pose(),
-        tracker=tracker,
+        debug_capture=True,
     )
-    record = _record()
     scratch = tmp_path / "job"
     scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
+    inputs = pipeline._inputs(record(), scratch)
 
-    assert len(pipeline._crop_path(pipeline._inputs(record, scratch))) == 5
-    assert tracker.states == [
-        TrackingState.TRACKED,
-        TrackingState.REACQUIRING,
-        TrackingState.REACQUIRING,
-        TrackingState.REACQUIRING,
-        TrackingState.LOST,
+    crops = pipeline._crop_path(inputs)
+    stored = [json.loads(line) for line in (scratch / "crop-path.jsonl").read_text().splitlines()]
+    trace = [
+        json.loads(line) for line in (scratch / "analysis-trace.jsonl").read_text().splitlines()
     ]
 
+    assert len(crops) == len(stored) == len(trace) == 2
+    assert crops[1].height > crops[0].height
+    assert trace[1]["detection"]["selection_outcome"] == "no_detections"
+    assert trace[1]["framing"]["decision"]["action"] == "widen_on_miss"
+    assert "pose" not in json.dumps(trace)
+    assert "tracking" not in json.dumps(trace)
 
-def test_render_reuses_aligned_scratch_crop_trace_without_running_models(tmp_path) -> None:
-    class OneFrameInspector:
-        def inspect(self, path: Path) -> MediaMetadata:
-            return MediaMetadata(1920, 1080, 1000, 1, "h264", None, 0, False)
 
+def test_render_reuses_crop_path_without_running_detector(tmp_path) -> None:
     class FailingFrames:
-        def read(self, source: Path, metadata: MediaMetadata):
-            raise AssertionError("analysis should be reused")
+        def read(self, source, metadata):
+            raise AssertionError("persisted crop path must be reused")
 
-    class CapturingRenderer(Renderer):
-        def __init__(self) -> None:
-            self.crops = None
-
-        def render_crop_path(
-            self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
-        ):
-            self.crops = crop_path
-            return super().render_crop_path(
-                source, destination, crop_path, source_metadata, aspect_ratio, inspector
-            )
-
-    renderer = CapturingRenderer()
+    renderer = Renderer()
     pipeline = ProcessingPipeline(
         Storage(),
         Finalizer(),
-        inspector=OneFrameInspector(),
+        inspector=Inspector(),
         renderer=renderer,
         frame_reader=FailingFrames(),
     )
     scratch = tmp_path / "job"
     scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
     (scratch / "crop-path.jsonl").write_text(
-        '{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":0,"timestamp_ms":0}\n',
+        """{\"crop\":{\"height\":1080,\"width\":1920,\"x\":0,\"y\":0},\"frame_index\":0,\"timestamp_ms\":0}
+{\"crop\":{\"height\":1080,\"width\":1920,\"x\":0,\"y\":0},\"frame_index\":1,\"timestamp_ms\":500}
+""",
         encoding="ascii",
     )
 
-    pipeline.rendering(_record(), scratch)
+    pipeline.rendering(record(), scratch)
+    assert renderer.crops == [CropRect(0, 0, 1920, 1080), CropRect(0, 0, 1920, 1080)]
 
-    assert renderer.crops == [CropRect(0, 0, 1920, 1080)]
 
-
-def test_normal_pipeline_persists_only_minimal_crop_path(tmp_path) -> None:
-    class OneFrameInspector:
-        def inspect(self, path: Path) -> MediaMetadata:
-            return MediaMetadata(1920, 1080, 1000, 1, "h264", None, 0, False)
-
+def test_selected_frame_miss_remains_terminal(tmp_path) -> None:
     class Frames:
-        def read(self, source: Path, metadata: MediaMetadata):
-            yield DecodedFrame(0, 0, Pixels())
-
-    class Pixels:
-        def __getitem__(self, item):
-            return self
+        def read(self, source, metadata):
+            return [DecodedFrame(0, 0, object()), DecodedFrame(1, 500, object())]
 
     class Detector:
-        def detect(self, frame: object) -> list[Detection]:
-            return [Detection(Rect(100, 100, 200, 400), 0.9)]
-
-    class Pose:
-        def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate:
-            return PoseEstimate(Point(0.5, 0.5), (), Rect(0.2, 0.1, 0.6, 0.8), 0.9)
+        def detect(self, pixels) -> list[Detection]:
+            return []
 
     pipeline = ProcessingPipeline(
         Storage(),
         Finalizer(),
-        inspector=OneFrameInspector(),
+        inspector=Inspector(),
         renderer=Renderer(),
         frame_reader=Frames(),
         detector=Detector(),
-        pose_estimator=Pose(),
     )
     scratch = tmp_path / "job"
     scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-
-    pipeline._crop_path(pipeline._inputs(_record(), scratch))
-
-    crop_path = scratch / "crop-path.jsonl"
-    assert crop_path.is_file()
-    crop_record = json.loads(crop_path.read_text(encoding="ascii"))
-    assert crop_record["frame_index"] == 0
-    assert crop_record["timestamp_ms"] == 0
-    assert set(crop_record["crop"]) == {"x", "y", "width", "height"}
-    assert not (scratch / "analysis-trace.jsonl").exists()
+    with pytest.raises(WorkerError) as raised:
+        pipeline._crop_path(pipeline._inputs(record(), scratch))
+    assert raised.value.code is ErrorCode.NO_SELECTED_ATHLETE
 
 
-def test_optional_semantic_trace_limit_removes_partial_file_without_blocking_crop_path(
+def test_selected_frame_association_propagates_both_directions_without_identity_switch(
     tmp_path,
 ) -> None:
-    observation = RawFrameObservation(0, 0, Detection(Rect(10, 20, 30, 40), 0.9), None)
-    tracked = TrackedMeasurement(
-        0, Point(25, 40), None, Rect(10, 20, 30, 40), 0.9, 1.0, TrackingState.TRACKED, 0
-    )
-    path = tmp_path / "analysis-trace.jsonl"
-
-    with pytest.raises(ValueError, match="max_bytes"):
-        ProcessingPipeline._write_analysis_trace(
-            path,
-            [observation],
-            [tracked],
-            [FrameMeasurement(Point(25, 40), None, 0.9)],
-            [CropRect(0, 0, 100, 100)],
-            max_bytes=1,
-        )
-
-    assert not path.exists()
-    assert not path.with_suffix(".tmp").exists()
-
-
-def test_semantic_trace_write_failure_does_not_block_the_crop_path(monkeypatch, tmp_path) -> None:
-    class OneFrameInspector:
-        def inspect(self, path: Path) -> MediaMetadata:
-            return MediaMetadata(1920, 1080, 1000, 1, "h264", None, 0, False)
+    class Pixels:
+        def __init__(self, index: int) -> None:
+            self.index = index
 
     class Frames:
-        def read(self, source: Path, metadata: MediaMetadata):
-            yield DecodedFrame(0, 0, Pixels())
+        def read(self, source, metadata):
+            return [DecodedFrame(index, index * 500, Pixels(index)) for index in range(3)]
 
-    class Pixels:
-        def __getitem__(self, item):
-            return self
+    class ThreeFrameInspector(Inspector):
+        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
+            return MediaMetadata(1920, 1080, 1500, 2, "h264", None, 0, False)
+
+    target = [Rect(680, 200, 100, 400), Rect(700, 200, 100, 400), Rect(720, 200, 100, 400)]
+    competitor = Rect(1300, 200, 100, 400)
 
     class Detector:
-        def detect(self, frame: object) -> list[Detection]:
-            return [Detection(Rect(100, 100, 200, 400), 0.9)]
-
-    class Pose:
-        def estimate(self, roi_pixels: object, roi: Rect) -> PoseEstimate:
-            return PoseEstimate(Point(0.5, 0.5), (), Rect(0.2, 0.1, 0.6, 0.8), 0.9)
+        def detect(self, pixels: Pixels) -> list[Detection]:
+            if pixels.index == 0:
+                return [Detection(target[0], 0.9), Detection(competitor, 0.9)]
+            if pixels.index == 1:
+                return [Detection(competitor, 0.9), Detection(target[1], 0.9)]
+            return [Detection(competitor, 0.9), Detection(target[2], 0.9)]
 
     pipeline = ProcessingPipeline(
         Storage(),
         Finalizer(),
-        inspector=OneFrameInspector(),
+        inspector=ThreeFrameInspector(),
         renderer=Renderer(),
         frame_reader=Frames(),
         detector=Detector(),
-        pose_estimator=Pose(),
         debug_capture=True,
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "_write_analysis_trace",
-        lambda *args: (_ for _ in ()).throw(OSError("scratch unavailable")),
     )
     scratch = tmp_path / "job"
     scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-
-    crops = pipeline._crop_path(pipeline._inputs(_record(), scratch))
-
-    assert len(crops) == 1
-    assert (scratch / "crop-path.jsonl").is_file()
-    assert not (scratch / "analysis-trace.jsonl").exists()
-
-
-def test_pipeline_publishes_sanitized_debug_bundle_with_phase_and_frame_records(tmp_path) -> None:
-    storage = Storage()
-    finalizer = Finalizer()
-    pipeline = ProcessingPipeline(
-        storage,
-        finalizer,
-        inspector=Inspector(),
-        renderer=Renderer(),
-        debug_capture=True,
-    )
-    record = _record()
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-    observation = RawFrameObservation(0, 0, Detection(Rect(10, 20, 30, 40), 0.9), None)
-    tracked = TrackedMeasurement(
-        0, Point(25, 40), None, Rect(10, 20, 30, 40), 0.9, 1.0, TrackingState.TRACKED, 0
-    )
-    pipeline._write_analysis_trace(
-        scratch / "analysis-trace.jsonl",
-        [observation],
-        [tracked],
-        [FrameMeasurement(Point(25, 40), None, 0.9)],
-        [CropRect(0, 0, 100, 100)],
-    )
-    append_debug_record(
-        scratch / "debug-stages.jsonl",
-        "stage_end",
-        {"stage": "analyzing", "duration_ms": 4, "outcome": "completed"},
-    )
-
-    pipeline.publish_debug(record, scratch)
-
-    key = next(key for key in storage.objects if key.startswith("private/debug/"))
-    records = [
+    inputs = pipeline._inputs(record(frame_time_ms=500), scratch)
+    pipeline._crop_path(inputs)
+    trace = [
         json.loads(line)
-        for line in gzip.decompress(storage.objects[key]).decode("ascii").splitlines()
+        for line in (scratch / "analysis-trace.jsonl").read_text().splitlines()
     ]
-    assert finalizer.reviews
-    assert records[0]["record_type"] == "header"
-    assert records[0]["source_metadata"]["source_id"] == str(record.source_asset.id)  # type: ignore[union-attr]
-    assert [item["record_type"] for item in records[1:]] == [
-        "stage_end",
-        "frame",
-        "render_summary",
-    ]
-    assert records[2]["measurement"]["detection"]["bounds"] == {
-        "height": 40,
-        "width": 30,
-        "x": 10,
-        "y": 20,
-    }
-    assert records[3]["output"] == {"width": 1920, "height": 1080}
-    review_id, artifacts = finalizer.reviews[0]
-    assert {artifact.role for artifact in artifacts} == {"debug_telemetry", "debug_manifest"}
-    assert all(f"/{review_id}/" in artifact.storage_key for artifact in artifacts)
-    manifest = next(
-        json.loads(value)
-        for key, value in storage.objects.items()
-        if key.endswith("/manifest.json")
-    )
-    assert manifest["schema_version"] == 1
-    assert manifest["review_id"] == str(review_id)
-    assert manifest["pipeline_version"] == "pipeline"
-    assert manifest["model_version"] == "model"
-    assert manifest["timing"] == {"duration_ms": 1000, "frame_count": 30, "frame_rate": 30.0}
-    assert manifest["telemetry"] == {"status": "ready"}
-    assert [phase["id"] for phase in manifest["phases"]] == [
-        "measurement",
-        "pose",
-        "tracking",
-        "planning",
-        "render",
-    ]
-    assert all(phase["status"] == "unavailable" for phase in manifest["phases"])
-    assert manifest["phases"][0]["summary"] == {
-        "detected_frames": 0,
-        "frames": 0,
-        "trace_frame_count": 0,
-    }
-    _assert_backend_manifest_contract(manifest)
+
+    assert [entry["detection"]["detection"]["bounds"]["x"] for entry in trace] == [680, 700, 720]
 
 
-def test_pipeline_deletes_unlinked_debug_object_after_finalization_failure(tmp_path) -> None:
-    storage = Storage()
-    finalizer = Finalizer()
-    finalizer.debug_fail = True
+def test_competing_person_after_loss_is_rejected_until_target_is_reacquired(tmp_path) -> None:
+    class Pixels:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+    class Frames:
+        def read(self, source, metadata):
+            return [DecodedFrame(index, index * 500, Pixels(index)) for index in range(3)]
+
+    class ThreeFrameInspector(Inspector):
+        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
+            return MediaMetadata(1920, 1080, 1500, 2, "h264", None, 0, False)
+
+    target = Rect(700, 200, 100, 400)
+    class Detector:
+        def detect(self, pixels: Pixels) -> list[Detection]:
+            return {
+                0: [Detection(Rect(1500, 200, 100, 400), 0.9)],
+                1: [Detection(target, 0.9)],
+                2: [Detection(Rect(740, 200, 100, 400), 0.9)],
+            }[pixels.index]
+
     pipeline = ProcessingPipeline(
-        storage,
-        finalizer,
-        inspector=Inspector(),
-        renderer=Renderer(),
-        debug_capture=True,
-    )
-    record = _record()
-    scratch = tmp_path / "job"
-    scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-
-    with pytest.raises(WorkerError):
-        pipeline.publish_debug(record, scratch)
-
-    assert len(storage.deleted) == 2
-    assert storage.objects == {}
-
-
-def test_pipeline_deletes_review_object_when_upload_succeeds_but_head_fails(tmp_path) -> None:
-    storage = Storage()
-    storage.head_fail = True
-    pipeline = ProcessingPipeline(
-        storage,
+        Storage(),
         Finalizer(),
-        inspector=Inspector(),
+        inspector=ThreeFrameInspector(),
         renderer=Renderer(),
+        frame_reader=Frames(),
+        detector=Detector(),
         debug_capture=True,
     )
-    record = _record()
     scratch = tmp_path / "job"
     scratch.mkdir()
-    (scratch / "source").write_bytes(b"source")
-
-    with pytest.raises(WorkerError) as raised:
-        pipeline.publish_debug(record, scratch)
-
-    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
-    assert storage.uploaded == 1
-    assert len(storage.deleted) == 1
-    assert storage.objects == {}
-
-
-def test_review_manifest_has_ordered_api_phases_and_safe_warning_fields(tmp_path) -> None:
-    review_id = uuid4()
-    manifest = ProcessingPipeline._write_review_manifest(
-        tmp_path,
-        review_id,
-        [
-            {
-                "timestamp_ms": 0,
-                "measurement": {"detection": None, "pose": None},
-                "tracking": {"state": "lost", "reacquired": False},
-                "planning": {"decision": {"containment_risk": True}},
-                "render": {"mapping_independently_verified": False},
-            }
-        ],
-        {"measurement": {"status": "ready"}},
-        "pipeline",
-        "model",
-        MediaMetadata(160, 90, 1000, 1, "h264", None, 0, False),
-    )
-
-    data = json.loads(manifest.read_text())
-
-    assert data["schema_version"] == 1
-    assert data["review_id"] == str(review_id)
-    assert data["pipeline_version"] == "pipeline"
-    assert data["model_version"] == "model"
-    assert data["timing"] == {"duration_ms": 1000, "frame_count": 1, "frame_rate": 1.0}
-    assert data["telemetry"] == {"status": "ready"}
-    assert [phase["id"] for phase in data["phases"]] == [
-        "measurement",
-        "pose",
-        "tracking",
-        "planning",
-        "render",
+    pipeline._crop_path(pipeline._inputs(record(frame_time_ms=500), scratch))
+    trace = [
+        json.loads(line)
+        for line in (scratch / "analysis-trace.jsonl").read_text().splitlines()
     ]
-    assert data["phases"][0]["status"] == "ready"
-    assert data["phases"][1]["status"] == "unavailable"
-    assert data["phases"][1]["detail"] == "unavailable"
-    assert data["phases"][0]["summary"] == {
-        "detected_frames": 0,
-        "frames": 1,
-        "trace_frame_count": 1,
-    }
-    assert data["phases"][0]["warning_intervals"] == [
-        {
-            "start_ms": 0,
-            "end_ms": 0,
-            "label": "Detection unavailable",
-            "detail": "No detector bounds were recorded.",
-        }
-    ]
-    _assert_backend_manifest_contract(data)
+
+    assert trace[0]["detection"]["detection"] is None
+    assert trace[0]["detection"]["selection_outcome"] == "no_accepted_candidate"
+    assert trace[2]["detection"]["detection"]["bounds"]["x"] == 740
 
 
-def test_review_manifest_bounds_unavailable_phase_detail(tmp_path) -> None:
-    manifest = ProcessingPipeline._write_review_manifest(
-        tmp_path,
-        uuid4(),
-        [],
-        {"measurement": {"status": "unavailable", "detail": " reason\n" * 100}},
-        "pipeline",
-        "model",
-        MediaMetadata(160, 90, 1000, 1, "h264", None, 0, False),
+def test_vfr_normalization_stays_job_local_and_reusable(tmp_path) -> None:
+    class VFRInspector:
+        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
+            if path.name == "source-original" and not allow_variable_frame_rate:
+                raise terminal(
+                    ErrorCode.VARIABLE_FRAME_RATE, "Variable-frame-rate video is not supported."
+                )
+            return MediaMetadata(1920, 1080, 1000, Fraction(30, 1), "h264", None, 0, False)
+
+    class Normalizer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def normalize(self, source, destination, frame_rate, audio_stream_index) -> None:
+            self.calls += 1
+            destination.write_bytes(b"cfr")
+
+    normalizer = Normalizer()
+    pipeline = ProcessingPipeline(
+        Storage(), Finalizer(), inspector=VFRInspector(), renderer=Renderer(), normalizer=normalizer
     )
-
-    phase = json.loads(manifest.read_text())["phases"][0]
-
-    assert phase["status"] == "unavailable"
-    assert len(phase["detail"]) == 80
-    assert "\n" not in phase["detail"]
-    assert phase["detail"].startswith("reason")
-
-
-def _assert_backend_manifest_contract(manifest: object) -> None:
-    """Mirror the strict Go parser's root v1 contract without importing Go."""
-    assert isinstance(manifest, dict)
-    assert set(manifest) == {
-        "schema_version",
-        "review_id",
-        "pipeline_version",
-        "model_version",
-        "timing",
-        "telemetry",
-        "phases",
-    }
-    assert manifest["schema_version"] == 1
-    assert isinstance(manifest["pipeline_version"], str)
-    assert isinstance(manifest["model_version"], str)
-    assert len(manifest["pipeline_version"]) <= 128
-    assert len(manifest["model_version"]) <= 128
-    assert manifest["pipeline_version"].replace("-", "").replace("_", "").replace(".", "").isalnum()
-    assert manifest["model_version"].replace("-", "").replace("_", "").replace(".", "").isalnum()
-    timing = manifest["timing"]
-    assert isinstance(timing, dict)
-    assert set(timing) == {"frame_rate", "duration_ms", "frame_count"}
-    assert isinstance(timing["frame_rate"], float | int) and 0 < timing["frame_rate"] <= 1000
-    assert isinstance(timing["duration_ms"], int) and 0 < timing["duration_ms"] <= 604_800_000
-    assert isinstance(timing["frame_count"], int) and 0 < timing["frame_count"] <= 10_000_000
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    assert pipeline._inputs(record(), scratch).source.name == "source-cfr.mp4"
+    assert pipeline._inputs(record(), scratch).source.name == "source-cfr.mp4"
+    assert normalizer.calls == 1

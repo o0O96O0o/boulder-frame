@@ -13,9 +13,8 @@ from pathlib import Path
 from typing import BinaryIO
 from uuid import UUID
 
-from .measurement import Point, RawFrameObservation, Rect
+from .measurement import AssociationEvidence, Point, RawFrameObservation, Rect, SelectionOutcome
 from .planner import CropRect, FrameMeasurement, PlannerFrameTrace
-from .tracking import TrackedMeasurement
 
 DEBUG_BUNDLE_SCHEMA_VERSION = 1
 DEFAULT_DEBUG_MAX_FRAMES = 10_000
@@ -265,55 +264,54 @@ def serialize_raw_frame_observation(observation: RawFrameObservation) -> dict[st
                 "confidence": _finite(observation.detection.confidence),
             }
         ),
-        "pose": (
-            None
-            if observation.pose is None
-            else {
-                "root": serialize_point(observation.pose.root),
-                "landmarks": [serialize_point(point) for point in observation.pose.landmarks],
-                "bounds": serialize_rect(observation.pose.bounds),
-                "confidence": _finite(observation.pose.confidence),
-            }
-        ),
     }
     if observation.selection_outcome is not None:
         result["selection_outcome"] = observation.selection_outcome.value
+    if observation.association is not None:
+        result["selection"] = serialize_association_evidence(observation.association)
     return result
 
 
-def serialize_tracked_measurement(measurement: TrackedMeasurement) -> dict[str, object]:
+def serialize_association_evidence(evidence: AssociationEvidence) -> dict[str, object]:
     return {
-        "frame_index": measurement.frame_index,
-        "timestamp_ms": measurement.timestamp_ms,
-        "root": serialize_point(measurement.root),
-        "pose_bounds": serialize_rect(measurement.pose_bounds),
-        "detector_bounds": serialize_rect(measurement.detector_bounds),
-        "confidence": _finite(measurement.confidence),
-        "covariance": _finite(measurement.covariance),
-        "state": str(measurement.state),
-        "reacquired": measurement.reacquired,
+        "selected": evidence.outcome is not SelectionOutcome.NO_DETECTIONS,
+        "reference": serialize_point(evidence.reference),
+        "reference_kind": evidence.reference_kind.value,
+        "strategy": evidence.strategy.value,
+        "outcome": evidence.outcome.value,
+        "candidate_count": evidence.candidate_count,
+        "candidates_truncated": evidence.candidates_truncated,
+        "candidates": [
+            {
+                "original_index": candidate.original_index,
+                "bounds": serialize_rect(candidate.detection.bounds),
+                "confidence": _finite(candidate.detection.confidence),
+                "contains_reference": candidate.contains_reference,
+                "center_distance": _finite(candidate.center_distance),
+                "selected": candidate.selected,
+            }
+            for candidate in evidence.candidates
+        ],
     }
 
 
 def serialize_frame_measurement(measurement: FrameMeasurement) -> dict[str, object]:
     return {
-        "root": serialize_point(measurement.root),
-        "bounds": serialize_rect(measurement.bounds),
         "detector_bounds": serialize_rect(measurement.detector_bounds),
         "confidence": _finite(measurement.confidence),
-        "covariance": _finite(measurement.covariance),
-        "velocity": serialize_point(measurement.velocity),
-        "lost": measurement.lost,
+        "detection_missed": measurement.missed,
     }
 
 
 def serialize_planner_trace(trace: PlannerFrameTrace) -> dict[str, object]:
     return {
-        "envelope": serialize_rect(trace.envelope),
-        "lead_room": serialize_point(trace.lead_room),
-        "uncertainty_padding": _finite(trace.uncertainty_padding),
-        "containment_risk": trace.containment_risk,
-        "zoom_action": trace.zoom_action,
+        "target_height_fraction": _finite(trace.target_height_fraction),
+        "desired_crop": serialize_crop_rect(trace.desired_crop),
+        "detection_missed": trace.detection_missed,
+        "smoothing_applied": trace.smoothing_applied,
+        "containment_override": trace.containment_override,
+        "source_aspect_limited": trace.source_aspect_limited,
+        "action": trace.action,
     }
 
 

@@ -2,394 +2,102 @@
 
 ## Purpose
 
-Implement an offline service that plans and renders a smooth 1080p reframe from one wide, static-camera sports recording. A user uploads a video, selects one athlete, chooses an output aspect ratio and framing profile, waits for processing, and downloads that result.
+Boulder Frame converts one continuous wide, static-camera sports recording into a smooth 1080p close-up
+of one user-selected athlete. Processing is offline only. The user uploads an MP4 or MOV, taps the
+athlete in a preview frame, chooses an aspect ratio and profile, waits for completion, and downloads
+an H.264/AAC MP4.
 
-This document is the authoritative implementation specification, including the product rationale and algorithm decisions behind these choices.
+## MVP Boundary
 
-## Product Contract
+- One static-camera shot and one selected athlete.
+- 4K input is recommended; output is 1080p `16:9` or `9:16`.
+- Supported source video is H.264 or HEVC in MP4/QuickTime MOV with optional AAC. CFR input is used
+  directly; supported VFR input is normalized once to a job-local CFR derivative without modifying
+  the immutable source object.
+- No real-time processing, multi-athlete operation, landmark inference, future-position inference,
+  equipment detection, super-resolution, lens correction, or native capture.
 
-### Supported workflow
+## Framing Contract
 
-1. Create a project.
-2. Upload one source video.
-3. Select the athlete by tapping/clicking them in a preview frame.
-4. Choose `16:9` or `9:16` and one framing profile.
-5. Start processing and observe the job state.
-6. Download the finished reframed MP4 or view a clear terminal failure.
+The W0.2 worker is detector-only. It runs the pinned ONNX SSD-MobilenetV1-12 person detector on the
+selected frame and associates the tap with a containing or nearest person box. Every analyzed frame
+uses its current person detection. The selected box seeds separate forward and backward association
+passes, so no frame is associated before the user selection is resolved. A later candidate must remain
+within 1.5 times the last accepted detector-box diagonal of that actual box; rejected candidates
+and detector misses widen framing without changing that reference. No former target position is extrapolated.
 
-### Supported input
-
-- One continuous shot from a static phone or tripod.
-- 4K input is the recommended source resolution.
-- One intended athlete.
-- MP4 or QuickTime MOV video with a supported FFmpeg decode path. The worker uses supported
-  constant-frame-rate input directly and normalizes supported variable-frame-rate input locally
-  before analysis and rendering.
-- H.264/AAC MP4 and QuickTime MOV sources are supported. HEVC/H.265 video in MOV is
-  accepted when the worker's FFmpeg build can decode it; browser preview support depends on
-  the browser codec (Safari on macOS is the recommended preview path for HEVC).
-
-### Output
-
-- A 1080p H.264/AAC MP4 in the requested output aspect ratio, preserving source audio when present.
-- H.264 video and source audio when available.
-- A crop path that keeps the selected athlete's available full-body movement in frame and moves smoothly; the output makes that path inspectable before cropped-video rendering is introduced.
-- A download URL to the output asset.
-
-### Framing profiles
-
-| Profile | Behavior |
+| Profile | Detected athlete height / crop height |
 | --- | --- |
-| `tight` | Smallest baseline safety margin; zooms in only while movement is stable and confidence is high. |
-| `balanced` | Default safety margin and moderate composition lead room. |
-| `safe` | Larger base and uncertainty margins; favors retention over subject size. |
-| `full_movement` | Widest intended framing; prioritizes limbs and predicted movement envelope. |
+| `tight` | `.60` |
+| `balanced` | `.50` |
+| `safe` | `.40` |
+| `full_movement` | `.33` |
 
-Profile differences are planner configuration only. They do not select different models or alter the tracking identity.
-
-### Non-goals
-
-- Real-time reframing or live preview output.
-- Multi-athlete selection/tracking.
-- Ball or sport-equipment detection.
-- AI upscaling or super-resolution.
-- Automatic lens-distortion correction.
-- Native camera capture in the initial implementation.
+For a detection, the planner centers an aspect-ratio crop on its box center, targets the fixed height
+fraction, clamps it to source bounds, smoothly limits pan/zoom changes, and overrides smoothing when
+needed to contain the current detection. For a missed detection it widens the previous crop toward
+the full valid source-aspect crop. A first-frame miss uses the full crop. The planner remains behind
+an interface for future replacement without changing API or storage contracts.
+If source bounds or the requested aspect cannot contain a detection, it centers the largest valid crop
+on that detection as far as bounds permit and records a `source_aspect_limited` diagnostic rather than
+claiming containment.
 
 ## Architecture
 
-The browser is responsible for project settings and the initial athlete selection. It never decodes or processes the full video. A Go service owns authorization, durable metadata, signed asset URLs, and job submission. A Python worker owns video analysis, virtual-camera planning, and rendering, because the required computer-vision and numerical libraries are mature in Python.
-
 ```mermaid
 flowchart LR
-    U[User] --> W[Vite + React web app]
-    W -->|request signed upload| A[Go API]
-    A --> P[(PostgreSQL)]
-    A -->|signed upload URL| W
-    W -->|source video| S[(S3-compatible object storage)]
-    W -->|project settings and normalized target tap| A
-    A --> Q[(Redis Streams)]
-    Q --> K[Python CV and render worker]
-    K -->|read source| S
-    K --> D[FFmpeg decode]
-    D --> V[Detector and MediaPipe pose]
-    V --> T[Single-target tracking and backward smoothing]
-    T --> C[Movement envelope and crop planner]
-    C --> R[FFmpeg per-frame crop and 1080p scale]
-    R -->|output MP4 and debug artifacts| S
-    K -->|status progress artifacts| P
-    W -->|poll job status and request download| A
-    A -->|signed download URL| W
+  U[User] --> W[Vite React web app]
+  W -->|signed upload request and job settings| A[Go API]
+  A --> P[(PostgreSQL)]
+  A -->|signed upload URL| W
+  W -->|source video| S[(Private S3-compatible storage)]
+  A --> Q[(Redis Streams)]
+  Q --> K[Python detector and render worker]
+  K -->|download source| S
+  K --> V[FFprobe and optional VFR to CFR]
+  V --> D[ONNX person detection]
+  D --> F[Detector-box crop planning]
+  F --> R[FFmpeg crop scale render]
+  R -->|output plus optional review artifacts| S
+  K -->|state progress artifacts| P
+  W -->|poll job and request download/review| A
 ```
 
-## Technology Decisions
+The React app handles upload UI, selection, settings, job polling, download, and terminal review.
+The Go API owns request validation, PostgreSQL metadata, signed URLs, and Redis dispatch. The Python
+worker owns media processing and never runs inside the API process. PostgreSQL stores immutable job
+configuration, pipeline/model versions, state/progress, errors, and artifact references; object storage
+stores all source, output, telemetry, manifest, and review media bytes.
 
-| Concern | Choice | Constraint or reason |
-| --- | --- | --- |
-| Web app | Vite, React, TypeScript | Minimal browser UI for uploads, subject selection, status, and download. |
-| API | Go, `chi`, `pgx` | Go is the primary application language; `pgx` provides direct PostgreSQL access. |
-| Background dispatch | Redis Streams | Durable asynchronous handoff from the Go API to long-running work. The API writes `boulder-frame:jobs`; workers consume it through group `boulder-frame:job-processors`. |
-| Metadata | PostgreSQL | Stores projects, jobs, configurations, asset references, status, and errors. |
-| Video assets | S3-compatible object storage | Original 4K files, rendered MP4s, and optional debug artifacts stay outside service filesystems. |
-| CV/render worker | Python 3.12 | Required ecosystem for MediaPipe, ONNX Runtime, OpenCV, numerical processing, and the later optimizer. |
-| Detection | ONNX SSD-MobilenetV1-12 through ONNX Runtime | W0.1 pinned artifact, license, checksum, and tensor contract are documented in the worker model manifest; future replacement requires a new immutable model version. |
-| Pose | MediaPipe Pose Landmarker Full | Returns body landmarks required for a pose-aware movement envelope. |
-| Tracking | Custom single-target Kalman filter | A selected-athlete MVP needs transparent tracking and confidence behavior, not a multi-object tracker. |
-| Media | FFmpeg, OpenCV | FFmpeg handles decode, encode, audio, and validation; OpenCV is limited to frame-level utilities. |
-| First planner | Deterministic target-crop controller | Fast to validate visually and isolated behind a planner interface. |
-| Planned optimizer | CVXPY and OSQP | Replaces the controller only after evaluation data justifies a whole-shot constrained quadratic program. |
-| Module startup | Docker Compose | Starts the frontend, Go API, and Python worker; PostgreSQL, Redis, and object storage are external dependencies. |
+## Immutable Job Contract
 
-## Service Boundaries
+The API accepts normalized source-frame selection coordinates and output settings. It snapshots
+pipeline/model versions before queueing. W0.2 model version is exactly
+`w0.2-ssd-mobilenetv1-12-onnx-detector-only-1`; a claimed job whose immutable model version differs
+from the active verified worker fails terminally with `model_unavailable` before media or inference.
+Existing W0.1 jobs are incompatible with W0.2 and fail this check; users must create a new W0.2 job,
+not retry the old job.
 
-### Web app
+Job stages are `queued`, `validating`, `analyzing`, `rendering`, `uploading`, and terminal
+`completed`, `failed`, or reserved `cancelled`. Redis provides at-least-once delivery; PostgreSQL
+leases and guarded transitions are processing authority. Output finalization is idempotent.
 
-- Creates projects and submits source-asset metadata.
-- Requests signed upload and download URLs from the API.
-- Renders a preview frame and sends target-tap coordinates normalized to `[0, 1]` in source-frame space: `x = 0` is left, `y = 0` is top.
-- Sends output aspect ratio and framing profile.
-- Polls the job resource until it becomes terminal.
-- Displays progress, terminal errors, and output download.
+## Rendering And Durability
 
-### Go API
+The worker validates source media, bounds VFR normalization by configured source-size and timeout
+limits, preserves valid optional AAC without shortening video, rotation-normalizes output coordinates,
+and validates the final H.264/AAC MP4 before finalizing `output`. Source objects and local VFR
+derivatives are never overwritten or persisted as new sources.
 
-- Authenticates and authorizes project and asset access when authentication is introduced. Initial local development may use a single development user; public deployment must not.
-- Validates all requests and supported source constraints.
-- Creates signed object-store upload/download URLs.
-- Persists immutable processing configuration before enqueueing the job.
-- Appends one idempotent processing task using the job identifier as `task_id`.
-- Exposes project, asset, job status, output artifact metadata, and authorized optional phase-review URLs
-  for terminal jobs.
-- Does not call CV models, decode video, or render media.
-
-### Python worker
-
-- Consumes jobs through the Redis Streams consumer group, then atomically claims PostgreSQL lease authority before moving them through valid states.
-- Loads the immutable job configuration and source asset from PostgreSQL/object storage.
-- Validates dimensions, codec, timing, and decodability; normalizes supported variable frame rate
-  and display rotation inside job scratch before analysis.
-- Runs athlete measurement, tracking, crop planning, and rendering.
-- Periodically persists stage progress and structured errors.
-- Writes output/debug artifacts to object storage, including opt-in phase-review artifacts, and makes
-  the completed output and authorized review available through the API.
-- Is stateless between jobs; all durable state belongs in PostgreSQL or object storage.
-
-## API Contract
-
-The external API is REST over JSON. Exact route/version syntax can be selected during scaffolding, but its resource contract must remain as follows.
-
-### Project
-
-```json
-{
-  "id": "project_uuid",
-  "name": "training session",
-  "created_at": "2026-08-18T12:00:00Z"
-}
-```
-
-### Asset
-
-```json
-{
-  "id": "asset_uuid",
-  "project_id": "project_uuid",
-  "kind": "source",
-  "upload_state": "pending|uploaded|invalid",
-  "storage_key": "private/source/project_uuid/asset_uuid.mov",
-  "width": 3840,
-  "height": 2160,
-  "frame_rate": 60,
-  "duration_ms": 42000,
-  "created_at": "2026-08-18T12:00:00Z"
-}
-```
-
-The API returns a signed upload URL before the client sends source bytes. The client must confirm upload completion before it can create a processing job.
-
-### Processing request
-
-```json
-{
-  "source_asset_id": "asset_uuid",
-  "target_selection": {
-    "frame_time_ms": 0,
-    "normalized_x": 0.5,
-    "normalized_y": 0.5
-  },
-  "output": {
-    "aspect_ratio": "16:9",
-    "profile": "balanced"
-  }
-}
-```
-
-The target selection must use the displayed frame's normalized coordinates after any browser preview layout transform. The worker maps the coordinate to decoded source pixels and associates it with a detected person at the chosen frame.
-
-### Job
-
-```json
-{
-  "id": "job_uuid",
-  "project_id": "project_uuid",
-  "source_asset_id": "asset_uuid",
-  "state": "queued",
-  "stage": "queued",
-  "progress": 0,
-  "configuration": {
-    "target_selection": {
-      "frame_time_ms": 0,
-      "normalized_x": 0.5,
-      "normalized_y": 0.5
-    },
-    "output": {
-      "aspect_ratio": "16:9",
-      "profile": "balanced"
-    },
-    "pipeline_version": "git_sha_or_release",
-    "model_version": "pinned_model_identifier"
-  },
-  "output_asset_id": null,
-  "error": null,
-  "created_at": "2026-08-18T12:00:00Z",
-  "started_at": null,
-  "completed_at": null
-}
-```
-
-`configuration` is immutable after job creation. Retrying uses the same job configuration unless the user explicitly creates a new job.
-
-### Job states
-
-| State | Meaning |
-| --- | --- |
-| `queued` | The API persisted the job and appended it to the Redis Stream. |
-| `validating` | The worker is checking source media and selection viability. |
-| `analyzing` | Detection, pose, tracking, and crop planning are running. |
-| `rendering` | FFmpeg is creating the output video. |
-| `uploading` | The worker is storing completed artifacts. |
-| `completed` | The output asset is available. |
-| `failed` | A terminal error is recorded. |
-| `cancelled` | Reserved for an explicit future cancellation feature; no worker cancellation is required in the first implementation. |
-
-The worker may retry transient object storage, queue, or infrastructure failures. Invalid media, no selected athlete at the selected frame, unsupported timing, and unrecoverable rendering errors are terminal failures with a user-safe message and a structured internal error code.
-
-## Persistence Model
-
-The initial PostgreSQL schema has these durable entities:
-
-| Entity | Required fields | Notes |
-| --- | --- | --- |
-| `projects` | id, name, owner_id, created_at | `owner_id` may use the local development user until authentication exists. |
-| `assets` | id, project_id, kind, storage_key, upload_state, media metadata, created_at | `kind` is `source`, `output`, or `debug`. |
-| `processing_jobs` | id, project_id, source_asset_id, state, stage, progress, immutable configuration JSON, error code/message, lease owner/expiry, timestamps | Stores pipeline and model versions in the configuration. Migration `002_worker_leases.sql` adds the worker lease fields and active-claim index. |
-| `job_artifacts` | id, job_id, asset_id, kind, created_at | Links completed output and optional debug/review artifacts; uniqueness is per job and semantic artifact kind. |
-
-Store only object keys and metadata in PostgreSQL. Do not store video bytes, per-frame measurements,
-or review summaries in relational rows. Optional visual-debug overlays and compact planner telemetry
-belong in private object storage as job artifacts. The final output remains the cropped 1080p video;
-annotated phase videos are diagnostics only.
-
-## Processing Specification
-
-### 1. Validate and normalize source
-
-1. Download the immutable source asset into job scratch as `source-original` and inspect it strictly
-   with FFmpeg/ffprobe.
-2. Reject unsupported codec/container, undecodable media, missing video stream, and unsupported
-   audio. For a supported variable-frame-rate source only, inspect permissively, transcode a
-   job-local `source-cfr.mp4` at its valid average frame rate, then inspect that derivative strictly.
-   Reject VFR sources above the worker's configured temporary-processing source-size cap before
-   starting FFmpeg; normalization also has a configured subprocess timeout.
-3. Let FFmpeg normalize display rotation while creating the derivative, retain valid optional AAC
-   audio without allowing shorter audio to truncate the normalized or rendered video, and use the
-   selected original or derivative only within the worker.
-4. Establish a constant analysis cadence that maps exactly to output timestamps. The immutable
-   object-store source is never overwritten or uploaded as a derivative.
-
-### 2. Identify and measure the athlete
-
-1. Decode the user-selected source frame.
-2. Run full-frame person detection on a downscaled frame.
-3. Match the detection containing or nearest the normalized tap point.
-4. Expand the selected person region by a configurable 30-60%.
-5. Crop that ROI from the original-resolution frame and run MediaPipe Pose Landmarker Full.
-6. Transform landmarks back to source-frame coordinates.
-7. For later frames, use periodic full-frame detection for correction/reacquisition and pose inference within the predicted target ROI.
-
-For every analyzed frame, emit a root estimate, pose bounds, detector bounds, confidence, tracking state, and source-pixel coordinate system. The root estimate is a confidence-weighted combination of hip and shoulder centers, with detector center only as fallback. The crop pan follows the root, not the raw bounding-box center.
-
-### 3. Track and recover
-
-Use a single-target Kalman filter with position, velocity, acceleration, and logarithmic scale. Correct it with detector and pose measurements. Keep an appearance signature only for reacquisition; it is not a multi-object tracker.
-
-When confidence drops:
-
-1. Stop zooming in.
-2. Increase envelope uncertainty margins.
-3. Continue short-horizon state prediction.
-4. Run full-frame detection to reacquire.
-5. Expand the crop toward the widest valid composition.
-
-When no reliable athlete can be reacquired, mark the sequence lost and render the widest valid crop rather than inventing a close-up. Source-frame exits are unavoidable containment failures and must be recorded in evaluation telemetry.
-
-### 4. Build movement envelopes
-
-Construct each frame's envelope from reliable pose landmarks, detector bounds, and profile-specific safety padding. The envelope must contain visible head, hands, elbows, knees, feet, torso, and the detector fallback bounds when present.
-
-Add directional lead room based on smoothed velocity and acceleration. Add uncertainty padding based on tracking confidence/covariance. Equipment remains an additional future model; the MVP compensates only through the selected profile's generalized safety margin.
-
-### 5. Smooth recorded-video trajectory
-
-Recorded video exposes future measurements. Apply forward Kalman filtering followed by backward smoothing, interpolate only short validated gaps, and reject robust outliers before calculating envelopes. Do not use a learned movement predictor in this MVP.
-
-### 6. Plan crop path
-
-For source dimensions `W` by `H`, output aspect ratio `r`, crop center `(cx, cy)`, and crop height `h`, crop width is `r * h`. Every crop must remain within source bounds and contain the padded envelope whenever the source itself contains it.
-
-The first planner implementation uses a target crop plus asymmetric temporal controls:
-
-- Derive the minimum valid aspect-ratio crop around the current padded envelope.
-- Place the target center at the torso root plus capped directional lead room.
-- Apply a pan dead zone and smoothing.
-- Zoom out quickly when containment, predicted risk, or confidence requires it.
-- Zoom in slowly only after a stable hold period and high confidence.
-- Use hysteresis: zoom out when the envelope uses roughly 75-80% of crop extent; zoom in only after it remains below roughly 50-60%.
-- Clamp crop position and size to source boundaries every frame.
-
-The planner must be behind an interface that accepts per-frame measurements/configuration and emits crop rectangles. This isolates the later replacement with a whole-shot CVXPY/OSQP constrained quadratic optimizer. Do not add that optimizer until the evaluation set shows a material limitation in the deterministic controller.
-
-### 7. Render and validate
-
-1. Convert the crop path into FFmpeg-compatible crop/scale commands or frame-accurate equivalent transforms.
-2. Render 1080p H.264 output at the selected aspect ratio.
-3. Preserve source audio when supported.
-4. Inspect the output with ffprobe and verify codec, dimensions, duration tolerance, audio mapping, and decodability.
-5. Upload and finalize the validated output asset before marking the job `completed`. Afterwards,
-   best-effort telemetry and optional phase-review resources reuse the aligned analysis trace under one
-   UUID-scoped review set; their render/upload/finalization failures cannot alter the completed output
-   result. Visual rendering has independent duration, byte, and enforced wall-clock limits.
+Optional debug capture is private and best effort. It publishes only `debug_telemetry`,
+`debug_manifest`, and available `debug_detection`, `debug_framing`, and `debug_render` roles. Its
+failure never changes a validated output result. The API projects a bounded manifest and fresh
+short-lived URLs only for terminal authorized jobs.
 
 ## Quality Gates
 
-### Automated checks
-
-- Unit tests for normalized target-coordinate mapping.
-- Unit tests for source and aspect-ratio crop containment.
-- Unit tests for profile ordering, directional margins, low-confidence widening, and maximum pan/zoom-rate behavior.
-- Fixture tests for selection association, pose-coordinate transformation, short tracking gaps, reacquisition, and lost-track behavior.
-- Media integration tests for dimensions, aspect ratio, codec, duration tolerance, audio preservation, and playable output.
-- API/worker integration tests for immutable job configuration, state transitions, idempotent enqueueing, transient retry behavior, and failed-job cleanup.
-- Browser end-to-end test for a short MP4 or MOV fixture video from upload through output download.
-- CI formatting, type checks, test execution, and `git diff --check`.
-
-### Evaluation set
-
-Build a small, annotated, versioned evaluation manifest before planner tuning. It must include a stationary athlete, sprint/lateral movement, jump or limb extension, temporary occlusion, and lost-subject sequence. Keep private source videos outside version control; version only permitted fixtures, annotations, and evaluation metadata.
-
-Track these measures per job and profile:
-
-- Subject-retention rate.
-- Limb-cropped rate.
-- Edge-risk rate.
-- Average athlete frame size.
-- Pan/zoom velocity, acceleration, and jerk.
-- Tracking-recovery time.
-- Output sharpness/quality checks.
-- Human preference against the original wide recording.
-
-## Operational Requirements
-
-- All source and output assets are private by default.
-- Signed object-store URLs must be short-lived and limited to one authorized asset operation.
-- Configure an explicit retention/deletion policy before accepting external user videos.
-- Persist pipeline version, model identifier, and planner configuration with every job so outputs are reproducible.
-- Emit structured logs and per-stage timing for validation, analysis, rendering, upload, and failures.
-- Keep API and worker independently deployable and scalable; GPU workers are optional until benchmarked detection/pose/render workload requires them.
-- Do not place long-running media work in the Go API process.
-- Redis Streams is transport, not processing authority: a worker may acknowledge a stream entry only after PostgreSQL records the terminal result. Pending entries are recovered by the consumer group; PostgreSQL leases prevent duplicate active processing.
-- `configuration.model_version` is immutable and must equal the active verified worker runtime version before a stage handler or any media/CV work runs; a mismatch is a terminal `model_unavailable` failure.
-- Local `MODEL_VERSION=unset-until-pinned` is normalized to the safe `unconfigured` state, where matching jobs fail terminally with `model_unavailable`. Configuring W0.1 without all verified local artifacts or required decoder dependencies is a startup failure; a provisioned W0.1 worker may process matching jobs.
-
-## Delivery Order
-
-1. Scaffold the Vite/React app, Go API, Python worker, Docker Compose module startup, database migrations, and object-store integration.
-2. Implement assets, signed uploads, project/job resources, immutable configuration, Redis Streams dispatch, and job status polling.
-3. Implement source validation and a fixture-only FFmpeg render path end to end.
-4. Add initial target selection, detector association, pose ROI transformation, Kalman tracking, and confidence/lost-track states.
-5. Add movement envelopes and deterministic crop planning.
-6. Add production output validation, debug overlays, automated tests, evaluation metrics, and observability.
-7. Evaluate framing quality before considering the global optimizer, native iOS capture, real-time mode, or sport-specific models.
-
-## Deferred Roadmap
-
-| Capability | Prerequisite |
-| --- | --- |
-| Global crop-path QP | Evaluation evidence that the deterministic planner cannot meet containment/smoothness goals. |
-| iOS ultra-wide capture | Offline quality validated; use Swift, SwiftUI, and AVFoundation with physical ultra-wide camera discovery. |
-| Android capture | Separate product decision; use Kotlin and CameraX, not a premature cross-platform abstraction. |
-| Real-time reframing | Offline planner validated, plus latency, thermal, battery, and device targets; use an IMM Kalman predictor and receding-horizon control. |
-| Multi-athlete tracking | Repeated identity-switching failures; evaluate an appearance-based tracker such as Deep OC-SORT. |
-| Equipment/ball detection | A chosen sport and labeled data showing generalized padding is insufficient. |
-| Lens correction | Device-specific calibration or reliable lens metadata. |
-| Super-resolution | Measured output-quality need after source-resolution guidance and crop limits are validated. |
+- API/job-state, lease, artifact, and evaluation-projection tests.
+- Detector association, profile fractions, smoothing, containment, and missed-detection widening tests.
+- Output media validation for dimensions, codec, timing, decodability, and audio retention.
+- Browser workflow and phase-review contract tests.
+- Formatting, type checks, documentation links, and `git diff --check` before release.

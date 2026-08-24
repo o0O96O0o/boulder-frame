@@ -4,8 +4,8 @@
 
 PostgreSQL is the durable source of truth for project metadata, asset references, immutable job configuration, job state/progress/errors, and artifact relationships. Video bytes and per-frame measurements do not belong in PostgreSQL.
 
-The migrations are `backend/migrations/001_init.sql`, `backend/migrations/002_worker_leases.sql`, and
-`backend/migrations/003_phase_evaluation.sql`.
+The migrations are `backend/migrations/001_init.sql`, `backend/migrations/002_worker_leases.sql`,
+`backend/migrations/003_phase_evaluation.sql`, and `backend/migrations/004_detector_only_review_roles.sql`.
 
 ## Tables
 
@@ -45,19 +45,21 @@ The unique constraint on `(project_id, configuration_hash)` prevents duplicate a
 ### `job_artifacts`
 
 Links a job to an output or optional debug-review asset. `(job_id, kind)` is unique so retries cannot
-create multiple logical artifacts for the same semantic role. The current roles are `output` and
-legacy `debug`. The phase-review design migrates legacy `debug` rows to `debug_telemetry` and adds
-`debug_manifest`, `debug_measurement`, `debug_pose`, `debug_tracking`, `debug_planning`, and
-`debug_render`. All review resources point to assets whose `assets.kind` remains `debug`.
+create multiple logical artifacts for the same semantic role. The current roles are `output`,
+`debug_telemetry`, `debug_manifest`, `debug_detection`, `debug_framing`, and `debug_render`. All
+review resources point to assets whose `assets.kind` remains `debug`.
 
 ### Phase-Review Rollout
 
-Migration `003_phase_evaluation.sql` removes the legacy `debug` artifact role. It must not be applied
-while an older worker can finalize that role. Drain and stop all older workers first, wait for their
-active leases to finish or expire, apply migration `003`, then deploy/restart only workers that
-finalize the UUID-scoped review role set and remove omitted stale roles before resuming consumption.
-Queued and reclaimed jobs may retry after the compatible workers are live; do not roll back to an
-older worker while the migrated schema is active.
+Migration `003_phase_evaluation.sql` converts legacy `debug` rows to `debug_telemetry`. Migration
+`004_detector_only_review_roles.sql` removes only retired `job_artifacts` links and limits new writes
+to detector-only roles. It deliberately does not delete referenced debug assets or object-store bytes:
+object storage lifecycle policy cleans these obsolete objects after its configured retention period,
+avoiding deletion of arbitrary or shared data. Drain and stop workers that can finalize retired roles,
+wait for their leases to finish or expire, apply `004`, then deploy/restart detector-only workers.
+Existing W0.1 jobs fail immutable model-version compatibility with `model_unavailable`; users must
+create a new W0.2 job rather than retrying an incompatible old job. Do not roll back to an older worker
+while the detector-only schema is active.
 
 ## Repository Boundary
 

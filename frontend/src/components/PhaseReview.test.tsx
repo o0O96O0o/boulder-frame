@@ -21,23 +21,25 @@ describe('PhaseReview', () => {
     Object.defineProperty(video, 'currentTime', { value: 3.5, writable: true, configurable: true })
     fireEvent.timeUpdate(video)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pose (warning)' }))
-    const poseVideo = screen.getByTestId('review-video') as HTMLVideoElement
-    Object.defineProperty(poseVideo, 'duration', { value: 20, configurable: true })
-    fireEvent.loadedMetadata(poseVideo)
-    expect(poseVideo.currentTime).toBe(3.5)
+    fireEvent.click(screen.getByRole('button', { name: 'Framing (warning)' }))
+    const framingVideo = screen.getByTestId('review-video') as HTMLVideoElement
+    Object.defineProperty(framingVideo, 'duration', { value: 20, configurable: true })
+    fireEvent.loadedMetadata(framingVideo)
+    expect(framingVideo.currentTime).toBe(3.5)
 
     fireEvent.click(screen.getByRole('button', { name: /0:04 - 0:05/i }))
-    expect(poseVideo.currentTime).toBe(4.2)
-    expect(screen.getByRole('button', { name: 'Pose (warning)' }).getAttribute('aria-pressed')).toBe('true')
+    expect(framingVideo.currentTime).toBe(4.2)
+    expect(screen.getByRole('button', { name: 'Framing (warning)' }).getAttribute('aria-pressed')).toBe('true')
     expect(screen.queryByRole('tab')).toBeNull()
   })
 
   it('plainly displays an unavailable selected phase', () => {
     render(<PhaseReview evaluation={evaluation} onClose={vi.fn()} onRefresh={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Planning (unavailable)' }))
-    expect(screen.getByText('Planning evidence unavailable')).toBeTruthy()
-    expect(screen.getByText('Planning evidence was not captured for this review run.')).toBeTruthy()
+    const unavailable = { ...evaluation, phases: evaluation.phases!.map((phase) => phase.id === 'framing' ? { ...phase, status: 'unavailable' as const, detail: 'Framing evidence was not captured for this review run.', video_url: undefined } : phase) }
+    render(<PhaseReview evaluation={unavailable} onClose={vi.fn()} onRefresh={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Framing (unavailable)' }))
+    expect(screen.getByText('Framing evidence unavailable')).toBeTruthy()
+    expect(screen.getByText('Framing evidence was not captured for this review run.')).toBeTruthy()
   })
 
   it('offers a safe refresh when phase media cannot load', () => {

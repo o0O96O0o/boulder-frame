@@ -45,7 +45,6 @@ ANNOTATION = AnnotationFrame(
     "athlete-a",
 )
 DETECTION = Rect(20, 20, 20, 40)
-TRACKER_ROOT = Point(30, 45)
 CROP = Rect(10, 10, 50, 70)
 
 
@@ -55,8 +54,6 @@ def frame(
     *,
     detection: Rect | None = DETECTION,
     selected: bool | None = True,
-    tracker_root: Point | None = TRACKER_ROOT,
-    tracker_state: str | None = "tracked",
     crop: Rect | None = CROP,
     rendered_crop: Rect | None = None,
     rendered_timestamp_ms: int | None = None,
@@ -67,9 +64,6 @@ def frame(
         timestamp_ms,
         detection,
         selected,
-        Point(30, 45),
-        tracker_root,
-        tracker_state,
         crop,
         rendered_crop,
         rendered_timestamp_ms,
@@ -146,14 +140,12 @@ def test_parses_v1_gzip_jsonl_bundle(tmp_path: Path) -> None:
             {
                 "frame_index": 0,
                 "timestamp_ms": 0,
-                "measurement": {
+                "detection": {
                     "detection": {"bounds": {"x": 20, "y": 20, "width": 20, "height": 40}},
                     "selection": {"selected": True},
-                    "pose": {"root": {"x": 30, "y": 45}},
                 },
-                "tracking": {"root": {"x": 30, "y": 45}, "state": "tracked"},
-                "planning": {
-                    "input": {"lost": False},
+                "framing": {
+                    "input": {"detector_bounds": {"x": 20, "y": 20, "width": 20, "height": 40}},
                     "crop": {"x": 10, "y": 10, "width": 50, "height": 70},
                 },
                 "render": {
@@ -169,6 +161,31 @@ def test_parses_v1_gzip_jsonl_bundle(tmp_path: Path) -> None:
     assert bundle.header.source == SOURCE
     assert bundle.header.planner_version == "planner-v1"
     assert bundle.frames[0].render_mapping_independently_verified is True
+
+
+def test_published_detector_only_telemetry_loads_and_evaluates(tmp_path: Path) -> None:
+    path = tmp_path / "debug.jsonl.gz"
+    with DebugBundleWriter(
+        path,
+        debug_bundle_header(
+            job_id="job-w0.2",
+            source_metadata=source_json(),
+            pipeline_version="pipeline-v1",
+            model_version="w0.2-ssd-mobilenetv1-12-onnx-detector-only-1",
+            planner_config={"planner_version": "deterministic-v1", "profile": "balanced"},
+            model_manifest={"model_version": "w0.2-ssd-mobilenetv1-12-onnx-detector-only-1"},
+        ),
+    ) as writer:
+        writer.write("frame", frame_record(0, 0))
+
+    result = evaluate(
+        load_debug_bundle(path, max_frames=1),
+        AnnotationSet("case-v1", SOURCE, "reviewer", (ANNOTATION,)),
+    )
+
+    assert result.frames[0].detection_available
+    assert result.frames[0].crop_contains_subject
+    assert result.segment["model_version"].startswith("w0.2-")
 
 
 def test_ignores_operational_stage_records_in_debug_bundle(tmp_path: Path) -> None:
@@ -190,14 +207,12 @@ def test_ignores_operational_stage_records_in_debug_bundle(tmp_path: Path) -> No
             {
                 "frame_index": 0,
                 "timestamp_ms": 0,
-                "measurement": {
+                "detection": {
                     "detection": {"bounds": {"x": 20, "y": 20, "width": 20, "height": 40}},
                     "selection": {"selected": True},
-                    "pose": {"root": {"x": 30, "y": 45}},
                 },
-                "tracking": {"root": {"x": 30, "y": 45}, "state": "tracked"},
-                "planning": {
-                    "input": {"lost": False},
+                "framing": {
+                    "input": {"detector_bounds": {"x": 20, "y": 20, "width": 20, "height": 40}},
                     "crop": {"x": 10, "y": 10, "width": 50, "height": 70},
                 },
                 "render": {
@@ -294,7 +309,7 @@ def test_source_identity_requires_matching_dimensions_and_timing() -> None:
         evaluate(DebugBundle(header, (frame(0, 0),)), annotations)
 
 
-def test_metrics_include_detection_crop_tracking_recovery_and_normalized_motion() -> None:
+def test_metrics_include_detection_crop_and_normalized_motion() -> None:
     annotations = (
         ANNOTATION,
         AnnotationFrame(1, 100, True, False, False, Rect(20, 20, 20, 40), (), Point(30, 45), None),
@@ -302,7 +317,7 @@ def test_metrics_include_detection_crop_tracking_recovery_and_normalized_motion(
         AnnotationFrame(3, 300, True, False, False, Rect(20, 20, 20, 40), (), Point(30, 45), None),
     )
     value = report(
-        frame(0, 0, tracker_root=None, tracker_state="lost", crop=Rect(10, 10, 50, 70)),
+        frame(0, 0, crop=Rect(10, 10, 50, 70)),
         frame(1, 100, crop=Rect(15, 10, 50, 70)),
         frame(2, 200, crop=Rect(30, 10, 50, 70)),
         frame(3, 300, crop=Rect(35, 10, 50, 70)),
@@ -310,26 +325,31 @@ def test_metrics_include_detection_crop_tracking_recovery_and_normalized_motion(
     )
 
     assert value.frames[0].detection_iou == 1
-    assert value.frames[1].tracking_recovery_ms == 100
     assert value.frames[1].crop_contains_subject
-    assert value.frames[1].cropped_landmarks == 0
+    assert value.frames[1].source_aspect_limited is False
     assert value.frames[1].edge_risk is False
     assert value.frames[1].subject_scale == pytest.approx(800 / (50 * 70))
     assert value.frames[1].pan_velocity == pytest.approx(5 / (100**2 + 100**2) ** 0.5 / 0.1)
     assert value.frames[2].pan_acceleration is not None
     assert value.frames[3].pan_jerk is not None
     assert value.frames[1].zoom_velocity is not None
-    assert value.aggregate["tracker_availability"] == pytest.approx(3 / 4)
-    assert value.aggregate["mean_tracking_recovery_ms"] == 100
+
+
+def test_detector_only_telemetry_reports_source_aspect_limited_framing() -> None:
+    value = report(
+        DebugFrame(0, 0, DETECTION, True, CROP, None, None, False, True),
+    )
+
+    assert value.frames[0].source_aspect_limited
+    assert value.aggregate["source_aspect_limited_rate"] == 1
 
 
 @pytest.mark.parametrize(
     ("debug", "annotation", "expected"),
     [
-        (frame(0, 0, detection=None), ANNOTATION, FailureClass.MEASUREMENT),
+        (frame(0, 0, detection=None), ANNOTATION, FailureClass.DETECTION),
         (frame(0, 0, selected=False), ANNOTATION, FailureClass.SELECTION),
-        (frame(0, 0, tracker_root=None, tracker_state="lost"), ANNOTATION, FailureClass.TRACKING),
-        (frame(0, 0, crop=Rect(25, 25, 20, 30)), ANNOTATION, FailureClass.PLANNING),
+        (frame(0, 0, crop=Rect(25, 25, 20, 30)), ANNOTATION, FailureClass.FRAMING),
         (
             frame(0, 0, rendered_crop=Rect(11, 10, 50, 70), rendered_timestamp_ms=0),
             ANNOTATION,
@@ -420,14 +440,12 @@ def frame_record(index: int, timestamp_ms: int) -> dict[str, object]:
     return {
         "frame_index": index,
         "timestamp_ms": timestamp_ms,
-        "measurement": {
+        "detection": {
             "detection": {"bounds": {"x": 20, "y": 20, "width": 20, "height": 40}},
             "selection": {"selected": True},
-            "pose": {"root": {"x": 30, "y": 45}},
         },
-        "tracking": {"root": {"x": 30, "y": 45}, "state": "tracked"},
-        "planning": {
-            "input": {"lost": False},
+        "framing": {
+            "input": {"detector_bounds": {"x": 20, "y": 20, "width": 20, "height": 40}},
             "crop": {"x": 10, "y": 10, "width": 50, "height": 70},
         },
         "render": {

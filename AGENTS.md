@@ -2,9 +2,9 @@
 
 ## Project Goal
 
-Build an offline sports-video reframing service that converts a wide, static-camera recording into a smooth 1080p close-up while keeping one user-selected athlete's full available movement in frame.
+Build an offline sports-video reframing service that converts a wide, static-camera recording into a smooth 1080p close-up around one user-selected athlete.
 
-The product should feel like an anticipating camera operator, not a basic auto-centering crop. Prefer the tightest crop that safely contains the athlete's current and future-aware movement envelope.
+The W0.2 product is a detector-only virtual camera: it holds the selected athlete's detected box at a fixed profile height and widens safely when detection is missed.
 
 ## Authoritative Documents
 
@@ -29,29 +29,27 @@ Update the focused documentation and its index whenever an implementation decisi
 
 - The Vite/React/TypeScript web app handles upload UI, athlete selection, job status, and download only.
 - The Go API owns validation, PostgreSQL metadata, signed object-store URLs, and Redis Streams job dispatch.
-- The Python worker owns MediaPipe/ONNX/OpenCV CV work, tracking, crop planning, and FFmpeg rendering.
+- The Python worker owns ONNX/OpenCV detection, detector-box crop planning, and FFmpeg rendering.
 - Store video assets in S3-compatible object storage, not PostgreSQL or local service filesystems.
 - Keep immutable job configuration, pipeline version, model version, state, progress, and errors in PostgreSQL.
 - Do not run CV inference, decoding, or long-running rendering in the Go API process.
 
 ## Framing Rules
 
-- Pan follows a stable torso/root signal, not a raw person-box center.
-- Zoom contains the movement envelope: reliable pose landmarks, detector fallback bounds, profile padding, directional lead room, and uncertainty.
-- Use future information from recorded video through forward filtering and backward smoothing.
-- Zoom out quickly for containment risk or low confidence; zoom in slowly only after stable, high-confidence movement.
-- On lost tracking, widen toward the full source frame and attempt reacquisition. Never invent a close crop when the athlete is not reliable.
+- Pan follows the detected person-box center with bounded smoothing.
+- Zoom targets a fixed detected-athlete height fraction: `tight` .60, `balanced` .50, `safe` .40, and `full_movement` .33.
+- On a missed detection, widen toward the full source frame. Never extrapolate an athlete position for a close crop.
 - Keep the first deterministic crop planner behind an interface so a future whole-shot optimizer can replace it without changing API or storage contracts.
 
 ## Engineering Expectations
 
 - Prefer the smallest change that meets the documented MVP.
-- Pin and verify model licenses before adding a detector or pose model dependency.
+- Pin and verify model licenses before adding a detector dependency.
 - Reject unsupported media. For supported VFR input, normalize once to a job-local CFR derivative
   before analysis and rendering; never alter the immutable source object. Bound normalization by its
   configured source-size cap and FFmpeg timeout; retain valid AAC without truncating video.
 - Make durable worker operations idempotent and record user-safe terminal errors with structured internal error codes.
-- Add automated tests for API/job transitions, tracking/planning behavior, output-media validation, and browser workflow where applicable.
+- Add automated tests for API/job transitions, detector-framing behavior, output-media validation, and browser workflow where applicable.
 - Maintain a permitted fixture/evaluation manifest; keep private videos out of version control.
 - Before completing a feature, update relevant docs, validate internal links, and run available formatting, type, test, and `git diff --check` commands. If a command cannot run, state why.
 

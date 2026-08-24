@@ -93,6 +93,17 @@ is the only allowed unavailable-reason value; nested values, URLs, object paths,
 credential-like text are rejected with the complete manifest. `detail` is omitted for all other phase
 statuses. The API preserves accepted details without adding storage or infrastructure context.
 
+The ordered phase contract is exactly:
+
+| ID | Label | Artifact role | Media name |
+| --- | --- | --- | --- |
+| `detection` | `Detection` | `debug_detection` | `detection.mp4` |
+| `framing` | `Framing` | `debug_framing` | `framing.mp4` |
+| `render` | `Render` | `debug_render` | `render.mp4` |
+
+`debug_telemetry` and `debug_manifest` support the projection but are not phases. Unknown,
+duplicated, unordered, or retired phase roles make the review unavailable.
+
 ### Review Manifest v1
 
 The worker's `manifest.json` is strict schema v1. Its root fields are `schema_version`, `review_id`,

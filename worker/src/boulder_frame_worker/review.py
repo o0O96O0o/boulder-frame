@@ -13,25 +13,7 @@ from pathlib import Path
 
 from .media import MediaMetadata
 
-PHASES = ("measurement", "pose", "tracking", "planning", "render")
-_SKELETON = (
-    (11, 12),
-    (11, 13),
-    (13, 15),
-    (12, 14),
-    (14, 16),
-    (11, 23),
-    (12, 24),
-    (23, 24),
-    (23, 25),
-    (25, 27),
-    (27, 29),
-    (29, 31),
-    (24, 26),
-    (26, 28),
-    (28, 30),
-    (30, 32),
-)
+PHASES = ("detection", "framing", "render")
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,49 +240,43 @@ class ReviewRenderer:
             transform = _PaneTransform(
                 pixels.shape[1], pixels.shape[0], 0, 0, pixels.shape[1], pixels.shape[0]
             )
-        measurement = _mapping(record.get("measurement"))
-        tracking = _mapping(record.get("tracking"))
-        planning = _mapping(record.get("planning"))
-        if phase == "measurement":
-            detection = _mapping(measurement.get("detection"))
-            _draw_rect(cv2, frame, detection.get("bounds"), (0, 220, 255), transform)
+        detection_record = _mapping(record.get("detection"))
+        framing = _mapping(record.get("framing"))
+        if phase == "detection":
+            detection = _mapping(detection_record.get("detection"))
+            selection = _mapping(detection_record.get("selection"))
+            candidates = _measurement_overlay_candidates(selection)
+            for candidate, color, thickness in candidates:
+                _draw_rect(
+                    cv2,
+                    frame,
+                    candidate.get("bounds"),
+                    color,
+                    transform,
+                    thickness,
+                )
+            if not candidates:
+                _draw_rect(cv2, frame, detection.get("bounds"), (0, 220, 255), transform)
             _draw_point(
                 cv2,
                 frame,
-                _mapping(measurement.get("selection")).get("marker"),
+                selection.get("reference"),
                 (0, 0, 255),
                 transform,
                 8,
             )
-        elif phase == "pose":
-            pose = _mapping(measurement.get("pose"))
-            _draw_rect(cv2, frame, pose.get("bounds"), (255, 0, 255), transform)
-            _draw_skeleton(cv2, frame, pose.get("landmarks"), (255, 0, 255), transform)
-            _draw_point(cv2, frame, pose.get("root"), (255, 0, 255), transform, 5)
-        elif phase == "tracking":
-            detection = _mapping(measurement.get("detection"))
-            _draw_rect(cv2, frame, detection.get("bounds"), (0, 220, 255), transform)
-            _draw_rect(cv2, frame, tracking.get("pose_bounds"), (0, 255, 0), transform)
-            _draw_trail(cv2, frame, prior_records, transform)
-            _draw_point(cv2, frame, tracking.get("root"), (0, 255, 0), transform, 5)
-            _draw_covariance(
-                cv2, frame, tracking.get("root"), tracking.get("covariance"), transform
-            )
-            if tracking.get("reacquired") is True:
-                _draw_reacquisition(cv2, frame, tracking.get("root"), transform)
-        elif phase == "planning":
-            inputs = _mapping(planning.get("input"))
+        elif phase == "framing":
+            inputs = _mapping(framing.get("input"))
             _draw_rect(
                 cv2,
                 frame,
-                inputs.get("bounds") or inputs.get("detector_bounds"),
+                inputs.get("detector_bounds"),
                 (0, 220, 255),
                 transform,
             )
-            decision = _mapping(planning.get("decision"))
-            _draw_rect(cv2, frame, decision.get("envelope"), (255, 0, 255), transform)
-            _draw_lead(cv2, frame, inputs.get("root"), decision.get("lead_room"), transform)
-            _draw_rect(cv2, frame, planning.get("crop"), (255, 255, 0), transform)
+            decision = _mapping(framing.get("decision"))
+            _draw_rect(cv2, frame, decision.get("desired_crop"), (255, 0, 255), transform)
+            _draw_rect(cv2, frame, framing.get("crop"), (255, 255, 0), transform)
         else:
             _draw_rect(
                 cv2, frame, _mapping(record.get("render")).get("crop"), (255, 255, 0), transform
@@ -508,66 +484,16 @@ def _fit_and_pad(cv2, pixels, width: int, height: int):
     return frame
 
 
-def _draw_rect(cv2, image, raw, color, transform: _PaneTransform) -> None:
+def _draw_rect(cv2, image, raw, color, transform: _PaneTransform, thickness: int = 2) -> None:
     rect = transform.rect(raw)
     if rect is not None:
-        cv2.rectangle(image, *rect, color, 2)
+        cv2.rectangle(image, *rect, color, thickness)
 
 
 def _draw_point(cv2, image, raw, color, transform: _PaneTransform, radius: int) -> None:
     point = transform.point(raw)
     if point is not None:
         cv2.circle(image, point, radius, color, -1)
-
-
-def _draw_skeleton(cv2, image, raw, color, transform: _PaneTransform) -> None:
-    if not isinstance(raw, Sequence):
-        return
-    points = [transform.point(point) for point in raw]
-    for first, second in _SKELETON:
-        if first < len(points) and second < len(points) and points[first] and points[second]:
-            cv2.line(image, points[first], points[second], color, 2)
-    for point in points:
-        if point is not None:
-            cv2.circle(image, point, 3, color, -1)
-
-
-def _draw_trail(cv2, image, records, transform: _PaneTransform) -> None:
-    points = [
-        transform.point(_mapping(_mapping(item.get("tracking")).get("root")))
-        for item in records[-60:]
-        if isinstance(item, Mapping)
-    ]
-    for first, second in zip(points, points[1:], strict=False):
-        if first is not None and second is not None:
-            cv2.line(image, first, second, (0, 180, 0), 2)
-
-
-def _draw_covariance(cv2, image, root, covariance, transform: _PaneTransform) -> None:
-    point = transform.point(root)
-    try:
-        radius = float(covariance) ** 0.5 * transform.width / transform.source_width
-    except (TypeError, ValueError):
-        return
-    if point is not None and radius > 0:
-        cv2.circle(image, point, max(1, round(radius)), (0, 180, 0), 1)
-
-
-def _draw_reacquisition(cv2, image, root, transform: _PaneTransform) -> None:
-    point = transform.point(root)
-    if point is not None:
-        cv2.drawMarker(image, point, (0, 0, 255), cv2.MARKER_CROSS, 16, 2)
-
-
-def _draw_lead(cv2, image, root, lead, transform: _PaneTransform) -> None:
-    root_point = _source_point(root)
-    lead_point = _source_point(lead)
-    if root_point is None or lead_point is None:
-        return
-    start = transform.point({"x": root_point[0], "y": root_point[1]})
-    end = transform.point({"x": root_point[0] + lead_point[0], "y": root_point[1] + lead_point[1]})
-    if start is not None and end is not None:
-        cv2.arrowedLine(image, start, end, (255, 128, 0), 2, tipLength=0.25)
 
 
 def _source_point(raw: object) -> tuple[float, float] | None:
@@ -606,37 +532,24 @@ def _reason(error: Exception) -> str:
 def phase_annotations(record: Mapping[str, object], phase: str, index: int) -> tuple[str, ...]:
     """Expose only values recorded in the aligned trace for visual inspection."""
     timestamp = record.get("timestamp_ms", 0)
-    measurement = _mapping(record.get("measurement"))
-    tracking = _mapping(record.get("tracking"))
-    planning = _mapping(record.get("planning"))
+    detection_record = _mapping(record.get("detection"))
+    framing = _mapping(record.get("framing"))
     lines = [f"{phase} frame={index} t={timestamp}ms"]
-    if phase == "measurement":
-        detection = _mapping(measurement.get("detection"))
-        selection = _mapping(measurement.get("selection"))
+    if phase == "detection":
+        detection = _mapping(detection_record.get("detection"))
+        selection = _mapping(detection_record.get("selection"))
+        lines.append(_measurement_annotation(selection, detection))
+    elif phase == "framing":
+        decision = _mapping(framing.get("decision"))
         lines.append(
-            f"selection={selection.get('state', 'unavailable')} confidence="
-            f"{detection.get('confidence', 'unavailable')}"
+            f"target_height_fraction={decision.get('target_height_fraction', 'unavailable')} "
+            f"action={decision.get('action', 'unavailable')}"
         )
-    elif phase == "pose":
-        pose = _mapping(measurement.get("pose"))
-        landmarks = pose.get("landmarks")
         lines.append(
-            f"pose confidence={pose.get('confidence', 'unavailable')} landmarks="
-            f"{len(landmarks) if isinstance(landmarks, Sequence) else 0}"
+            f"detection_missed={decision.get('detection_missed', False)} containment_override="
+            f"{decision.get('containment_override', False)} source_aspect_limited="
+            f"{decision.get('source_aspect_limited', False)}"
         )
-    elif phase == "tracking":
-        lines.append(
-            f"state={tracking.get('state', 'unavailable')} confidence="
-            f"{tracking.get('confidence', 'unavailable')} reacquired="
-            f"{tracking.get('reacquired', False)}"
-        )
-    elif phase == "planning":
-        decision = _mapping(planning.get("decision"))
-        lines.append(
-            f"containment_risk={decision.get('containment_risk', False)} zoom_action="
-            f"{decision.get('zoom_action', 'unavailable')}"
-        )
-        lines.append(f"uncertainty_padding={decision.get('uncertainty_padding', 'unavailable')}")
     else:
         render = _mapping(record.get("render"))
         lines.append(
@@ -644,6 +557,51 @@ def phase_annotations(record: Mapping[str, object], phase: str, index: int) -> t
             f"{render.get('output_validated', False)}"
         )
     return tuple(lines)
+
+
+def _association_candidates(selection: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    candidates = selection.get("candidates")
+    if not isinstance(candidates, Sequence):
+        return ()
+    return tuple(candidate for candidate in candidates if isinstance(candidate, Mapping))
+
+
+def _measurement_overlay_candidates(
+    selection: Mapping[str, object],
+) -> tuple[tuple[Mapping[str, object], tuple[int, int, int], int], ...]:
+    return tuple(
+        (
+            candidate,
+            (0, 220, 255) if candidate.get("selected") is True else (128, 128, 128),
+            3 if candidate.get("selected") is True else 1,
+        )
+        for candidate in _association_candidates(selection)
+    )
+
+
+def _measurement_annotation(
+    selection: Mapping[str, object], detection: Mapping[str, object]
+) -> str:
+    selected = next(
+        (
+            candidate
+            for candidate in _association_candidates(selection)
+            if candidate.get("selected") is True
+        ),
+        None,
+    )
+    selected_index = "none" if selected is None else selected.get("original_index", "unavailable")
+    confidence = (
+        detection.get("confidence", "unavailable")
+        if selected is None
+        else selected.get("confidence", "unavailable")
+    )
+    return (
+        f"reference_kind={selection.get('reference_kind', 'unavailable')} "
+        f"strategy={selection.get('strategy', 'unavailable')} candidate={selected_index}/"
+        f"{selection.get('candidate_count', 0)} confidence={confidence} "
+        "deterministic association evidence, not athlete identity proof"
+    )
 
 
 def _remaining_seconds(deadline: float) -> float:

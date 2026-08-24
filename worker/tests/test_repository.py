@@ -352,7 +352,7 @@ def test_finalize_review_links_canonical_scoped_artifacts_atomically() -> None:
 
 
 def test_finalize_review_retry_with_fewer_artifacts_removes_stale_phase_roles() -> None:
-    cursor = FakeCursor([(7,), (2,)])
+    cursor = FakeCursor([(5,), (2,)])
     repo, _ = repository(cursor)
     record = _record_from_row(_row("uploading", "uploading", "worker-a"))
     assert record.source_asset is not None
@@ -367,10 +367,8 @@ def test_finalize_review_retry_with_fewer_artifacts_removes_stale_phase_roles() 
         for role, name, content_type in (
             ("debug_telemetry", "telemetry.jsonl.gz", "application/gzip"),
             ("debug_manifest", "manifest.json", "application/json"),
-            ("debug_measurement", "measurement.mp4", "video/mp4"),
-            ("debug_pose", "pose.mp4", "video/mp4"),
-            ("debug_tracking", "tracking.mp4", "video/mp4"),
-            ("debug_planning", "planning.mp4", "video/mp4"),
+            ("debug_detection", "detection.mp4", "video/mp4"),
+            ("debug_framing", "framing.mp4", "video/mp4"),
             ("debug_render", "render.mp4", "video/mp4"),
         )
     )
