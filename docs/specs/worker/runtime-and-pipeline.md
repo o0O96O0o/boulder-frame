@@ -15,6 +15,9 @@
 | `ffmpeg_bin` | ffmpeg executable. | `ffmpeg` |
 | `lease_seconds` | Job lease duration. | `300` |
 | `retain_debug_artifacts` | Keep scratch data for debugging. | `false` |
+| `debug_capture` | Enable durable private debug-bundle capture. This is distinct from scratch retention. | `false` |
+| `debug_max_frames` | Maximum `frame` records in one captured bundle; must be positive. | `10000` |
+| `debug_max_bytes` | Maximum compressed bundle size in bytes; must be positive. | `52428800` (50 MiB) |
 | `database_url` | PostgreSQL connection for job hydration and authoritative leases. | Required for `--serve`. |
 | `redis_url` | Redis connection for Streams consumption. | Required for `--serve`. |
 | `s3_endpoint` | S3-compatible endpoint used for worker download/upload/head operations. | Required for `--serve`. |
@@ -39,6 +42,13 @@ recovered while their database lease is valid.
 ## Job Scratch
 
 Each job receives `{scratch_root}/{job_uuid}`. The context manager creates it exclusively and removes it in `finally` unless debug retention is enabled. Scratch files must never become the durable source of job state.
+
+`retain_debug_artifacts` only retains that local scratch directory; it neither enables nor disables
+durable capture. When independently enabled, `debug_capture` is passed to the pipeline, records
+source-coordinate analysis frames and worker stage timings, and publishes a bounded private bundle.
+Analysis and stage scratch writes are best-effort and do not change media processing. The bundle
+schema, redaction rules, limits, and evaluation contract are specified in
+[Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md).
 
 ## State Machine
 
@@ -78,13 +88,23 @@ without terminating the process. Startup readiness still fails if Redis cannot b
 `S3Storage` uses the configured endpoint, region, credentials, bucket, and path-style setting for
 private source downloads, output uploads, and object heads. Adapter network/service failures become
 transient `storage_unavailable` errors with a user-safe message. Runtime readiness verifies access to
-the configured bucket before queue consumption.
+the configured bucket before queue consumption. When `debug_capture` is enabled, readiness additionally
+requires all four bucket public-access blocks (`BlockPublicAcls`, `IgnorePublicAcls`,
+`BlockPublicPolicy`, and `RestrictPublicBuckets`) to be true.
 
 After a renderer has uploaded and headed a validated MP4, `PostgresJobRepository.finalize_output`
 uses the active `uploading` lease to atomically upsert the deterministic key
 `private/output/{project_id}/{job_id}.mp4`, the unique `output` artifact relation, and
 `processing_jobs.output_asset_id`. It does not complete the job; the existing guarded state transition
 remains completion authority. Retried finalization reuses the same logical output.
+
+`PostgresJobRepository.finalize_debug` similarly supports one verified `application/gzip` debug asset
+at `private/debug/{project_id}/{job_id}/{debug_uuid}.jsonl.gz` while a nonterminal job lease is live.
+After output finalization, `Worker.process` calls `ProcessingPipeline.publish_debug` before transitioning
+to `completed`; a failed durable phase attempts the same publication before its failure is persisted.
+Each publication uses a new UUID key. Failed upload verification/finalization attempts delete their
+newly uploaded object when possible. Debug build/upload/finalization failures are warnings and do not
+change the required output-job result; see [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md).
 
 ## Media Validation
 
@@ -120,10 +140,18 @@ durable stages:
 4. `uploading`: revalidates or recreates the deterministic output, uploads and heads
    `private/output/{project_id}/{job_id}.mp4`, then performs lease-guarded artifact finalization.
 
-`Worker.process` sets `completed` only after finalization succeeds. Terminal stage errors persist
-`failed` and allow the entry to be acknowledged. Transient storage or database errors release the
-PostgreSQL lease and keep the Redis entry pending for recovery. Duplicate deliveries of terminal jobs
-acknowledge without reprocessing; a live foreign lease keeps the entry pending.
+When `debug_capture` is enabled, analysis writes source-coordinate frame records and the worker writes
+timing records for each durable phase. The writer/evaluator stream and bound captured frames and
+compressed bytes by `debug_max_frames`/`debug_max_bytes`. After output finalization and before the
+`completed` transition, the worker builds, uploads, and lease-finalizes a UUID-scoped private debug
+bundle while still `uploading`. If a phase fails, it writes the failed stage telemetry and attempts
+publication before persisting the failure, while its nonterminal lease remains active. Scratch writes,
+bundle publication, and cleanup are all best-effort: errors are logged as warnings without changing
+the required output-job result. `Worker.process` sets `completed` after required output finalization
+succeeds. Terminal stage errors persist `failed` and allow the entry to be acknowledged. Transient
+storage or database errors release the PostgreSQL lease and keep the Redis entry pending for recovery.
+Duplicate deliveries of terminal jobs acknowledge without reprocessing; a live foreign lease keeps the
+entry pending.
 
 The local `.env.example` sentinel `model_version=unset-until-pinned` normalizes to `unconfigured`.
 This safe state starts and consumes matching jobs, whose unavailable adapters terminate with

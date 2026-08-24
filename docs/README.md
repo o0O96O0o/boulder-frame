@@ -4,6 +4,7 @@
 
 - [Offline Reframing MVP](architecture/offline-reframing-mvp.md): approved product boundary, service contracts, processing pipeline, technology choices, and implementation constraints.
 - [Service Implementation Plan](architecture/service-implementation-plan.md): service-by-service implementation tasks, dependencies, interfaces, and verification gates.
+- [Worker Debug Telemetry and Evaluation](specs/worker/debug-telemetry-and-evaluation.md): private debug-bundle contract, redaction, evaluation inputs/metrics, and current render/capture limits.
 
 ## Development
 

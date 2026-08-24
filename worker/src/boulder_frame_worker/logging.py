@@ -24,6 +24,7 @@ class JsonFormatter(logging.Formatter):
             "progress",
             "pipeline_version",
             "model_version",
+            "duration_ms",
             "error_code",
             "diagnostic",
         ):

@@ -19,6 +19,10 @@ class S3Client(Protocol):
 
     def head_object(self, *, Bucket: str, Key: str) -> dict[str, object]: ...
 
+    def delete_object(self, *, Bucket: str, Key: str) -> None: ...
+
+    def get_public_access_block(self, *, Bucket: str) -> dict[str, object]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class StoredObject:
@@ -59,6 +63,26 @@ class S3Storage:
         except Exception as error:
             raise _storage_error(error) from error
 
+    def require_private_debug_storage(self) -> None:
+        """Require the bucket's S3 public-access blocks before recording athlete telemetry."""
+        try:
+            response = self._client.get_public_access_block(Bucket=self._bucket)
+            configuration = response.get("PublicAccessBlockConfiguration")
+        except Exception as error:
+            raise _storage_error(error) from error
+        if not isinstance(configuration, dict) or not all(
+            configuration.get(name) is True
+            for name in (
+                "BlockPublicAcls",
+                "IgnorePublicAcls",
+                "BlockPublicPolicy",
+                "RestrictPublicBuckets",
+            )
+        ):
+            raise RuntimeError(
+                "object storage must block public access before debug capture is enabled"
+            )
+
     def download(self, key: str, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -85,6 +109,12 @@ class S3Storage:
             size_bytes=int(response.get("ContentLength", 0)),
             content_type=_optional_string(response.get("ContentType")),
         )
+
+    def delete(self, key: str) -> None:
+        try:
+            self._client.delete_object(Bucket=self._bucket, Key=key)
+        except Exception as error:
+            raise _storage_error(error) from error
 
 
 def _optional_string(value: object) -> str | None:

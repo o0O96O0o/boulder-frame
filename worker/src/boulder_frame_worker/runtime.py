@@ -63,6 +63,8 @@ class WorkerRuntime:
             if callable(ready):
                 ready()
             self.storage.ready()
+            if self.config.debug_capture:
+                self.storage.require_private_debug_storage()
             self.consumer.ready()
         except Exception as error:
             raise RuntimeUnavailable(
@@ -146,6 +148,9 @@ def compose_runtime(
         pose_estimator=pose_estimator,
         tracker=tracker,
         planner_factory=planner_factory or DeterministicCropPlanner,
+        debug_capture=config.debug_capture,
+        debug_max_frames=config.debug_max_frames,
+        debug_max_bytes=config.debug_max_bytes,
     )
     worker = Worker(config, repository, config.worker_id)
     consumer = QueueConsumerAdapter(
@@ -156,6 +161,7 @@ def compose_runtime(
             pipeline.analyzing,
             pipeline.rendering,
             pipeline.uploading,
+            pipeline.publish_debug,
         ),
     )
     return WorkerRuntime(config, consumer, repository, storage, stop)

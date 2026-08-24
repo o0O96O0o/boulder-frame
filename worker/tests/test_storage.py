@@ -32,6 +32,22 @@ class FakeS3Client:
         self._raise_failure()
         return {"ContentLength": 42, "ContentType": "video/mp4"}
 
+    def delete_object(self, *, Bucket: str, Key: str) -> None:
+        self.calls.append(("delete_object", (Bucket, Key)))
+        self._raise_failure()
+
+    def get_public_access_block(self, *, Bucket: str) -> dict[str, object]:
+        self.calls.append(("get_public_access_block", Bucket))
+        self._raise_failure()
+        return {
+            "PublicAccessBlockConfiguration": {
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            }
+        }
+
     def _raise_failure(self) -> None:
         if self.failure is not None:
             raise self.failure
@@ -99,7 +115,36 @@ def test_storage_download_upload_and_head(tmp_path) -> None:
     assert client.calls[3] == ("head_object", ("bucket", "private/output/output.mp4"))
 
 
-@pytest.mark.parametrize("operation", ["ready", "download", "upload", "head"])
+def test_storage_deletes_uploaded_object_after_finalization_failure() -> None:
+    client = FakeS3Client()
+    storage = S3Storage(client, "bucket")
+
+    storage.delete("private/debug/project/job/debug.jsonl.gz")
+
+    assert client.calls == [
+        ("delete_object", ("bucket", "private/debug/project/job/debug.jsonl.gz"))
+    ]
+
+
+def test_storage_requires_public_access_blocks_for_debug_capture() -> None:
+    client = FakeS3Client()
+    storage = S3Storage(client, "bucket")
+
+    storage.require_private_debug_storage()
+
+    assert client.calls == [("get_public_access_block", "bucket")]
+
+
+def test_storage_rejects_missing_public_access_block_for_debug_capture() -> None:
+    client = FakeS3Client()
+    client.get_public_access_block = lambda *, Bucket: {"PublicAccessBlockConfiguration": {}}  # type: ignore[method-assign]
+    storage = S3Storage(client, "bucket")
+
+    with pytest.raises(RuntimeError, match="block public access"):
+        storage.require_private_debug_storage()
+
+
+@pytest.mark.parametrize("operation", ["ready", "download", "upload", "head", "delete"])
 def test_storage_classifies_service_failures_as_transient(tmp_path, operation: str) -> None:
     client = FakeS3Client()
     client.failure = OSError("service unavailable")
@@ -114,6 +159,8 @@ def test_storage_classifies_service_failures_as_transient(tmp_path, operation: s
             storage.download("private/source/input.mp4", tmp_path / "input.mp4")
         elif operation == "upload":
             storage.upload("private/output/output.mp4", source, "video/mp4")
+        elif operation == "delete":
+            storage.delete("private/debug/project/job/debug.jsonl.gz")
         else:
             storage.head("private/output/output.mp4")
 

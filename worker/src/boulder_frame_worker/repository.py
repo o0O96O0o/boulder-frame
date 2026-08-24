@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from .errors import ErrorCode, WorkerError
-from .state import JobConfiguration, JobRecord, JobStage, JobState, SourceAsset
+from .state import TERMINAL_STATES, JobConfiguration, JobRecord, JobStage, JobState, SourceAsset
 
 
 class Cursor(Protocol):
@@ -37,6 +37,10 @@ class OutputNotValidatedError(ValueError):
     """Raised when finalization is requested without a verified media object."""
 
 
+class DebugNotValidatedError(ValueError):
+    """Raised when finalization is requested without a verified debug object."""
+
+
 @dataclass(frozen=True, slots=True)
 class OutputAsset:
     size_bytes: int
@@ -53,6 +57,18 @@ class OutputAsset:
             raise OutputNotValidatedError("output asset must be video/mp4")
         if self.width <= 0 or self.height <= 0 or self.frame_rate <= 0 or self.duration_ms <= 0:
             raise OutputNotValidatedError("output asset media metadata must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class DebugAsset:
+    size_bytes: int
+    content_type: str
+
+    def __post_init__(self) -> None:
+        if self.size_bytes <= 0:
+            raise DebugNotValidatedError("debug asset size must be greater than zero")
+        if self.content_type != "application/gzip":
+            raise DebugNotValidatedError("debug asset must be application/gzip")
 
 
 class PostgresJobRepository:
@@ -134,6 +150,39 @@ class PostgresJobRepository:
                     output.height,
                     output.frame_rate,
                     output.duration_ms,
+                ),
+            )
+            row = cursor.fetchone()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+        if row is None:
+            raise LeaseLostError("job state was changed, cancelled, or lease expired")
+        return _uuid(row[0])
+
+    def finalize_debug(self, record: JobRecord, storage_key: str, debug: DebugAsset) -> UUID:
+        """Link a verified job-scoped debug object while the current lease remains live."""
+        if record.lease_owner is None or record.source_asset is None:
+            raise LeaseLostError("debug finalization requires a claimed job with a source asset")
+        if record.state in TERMINAL_STATES:
+            raise ValueError("debug finalization requires a nonterminal job")
+        _validate_debug_storage_key(storage_key, record.source_asset.project_id, record.id)
+        connection = self._connection_factory()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                _FINALIZE_DEBUG_SQL,
+                (
+                    record.id,
+                    record.source_asset.project_id,
+                    record.lease_owner,
+                    storage_key,
+                    debug.content_type,
+                    debug.size_bytes,
                 ),
             )
             row = cursor.fetchone()
@@ -311,8 +360,59 @@ RETURNING output_artifact.asset_id
 """
 
 
+_FINALIZE_DEBUG_SQL = """
+WITH owned_job AS (
+  SELECT id, project_id
+  FROM processing_jobs
+  WHERE id = %s
+    AND project_id = %s
+    AND state NOT IN ('completed', 'failed', 'cancelled')
+    AND lease_owner = %s
+    AND lease_expires_at > now()
+), debug_asset AS (
+  INSERT INTO assets (project_id, kind, storage_key, upload_state, content_type, size_bytes)
+  SELECT project_id, 'debug', %s, 'uploaded', %s, %s
+  FROM owned_job
+  ON CONFLICT (storage_key) DO UPDATE
+  SET content_type = EXCLUDED.content_type,
+      size_bytes = EXCLUDED.size_bytes
+  WHERE assets.project_id = EXCLUDED.project_id
+    AND assets.kind = 'debug'
+    AND assets.upload_state = 'uploaded'
+  RETURNING id
+), debug_artifact AS (
+  INSERT INTO job_artifacts (job_id, asset_id, kind)
+  SELECT owned_job.id, debug_asset.id, 'debug'
+  FROM owned_job
+  JOIN debug_asset ON true
+  ON CONFLICT (job_id, kind) DO UPDATE
+  SET asset_id = EXCLUDED.asset_id
+  RETURNING asset_id
+)
+SELECT asset_id FROM debug_artifact
+"""
+
+
 def output_storage_key(project_id: UUID, job_id: UUID) -> str:
     return f"private/output/{project_id}/{job_id}.mp4"
+
+
+def debug_storage_key(project_id: UUID, job_id: UUID, debug_id: UUID) -> str:
+    """Build a canonical unique debug-object key within a job's private namespace."""
+    return f"private/debug/{project_id}/{job_id}/{debug_id}.jsonl.gz"
+
+
+def _validate_debug_storage_key(storage_key: str, project_id: UUID, job_id: UUID) -> None:
+    prefix = f"private/debug/{project_id}/{job_id}/"
+    if not storage_key.startswith(prefix) or not storage_key.endswith(".jsonl.gz"):
+        raise ValueError("debug storage key must be scoped to the job and end in .jsonl.gz")
+    debug_id = storage_key.removeprefix(prefix).removesuffix(".jsonl.gz")
+    try:
+        expected = debug_storage_key(project_id, job_id, UUID(debug_id))
+    except ValueError as error:
+        raise ValueError("debug storage key must include a UUID") from error
+    if storage_key != expected:
+        raise ValueError("debug storage key must use the canonical job-scoped format")
 
 
 def _record_from_row(row: tuple[Any, ...]) -> JobRecord:

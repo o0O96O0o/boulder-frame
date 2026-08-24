@@ -7,11 +7,14 @@ from uuid import uuid4
 import pytest
 
 from boulder_frame_worker.repository import (
+    DebugAsset,
+    DebugNotValidatedError,
     LeaseLostError,
     OutputAsset,
     OutputNotValidatedError,
     PostgresJobRepository,
     _record_from_row,
+    debug_storage_key,
     output_storage_key,
 )
 from boulder_frame_worker.state import JobStage, JobState
@@ -184,11 +187,124 @@ def test_finalize_output_rejects_stale_lease_without_writing_asset() -> None:
         repo.finalize_output(record, OutputAsset(123, "video/mp4", 1920, 1080, 30.0, 1000))
 
 
+def test_finalize_debug_requires_verified_gzip_metadata() -> None:
+    with pytest.raises(DebugNotValidatedError, match="size"):
+        DebugAsset(0, "application/gzip")
+    with pytest.raises(DebugNotValidatedError, match="application/gzip"):
+        DebugAsset(1, "application/json")
+
+
+def test_finalize_debug_links_deterministic_asset_and_unique_artifact() -> None:
+    asset_id = uuid4()
+    cursor = FakeCursor([(asset_id,)])
+    repo, connection = repository(cursor)
+    record = _record_from_row(_row("uploading", "uploading", "worker-a"))
+    assert record.source_asset is not None
+
+    storage_key = debug_storage_key(record.source_asset.project_id, record.id, uuid4())
+    result = repo.finalize_debug(record, storage_key, DebugAsset(123, "application/gzip"))
+
+    query, params = cursor.calls[0]
+    assert result == asset_id
+    assert "lease_owner = %s" in query
+    assert "lease_expires_at > now()" in query
+    assert "'debug'" in query
+    assert "ON CONFLICT (storage_key) DO UPDATE" in query
+    assert "ON CONFLICT (job_id, kind) DO UPDATE" in query
+    assert params[3] == storage_key
+    assert connection.committed and connection.closed
+
+
+@pytest.mark.parametrize("state", ["queued", "validating", "analyzing", "rendering", "uploading"])
+def test_finalize_debug_allows_any_active_job_state(state: str) -> None:
+    asset_id = uuid4()
+    cursor = FakeCursor([(asset_id,)])
+    repo, _ = repository(cursor)
+    record = _record_from_row(_row(state, state, "worker-a"))
+    assert record.source_asset is not None
+
+    result = repo.finalize_debug(
+        record,
+        debug_storage_key(record.source_asset.project_id, record.id, uuid4()),
+        DebugAsset(123, "application/gzip"),
+    )
+
+    assert result == asset_id
+    assert "state NOT IN ('completed', 'failed', 'cancelled')" in cursor.calls[0][0]
+
+
+def test_finalize_debug_rejects_stale_lease_without_writing_asset() -> None:
+    cursor = FakeCursor([None])
+    repo, _ = repository(cursor)
+    record = _record_from_row(_row("uploading", "uploading", "worker-a"))
+    assert record.source_asset is not None
+
+    with pytest.raises(LeaseLostError):
+        repo.finalize_debug(
+            record,
+            debug_storage_key(record.source_asset.project_id, record.id, uuid4()),
+            DebugAsset(123, "application/gzip"),
+        )
+
+
+@pytest.mark.parametrize("state", ["completed", "failed", "cancelled"])
+def test_finalize_debug_rejects_terminal_jobs(state: str) -> None:
+    cursor = FakeCursor([])
+    repo, _ = repository(cursor)
+    record = _record_from_row(_row(state, state, "worker-a"))
+    assert record.source_asset is not None
+
+    with pytest.raises(ValueError, match="nonterminal"):
+        repo.finalize_debug(
+            record,
+            debug_storage_key(record.source_asset.project_id, record.id, uuid4()),
+            DebugAsset(123, "application/gzip"),
+        )
+
+    assert cursor.calls == []
+
+
+@pytest.mark.parametrize(
+    "storage_key",
+    [
+        "private/debug/not-a-project/not-a-job/not-a-uuid.jsonl.gz",
+        "private/debug/{project_id}/{job_id}.jsonl.gz",
+        "private/debug/{project_id}/{job_id}/not-a-uuid.jsonl.gz",
+        "private/debug/{project_id}/{job_id}/{debug_id}.zip",
+    ],
+)
+def test_finalize_debug_rejects_keys_outside_the_canonical_job_namespace(storage_key: str) -> None:
+    cursor = FakeCursor([])
+    repo, _ = repository(cursor)
+    record = _record_from_row(_row("rendering", "rendering", "worker-a"))
+    assert record.source_asset is not None
+    key = storage_key.format(
+        project_id=record.source_asset.project_id,
+        job_id=record.id,
+        debug_id=uuid4(),
+    )
+
+    with pytest.raises(ValueError, match="debug storage key"):
+        repo.finalize_debug(record, key, DebugAsset(123, "application/gzip"))
+
+    assert cursor.calls == []
+
+
 def test_output_storage_key_is_deterministic_per_project_and_job() -> None:
     project_id = uuid4()
     job_id = uuid4()
 
     assert output_storage_key(project_id, job_id) == f"private/output/{project_id}/{job_id}.mp4"
+
+
+def test_debug_storage_key_is_deterministic_per_project_job_and_debug_asset() -> None:
+    project_id = uuid4()
+    job_id = uuid4()
+    debug_id = uuid4()
+
+    assert debug_storage_key(
+        project_id, job_id, debug_id
+    ) == f"private/debug/{project_id}/{job_id}/{debug_id}.jsonl.gz"
 
 
 def _row(state: str, stage: str, owner: str) -> tuple[object, ...]:

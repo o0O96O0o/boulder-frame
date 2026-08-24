@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "permitted-stationary-v1",
+      "scenario": "stationary",
+      "annotation": "stationary.json",
+      "source": {
+        "source_id": "permitted-source-v1",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "display_width": 100,
+        "display_height": 100,
+        "frame_rate": 10,
+        "variable_frame_rate": false
+      },
+      "target_selection": {"frame_index": 0}
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +11,7 @@ from threading import Event, Thread
 from uuid import uuid4
 
 from .config import WorkerConfig
+from .debug import append_debug_record
 from .errors import ErrorCode, WorkerError, terminal, transient
 from .logging import configure_logging
 from .protocol import JobTask
@@ -50,6 +52,7 @@ class Worker:
         analyzing: StageHandler,
         rendering: StageHandler,
         uploading: StageHandler,
+        publish_debug: StageHandler | None = None,
     ) -> DeliveryAction | bool:
         trace_id = task.trace_id or "unknown"
         request_body = {"job_id": str(task.job_id), "trace_id": trace_id}
@@ -152,8 +155,44 @@ class Worker:
                             "model_version": self.config.model_version,
                         },
                     )
-                    handler(record, scratch)
+                    started = time.monotonic_ns() // 1_000_000
+                    self._stage_trace(
+                        scratch,
+                        "stage_start",
+                        {"stage": state.value, "progress": progress, "monotonic_ms": started},
+                    )
+                    try:
+                        handler(record, scratch)
+                    except Exception as error:
+                        self._stage_trace(
+                            scratch,
+                            "stage_end",
+                            {
+                                "stage": state.value,
+                                "progress": progress,
+                                "duration_ms": (time.monotonic_ns() // 1_000_000) - started,
+                                "outcome": "failed",
+                                "error_code": (
+                                    error.code.value
+                                    if isinstance(error, WorkerError)
+                                    else ErrorCode.INTERNAL.value
+                                ),
+                            },
+                        )
+                        self._publish_debug(publish_debug, record, scratch, trace_id)
+                        raise
                     ensure_lease()
+                    duration_ms = (time.monotonic_ns() // 1_000_000) - started
+                    self._stage_trace(
+                        scratch,
+                        "stage_end",
+                        {
+                            "stage": state.value,
+                            "progress": progress,
+                            "duration_ms": duration_ms,
+                            "outcome": "completed",
+                        },
+                    )
                     self.logger.info(
                         "stage response",
                         extra={
@@ -164,8 +203,10 @@ class Worker:
                             "progress": progress,
                             "pipeline_version": self.config.pipeline_version,
                             "model_version": self.config.model_version,
+                            "duration_ms": duration_ms,
                         },
                     )
+                self._publish_debug(publish_debug, record, scratch, trace_id)
                 record = transition(record, JobState.COMPLETED, 100)
                 self.repository.update(record)
             self.logger.info(
@@ -226,3 +267,24 @@ class Worker:
             heartbeat_stop.set()
             heartbeat_thread.join()
         return True
+
+    def _stage_trace(self, scratch: Path, record_type: str, fields: dict[str, object]) -> None:
+        if self.config.debug_capture:
+            try:
+                append_debug_record(scratch / "debug-stages.jsonl", record_type, fields)
+            except OSError:
+                # Debug capture is optional and must not fail media processing.
+                pass
+
+    def _publish_debug(
+        self, publish_debug: StageHandler | None, record: JobRecord, scratch: Path, trace_id: str
+    ) -> None:
+        if publish_debug is None or not self.config.debug_capture:
+            return
+        try:
+            publish_debug(record, scratch)
+        except Exception:
+            self.logger.warning(
+                "debug telemetry publish failed",
+                extra={"trace_id": trace_id, "job_id": str(record.id)},
+            )

@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
+from uuid import uuid4
 
+from .debug import (
+    DebugBundleWriter,
+    append_debug_record,
+    debug_bundle_header,
+    serialize_crop_rect,
+    serialize_frame_measurement,
+    serialize_raw_frame_observation,
+    serialize_tracked_measurement,
+)
 from .errors import ErrorCode, terminal
 from .measurement import (
     PersonDetector,
     PoseEstimator,
+    RawFrameObservation,
     TargetFrameAnalyzer,
     UnavailableDetector,
     UnavailablePoseEstimator,
@@ -22,7 +35,7 @@ from .media import (
 )
 from .planner import CropPlanner, CropRect, DeterministicCropPlanner, FrameMeasurement
 from .protocol import AspectRatio, FramingProfile, OutputSettings, TargetSelection
-from .repository import OutputAsset, output_storage_key
+from .repository import DebugAsset, OutputAsset, debug_storage_key, output_storage_key
 from .state import JobConfiguration, JobRecord, SourceAsset
 from .storage import S3Storage
 from .tracking import SingleTargetTracker, TargetTracker, TrackedMeasurement, TrackingState
@@ -57,6 +70,8 @@ class UnavailableFrameReader:
 
 
 PlannerFactory = Callable[[int, int, AspectRatio, FramingProfile], CropPlanner]
+_ANALYSIS_TRACE = "debug-analysis.jsonl"
+_STAGE_TRACE = "debug-stages.jsonl"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +98,9 @@ class ProcessingPipeline:
         pose_estimator: PoseEstimator | None = None,
         tracker: TargetTracker | None = None,
         planner_factory: PlannerFactory = DeterministicCropPlanner,
+        debug_capture: bool = False,
+        debug_max_frames: int = 10_000,
+        debug_max_bytes: int = 50 * 1024 * 1024,
     ) -> None:
         self.storage = storage
         self.finalizer = finalizer
@@ -94,6 +112,9 @@ class ProcessingPipeline:
         )
         self.tracker = tracker or SingleTargetTracker()
         self.planner_factory = planner_factory
+        self.debug_capture = debug_capture
+        self.debug_max_frames = debug_max_frames
+        self.debug_max_bytes = debug_max_bytes
 
     def validating(self, record: JobRecord, scratch: Path) -> None:
         self._inputs(record, scratch)
@@ -128,6 +149,84 @@ class ProcessingPipeline:
                 duration_ms=output_metadata.duration_ms,
             ),
         )
+
+    def publish_debug(self, record: JobRecord, scratch: Path) -> None:
+        """Publish optional sanitized telemetry after all stage timing records are complete."""
+        if not self.debug_capture:
+            return
+        source_asset = self._source(record)
+        configuration = self._configuration(record)
+        try:
+            inputs = self._inputs(record, scratch)
+        except Exception:
+            # Validation failures still need their sanitized stage trace for diagnosis.
+            inputs = None
+        bundle = scratch / "debug.jsonl.gz"
+        source_metadata: dict[str, object] = {"source_id": str(source_asset.id)}
+        if inputs is not None:
+            source_metadata.update(
+                {
+                    "sha256": _sha256(inputs.source),
+                    "display_width": inputs.metadata.display_dimensions[0],
+                    "display_height": inputs.metadata.display_dimensions[1],
+                    "frame_rate": float(inputs.metadata.frame_rate),
+                    "variable_frame_rate": False,
+                }
+            )
+        planner_config = dict(configuration.planner)
+        planner_config.setdefault("planner_version", "deterministic-v1")
+        if inputs is not None:
+            planner_config.setdefault("profile", inputs.output_settings.profile.value)
+            planner_config.setdefault("aspect_ratio", inputs.output_settings.aspect_ratio.value)
+        with DebugBundleWriter(
+            bundle,
+            debug_bundle_header(
+                job_id=record.id,
+                source_metadata=source_metadata,
+                pipeline_version=configuration.pipeline_version,
+                model_version=configuration.model_version,
+                planner_config=planner_config,
+                model_manifest={"model_version": configuration.model_version},
+                source_checksum=(
+                    source_metadata["sha256"] if "sha256" in source_metadata else None
+                ),
+            ),
+            max_frames=self.debug_max_frames,
+            max_bytes=self.debug_max_bytes,
+        ) as writer:
+            self._copy_trace(writer, scratch / _STAGE_TRACE)
+            self._copy_trace(writer, scratch / _ANALYSIS_TRACE)
+            if inputs is not None:
+                writer.write(
+                    "render_summary",
+                    {
+                        "output": {
+                            "width": inputs.metadata.display_dimensions[0],
+                            "height": inputs.metadata.display_dimensions[1],
+                        }
+                    },
+                )
+        storage_key = debug_storage_key(source_asset.project_id, record.id, uuid4())
+        try:
+            stored = self.storage.upload(storage_key, bundle, "application/gzip")
+            if (
+                stored.key != storage_key
+                or stored.size_bytes != bundle.stat().st_size
+                or stored.content_type != "application/gzip"
+            ):
+                raise terminal(
+                    ErrorCode.INVALID_OUTPUT, "Debug telemetry upload could not be verified."
+                )
+            finalizer = getattr(self.finalizer, "finalize_debug", None)
+            if not callable(finalizer):
+                raise terminal(ErrorCode.INTERNAL, "Debug telemetry finalization is unavailable.")
+            finalizer(record, storage_key, DebugAsset(stored.size_bytes, stored.content_type))
+        except Exception:
+            try:
+                self.storage.delete(storage_key)
+            except Exception:
+                pass
+            raise
 
     def _inputs(self, record: JobRecord, scratch: Path) -> _Inputs:
         source_asset = self._source(record)
@@ -198,9 +297,23 @@ class ProcessingPipeline:
                 ErrorCode.INVALID_MEDIA, "Video frames could not be analyzed consistently."
             )
         tracked = self.tracker.track(observations)
-        return self.planner_factory(
+        planner_measurements = _planner_measurements(tracked)
+        crops = self.planner_factory(
             width, height, inputs.output_settings.aspect_ratio, inputs.output_settings.profile
-        ).plan(_planner_measurements(tracked))
+        ).plan(planner_measurements)
+        if self.debug_capture:
+            try:
+                self._write_analysis_trace(
+                    inputs.source.parent / _ANALYSIS_TRACE,
+                    observations,
+                    tracked,
+                    planner_measurements,
+                    crops,
+                )
+            except OSError:
+                # Debug capture is optional and must not fail media processing.
+                pass
+        return crops
 
     def _render(self, inputs: _Inputs) -> MediaMetadata:
         if inputs.output.exists():
@@ -220,6 +333,59 @@ class ProcessingPipeline:
             inputs.metadata,
             self.inspector,
         )
+
+    @staticmethod
+    def _write_analysis_trace(
+        path: Path,
+        observations: Sequence[RawFrameObservation],
+        tracked: Sequence[TrackedMeasurement],
+        measurements: Sequence[FrameMeasurement],
+        crops: Sequence[CropRect],
+    ) -> None:
+        if not (len(observations) == len(tracked) == len(measurements) == len(crops)):
+            raise ValueError("debug analysis records must have matching frame counts")
+        path.unlink(missing_ok=True)
+        for observation, tracked_measurement, measurement, crop in zip(
+            observations, tracked, measurements, crops, strict=True
+        ):
+            append_debug_record(
+                path,
+                "frame",
+                {
+                    "frame_index": observation.frame_index,
+                    "timestamp_ms": observation.timestamp_ms,
+                    "measurement": {
+                        **serialize_raw_frame_observation(observation),
+                        "selection": None
+                        if observation.detection is None
+                        else {"selected": True},
+                    },
+                    "tracking": serialize_tracked_measurement(tracked_measurement),
+                    "planning": {
+                        "input": serialize_frame_measurement(measurement),
+                        "crop": serialize_crop_rect(crop),
+                    },
+                    "render": {
+                        "crop": serialize_crop_rect(crop),
+                        "timestamp_ms": observation.timestamp_ms,
+                        "mapping_independently_verified": False,
+                    },
+                },
+            )
+
+    @staticmethod
+    def _copy_trace(writer: DebugBundleWriter, path: Path) -> None:
+        if not path.is_file():
+            return
+        with path.open(encoding="ascii") as trace:
+            for line in trace:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                record_type = record.pop("record_type", None)
+                record.pop("schema_version", None)
+                if isinstance(record_type, str):
+                    writer.write(record_type, record)
 
     @staticmethod
     def _source(record: JobRecord) -> SourceAsset:
@@ -291,3 +457,8 @@ def _velocity(prior_root: object, prior_timestamp: int | None, measurement: Trac
         return Point(0, 0)
     root = cast(Point, prior_root)
     return Point((measurement.root.x - root.x) / elapsed, (measurement.root.y - root.y) / elapsed)
+
+
+def _sha256(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()

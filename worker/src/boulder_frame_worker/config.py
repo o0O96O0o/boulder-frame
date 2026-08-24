@@ -17,6 +17,8 @@ class ConfigError(ValueError):
 
 UNCONFIGURED_MODEL_VERSION = "unconfigured"
 LOCAL_ENV_UNCONFIGURED_MODEL_VERSION = "unset-until-pinned"
+DEFAULT_DEBUG_MAX_FRAMES = 10_000
+DEFAULT_DEBUG_MAX_BYTES = 50 * 1024 * 1024
 
 
 def _positive_int(value: str, name: str) -> int:
@@ -64,6 +66,9 @@ class WorkerConfig:
     stream_reclaim_idle_ms: int = 300_000
     stream_block_ms: int = 1_000
     retain_debug_artifacts: bool = False
+    debug_capture: bool = False
+    debug_max_frames: int = DEFAULT_DEBUG_MAX_FRAMES
+    debug_max_bytes: int = DEFAULT_DEBUG_MAX_BYTES
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]) -> WorkerConfig:
@@ -125,6 +130,13 @@ class WorkerConfig:
             ),
             retain_debug_artifacts=_boolean(
                 str(worker.get("retain_debug_artifacts", False)), "retain_debug_artifacts"
+            ),
+            debug_capture=_boolean(str(worker.get("debug_capture", False)), "debug_capture"),
+            debug_max_frames=_positive_int(
+                str(worker.get("debug_max_frames", DEFAULT_DEBUG_MAX_FRAMES)), "debug_max_frames"
+            ),
+            debug_max_bytes=_positive_int(
+                str(worker.get("debug_max_bytes", DEFAULT_DEBUG_MAX_BYTES)), "debug_max_bytes"
             ),
         )
 

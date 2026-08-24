@@ -18,5 +18,8 @@
   "heartbeat_seconds": 30,
   "concurrency": 1,
   "worker_id": "${WORKER_ID}",
-  "retain_debug_artifacts": false
+  "retain_debug_artifacts": false,
+  "debug_capture": false,
+  "debug_max_frames": 10000,
+  "debug_max_bytes": 52428800
 }

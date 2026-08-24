@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -52,6 +53,34 @@ def test_worker_records_terminal_stage_error(tmp_path: Path) -> None:
     assert record.state is JobState.FAILED
     assert record.error is not None
     assert record.error.code is ErrorCode.INVALID_MEDIA
+
+
+def test_worker_publishes_failed_stage_telemetry_before_terminal_transition(tmp_path: Path) -> None:
+    record = JobRecord(id=uuid4())
+    repository = InMemoryJobRepository([record])
+    worker = Worker(
+        WorkerConfig("test", "unconfigured", tmp_path, debug_capture=True),
+        repository,
+        worker_id="worker",
+    )
+    task = JobTask(record.id, "00000000-0000-0000-0000-000000000042")
+    captured: list[dict[str, object]] = []
+
+    def failing_stage(record: JobRecord, scratch: Path) -> None:
+        del record, scratch
+        raise terminal(ErrorCode.INVALID_MEDIA, "bad video")
+
+    def publish(record: JobRecord, scratch: Path) -> None:
+        assert record.state is JobState.VALIDATING
+        captured.extend(
+            json.loads(line) for line in (scratch / "debug-stages.jsonl").read_text().splitlines()
+        )
+
+    assert worker.process(task, failing_stage, no_op, no_op, no_op, publish)
+
+    assert captured[-1]["record_type"] == "stage_end"
+    assert captured[-1]["outcome"] == "failed"
+    assert captured[-1]["error_code"] == ErrorCode.INVALID_MEDIA.value
 
 
 def test_worker_rejects_a_job_with_a_different_immutable_model_version(tmp_path: Path) -> None:
@@ -129,6 +158,38 @@ def test_worker_reclaims_stale_scratch_before_retry(tmp_path: Path) -> None:
 
     assert repository.get(task.job_id).state is JobState.COMPLETED
     assert not stale.exists()
+
+
+def test_worker_records_all_phase_timings_before_publishing_debug_bundle(tmp_path: Path) -> None:
+    record = JobRecord(id=uuid4())
+    repository = InMemoryJobRepository([record])
+    worker = Worker(
+        WorkerConfig("test", "unconfigured", tmp_path, debug_capture=True),
+        repository,
+        worker_id="worker",
+    )
+    task = JobTask(record.id, "00000000-0000-0000-0000-000000000042")
+    captured: list[dict[str, object]] = []
+
+    def publish(record: JobRecord, scratch: Path) -> None:
+        del record
+        captured.extend(
+            json.loads(line) for line in (scratch / "debug-stages.jsonl").read_text().splitlines()
+        )
+
+    assert worker.process(task, no_op, no_op, no_op, no_op, publish)
+
+    assert [record["record_type"] for record in captured] == [
+        "stage_start",
+        "stage_end",
+    ] * 4
+    assert [record["stage"] for record in captured if record["record_type"] == "stage_end"] == [
+        "validating",
+        "analyzing",
+        "rendering",
+        "uploading",
+    ]
+    assert all(record["duration_ms"] >= 0 for record in captured if "duration_ms" in record)
 
 
 def test_worker_heartbeats_database_lease_during_a_stage(tmp_path: Path) -> None:

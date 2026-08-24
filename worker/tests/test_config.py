@@ -1,6 +1,8 @@
 import pytest
 
 from boulder_frame_worker.config import (
+    DEFAULT_DEBUG_MAX_BYTES,
+    DEFAULT_DEBUG_MAX_FRAMES,
     LOCAL_ENV_UNCONFIGURED_MODEL_VERSION,
     UNCONFIGURED_MODEL_VERSION,
     ConfigError,
@@ -16,6 +18,9 @@ def test_config_uses_safe_defaults() -> None:
     assert config.model_version == UNCONFIGURED_MODEL_VERSION
     assert config.lease_seconds == 300
     assert not config.retain_debug_artifacts
+    assert not config.debug_capture
+    assert config.debug_max_frames == DEFAULT_DEBUG_MAX_FRAMES
+    assert config.debug_max_bytes == DEFAULT_DEBUG_MAX_BYTES
 
 
 def test_config_normalizes_local_env_unconfigured_model_sentinel() -> None:
@@ -42,6 +47,31 @@ def test_config_rejects_invalid_lease(value: str) -> None:
 def test_config_rejects_invalid_boolean() -> None:
     with pytest.raises(ConfigError, match="retain_debug_artifacts"):
         WorkerConfig.from_mapping({"retain_debug_artifacts": "sometimes"})
+
+
+def test_config_parses_debug_capture_separately_from_scratch_retention() -> None:
+    config = WorkerConfig.from_mapping({"debug_capture": "true"})
+
+    assert config.debug_capture
+    assert not config.retain_debug_artifacts
+
+    with pytest.raises(ConfigError, match="debug_capture"):
+        WorkerConfig.from_mapping({"debug_capture": "sometimes"})
+
+
+@pytest.mark.parametrize("name", ["debug_max_frames", "debug_max_bytes"])
+@pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
+def test_config_rejects_invalid_debug_limits(name: str, value: str) -> None:
+    with pytest.raises(ConfigError, match=name):
+        WorkerConfig.from_mapping({name: value})
+
+
+def test_config_parses_debug_limits_separately_from_capture() -> None:
+    config = WorkerConfig.from_mapping({"debug_max_frames": "25", "debug_max_bytes": "4096"})
+
+    assert not config.debug_capture
+    assert config.debug_max_frames == 25
+    assert config.debug_max_bytes == 4096
 
 
 def test_runtime_config_requires_adapter_urls() -> None:
