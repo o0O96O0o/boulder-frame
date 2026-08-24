@@ -16,11 +16,6 @@ dependencies = [
     "redis==5.2.1",
 ]
 
-[[tool.uv.index]]
-name = "tuna"
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true
-
 [project.scripts]
 boulder-frame-worker = "boulder_frame_worker.cli:main"
 
