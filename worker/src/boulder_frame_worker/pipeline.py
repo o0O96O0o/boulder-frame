@@ -658,7 +658,62 @@ class ProcessingPipeline:
                 "planned_crop_count": len(set(crops)),
             },
         )
+        self._log_render_temporal_progress(record, inputs)
         self._log_render_mapping(record, inputs, crops)
+
+    def _log_render_temporal_progress(self, record: JobRecord, inputs: _Inputs) -> None:
+        original = inputs.source.parent / "source-original"
+        normalized = inputs.source != original
+        try:
+            render_input = self.renderer.temporal_frame_progress(inputs.source)
+            output = self.renderer.temporal_frame_progress(inputs.output)
+        except Exception:
+            self.logger.warning(
+                "render temporal progress unavailable",
+                extra={"job_id": str(record.id), "stage": "rendering"},
+                exc_info=True,
+            )
+            return
+        self.logger.info(
+            "render temporal progress",
+            extra={
+                "job_id": str(record.id),
+                "stage": "rendering",
+                "render_input_was_normalized": normalized,
+                "render_input_frame_count": render_input.frame_count,
+                "render_input_near_static_frame_count": render_input.near_static_frame_count,
+                "render_input_near_static_intervals": _interval_records(
+                    render_input.near_static_intervals
+                ),
+                "output_near_static_frame_count": output.near_static_frame_count,
+                "output_near_static_intervals": _interval_records(output.near_static_intervals),
+            },
+        )
+        if not normalized:
+            return
+        try:
+            original_progress = self.renderer.temporal_frame_progress(original)
+        except Exception:
+            self.logger.warning(
+                "original source temporal progress unavailable",
+                extra={"job_id": str(record.id), "stage": "rendering"},
+                exc_info=True,
+            )
+            return
+        self.logger.info(
+            "original source temporal progress",
+            extra={
+                "job_id": str(record.id),
+                "stage": "rendering",
+                "original_source_frame_count": original_progress.frame_count,
+                "original_source_near_static_frame_count": (
+                    original_progress.near_static_frame_count
+                ),
+                "original_source_near_static_intervals": _interval_records(
+                    original_progress.near_static_intervals
+                ),
+            },
+        )
 
     def _log_render_mapping(
         self, record: JobRecord, inputs: _Inputs, crops: Sequence[CropRect]
@@ -800,6 +855,10 @@ def _render_mapping_samples(crops: Sequence[CropRect]) -> tuple[int, ...]:
         0,
     )
     return tuple(dict.fromkeys((0, first_change, len(crops) // 2, len(crops) - 1)))
+
+
+def _interval_records(intervals: Sequence[tuple[int, int]]) -> list[dict[str, int]]:
+    return [{"start_frame": start, "end_frame": end} for start, end in intervals[:10]]
 
 
 def _render_mapping_errors(

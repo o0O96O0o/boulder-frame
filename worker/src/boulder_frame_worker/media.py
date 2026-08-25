@@ -64,6 +64,16 @@ class OutputFrameProgress:
         return sum(end - start + 1 for start, end in self.repeated_frame_intervals)
 
 
+@dataclass(frozen=True, slots=True)
+class TemporalFrameProgress:
+    frame_count: int
+    near_static_intervals: tuple[tuple[int, int], ...]
+
+    @property
+    def near_static_frame_count(self) -> int:
+        return sum(end - start + 1 for start, end in self.near_static_intervals)
+
+
 class CommandRunner(Protocol):
     def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str: ...
 
@@ -511,6 +521,39 @@ class FFmpegRenderer:
             ) from error
         return _output_frame_progress(report)
 
+    def temporal_frame_progress(self, source: Path) -> TemporalFrameProgress:
+        """Return sustained, near-static decoded-frame intervals for debug diagnosis."""
+        import cv2
+
+        capture = cv2.VideoCapture(str(source))
+        if not capture.isOpened():
+            capture.release()
+            raise ValueError("video frames could not be decoded")
+        previous = None
+        differences: list[float] = []
+        frame_count = 0
+        try:
+            while True:
+                decoded, pixels = capture.read()
+                if not decoded:
+                    break
+                current = cv2.resize(
+                    cv2.cvtColor(pixels, cv2.COLOR_BGR2GRAY),
+                    (192, 108),
+                    interpolation=cv2.INTER_AREA,
+                )
+                if previous is not None:
+                    differences.append(float(cv2.absdiff(current, previous).mean()))
+                previous = current
+                frame_count += 1
+        finally:
+            capture.release()
+        if not frame_count:
+            raise ValueError("video has no decoded frames")
+        return TemporalFrameProgress(
+            frame_count, _near_static_intervals(differences, threshold=0.05, minimum_frames=15)
+        )
+
     def render_crop_path(
         self,
         source: Path,
@@ -571,6 +614,26 @@ def _output_frame_progress(report: str) -> OutputFrameProgress:
     if repeat_start is not None:
         intervals.append((repeat_start, len(frame_hashes) - 1))
     return OutputFrameProgress(len(frame_hashes), tuple(intervals))
+
+
+def _near_static_intervals(
+    differences: Sequence[float], *, threshold: float, minimum_frames: int
+) -> tuple[tuple[int, int], ...]:
+    if threshold < 0 or minimum_frames < 2:
+        raise ValueError("temporal progress thresholds are invalid")
+    intervals: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, difference in enumerate(differences, start=1):
+        if difference <= threshold:
+            if start is None:
+                start = index - 1
+        elif start is not None:
+            if index - start >= minimum_frames:
+                intervals.append((start, index - 1))
+            start = None
+    if start is not None and len(differences) + 1 - start >= minimum_frames:
+        intervals.append((start, len(differences)))
+    return tuple(intervals)
 
 
 def validate_output(

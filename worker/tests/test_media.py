@@ -12,6 +12,7 @@ from boulder_frame_worker.media import (
     FFmpegRenderer,
     FFprobeAdapter,
     MediaMetadata,
+    _near_static_intervals,
     crop_path_filter,
     metadata_from_ffprobe,
     validate_output,
@@ -129,6 +130,14 @@ def test_output_frame_progress_reports_only_consecutive_repeats() -> None:
     assert progress.frame_count == 6
     assert progress.repeated_frame_intervals == ((0, 1), (3, 5))
     assert progress.repeated_frame_count == 5
+
+
+def test_near_static_intervals_require_a_sustained_low_difference_run() -> None:
+    intervals = _near_static_intervals(
+        [2.0, 0.01, 0.02, 0.03, 0.04, 2.0, 0.01, 0.02], threshold=0.05, minimum_frames=4
+    )
+
+    assert intervals == ((1, 5),)
 
 
 def test_normalizer_creates_rotation_normalized_cfr_h264_aac_derivative() -> None:

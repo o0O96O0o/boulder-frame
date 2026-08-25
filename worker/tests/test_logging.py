@@ -88,6 +88,33 @@ def test_json_formatter_records_output_frame_progress() -> None:
     assert event["planned_crop_count"] == 473
 
 
+def test_json_formatter_records_temporal_progress() -> None:
+    logger = logging.getLogger("test_json_formatter")
+    record = logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        0,
+        "render temporal progress",
+        (),
+        None,
+        extra={
+            "render_input_was_normalized": True,
+            "render_input_frame_count": 627,
+            "render_input_near_static_frame_count": 74,
+            "render_input_near_static_intervals": [{"start_frame": 444, "end_frame": 518}],
+            "output_near_static_frame_count": 74,
+            "output_near_static_intervals": [{"start_frame": 444, "end_frame": 518}],
+        },
+    )
+
+    event = json.loads(JsonFormatter().format(record))
+
+    assert event["render_input_was_normalized"] is True
+    assert event["render_input_near_static_intervals"] == [{"start_frame": 444, "end_frame": 518}]
+    assert event["output_near_static_frame_count"] == 74
+
+
 def test_json_formatter_records_configuration_loading_details() -> None:
     logger = logging.getLogger("test_json_formatter")
     record = logger.makeRecord(
