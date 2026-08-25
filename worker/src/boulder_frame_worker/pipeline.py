@@ -87,6 +87,7 @@ class UnavailableFrameReader:
 PlannerFactory = Callable[[int, int, AspectRatio, FramingProfile], CropPlanner]
 _ANALYSIS_TRACE = "analysis-trace.jsonl"
 _CROP_PATH = "crop-path.jsonl"
+_RENDER_CACHE = "render-cache.json"
 _STAGE_TRACE = "debug-stages.jsonl"
 
 
@@ -593,7 +594,13 @@ class ProcessingPipeline:
             raise
 
     def _render(self, inputs: _Inputs) -> MediaMetadata:
-        if inputs.output.exists():
+        crops = self._crop_path(inputs)
+        cache_path = inputs.source.parent / _RENDER_CACHE
+        cache = {
+            "aspect_ratio": inputs.output_settings.aspect_ratio.value,
+            "crop_path_sha256": _sha256(inputs.source.parent / _CROP_PATH),
+        }
+        if inputs.output.exists() and self._render_cache_matches(cache_path, cache):
             metadata = self.inspector.inspect(inputs.output)
             validate_output(
                 metadata,
@@ -606,16 +613,41 @@ class ProcessingPipeline:
                 inputs.source.parent / _ANALYSIS_TRACE, self.debug_max_bytes
             )
             return metadata
+        inputs.output.unlink(missing_ok=True)
+        cache_path.unlink(missing_ok=True)
         rendered = self.renderer.render_crop_path(
             inputs.source,
             inputs.output,
-            self._crop_path(inputs),
+            crops,
             inputs.metadata,
             inputs.output_settings.aspect_ratio,
             self.inspector,
         )
+        self._write_render_cache(cache_path, cache)
         self._mark_render_validated(inputs.source.parent / _ANALYSIS_TRACE, self.debug_max_bytes)
         return rendered
+
+    @staticmethod
+    def _render_cache_matches(path: Path, expected: Mapping[str, str]) -> bool:
+        try:
+            with path.open(encoding="ascii") as source:
+                cache: object = json.load(source)
+                return cache == dict(expected)
+        except (OSError, json.JSONDecodeError):
+            return False
+
+    @staticmethod
+    def _write_render_cache(path: Path, cache: Mapping[str, str]) -> None:
+        temporary = path.with_suffix(".tmp")
+        temporary.unlink(missing_ok=True)
+        try:
+            with temporary.open("w", encoding="ascii") as destination:
+                json.dump(cache, destination, sort_keys=True, separators=(",", ":"))
+                destination.write("\n")
+            temporary.replace(path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
 
     @staticmethod
     def _mark_render_validated(path: Path, max_bytes: int) -> None:

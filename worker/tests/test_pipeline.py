@@ -34,10 +34,12 @@ class Inspector:
 class Renderer:
     def __init__(self) -> None:
         self.crops: list[CropRect] | None = None
+        self.calls = 0
 
     def render_crop_path(
         self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
     ):
+        self.calls += 1
         self.crops = crop_path
         destination.write_bytes(b"output")
         return Inspector().inspect(destination)
@@ -128,6 +130,46 @@ def test_render_reuses_crop_path_without_running_detector(tmp_path) -> None:
     assert renderer.crops == [CropRect(0, 0, 1920, 1080), CropRect(0, 0, 1920, 1080)]
 
 
+def test_render_discards_output_when_crop_path_changes(tmp_path) -> None:
+    class FailingFrames:
+        def read(self, source, metadata):
+            raise AssertionError("persisted crop path must be reused")
+
+    renderer = Renderer()
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=Inspector(),
+        renderer=renderer,
+        frame_reader=FailingFrames(),
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    crop_path = scratch / "crop-path.jsonl"
+    crop_path.write_text(
+        """{\"crop\":{\"height\":1080,\"width\":1920,\"x\":0,\"y\":0},\"frame_index\":0,\"timestamp_ms\":0}
+{\"crop\":{\"height\":1080,\"width\":1920,\"x\":0,\"y\":0},\"frame_index\":1,\"timestamp_ms\":500}
+""",
+        encoding="ascii",
+    )
+
+    pipeline.rendering(record(), scratch)
+    pipeline.rendering(record(), scratch)
+    assert renderer.calls == 1
+
+    crop_path.write_text(
+        """{\"crop\":{\"height\":1080,\"width\":1920,\"x\":0,\"y\":0},\"frame_index\":0,\"timestamp_ms\":0}
+{\"crop\":{\"height\":1080,\"width\":1920,\"x\":1,\"y\":0},\"frame_index\":1,\"timestamp_ms\":500}
+""",
+        encoding="ascii",
+    )
+
+    pipeline.rendering(record(), scratch)
+
+    assert renderer.calls == 2
+    assert renderer.crops == [CropRect(0, 0, 1920, 1080), CropRect(1, 0, 1920, 1080)]
+
+
 def test_selected_frame_miss_remains_terminal(tmp_path) -> None:
     class Frames:
         def read(self, source, metadata):
@@ -192,8 +234,7 @@ def test_selected_frame_association_propagates_both_directions_without_identity_
     inputs = pipeline._inputs(record(frame_time_ms=500), scratch)
     pipeline._crop_path(inputs)
     trace = [
-        json.loads(line)
-        for line in (scratch / "analysis-trace.jsonl").read_text().splitlines()
+        json.loads(line) for line in (scratch / "analysis-trace.jsonl").read_text().splitlines()
     ]
 
     assert [entry["detection"]["detection"]["bounds"]["x"] for entry in trace] == [680, 700, 720]
@@ -213,6 +254,7 @@ def test_competing_person_after_loss_is_rejected_until_target_is_reacquired(tmp_
             return MediaMetadata(1920, 1080, 1500, 2, "h264", None, 0, False)
 
     target = Rect(700, 200, 100, 400)
+
     class Detector:
         def detect(self, pixels: Pixels) -> list[Detection]:
             return {
@@ -234,8 +276,7 @@ def test_competing_person_after_loss_is_rejected_until_target_is_reacquired(tmp_
     scratch.mkdir()
     pipeline._crop_path(pipeline._inputs(record(frame_time_ms=500), scratch))
     trace = [
-        json.loads(line)
-        for line in (scratch / "analysis-trace.jsonl").read_text().splitlines()
+        json.loads(line) for line in (scratch / "analysis-trace.jsonl").read_text().splitlines()
     ]
 
     assert trace[0]["detection"]["detection"] is None

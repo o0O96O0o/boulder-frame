@@ -45,8 +45,9 @@ forward and backward from its detector box. Later candidates must pass the detec
 gate; a miss or rejected candidate does not update the reference. `framing` derives the profile-target
 crop, smooths it, contains the current box when possible, reports `source_aspect_limited` when it is not,
 and widens on misses without position extrapolation. `rendering` applies the exact
-crop path and validates 1080p H.264/AAC output. `uploading` heads and lease-finalizes the deterministic
-output object before completion.
+crop path and validates 1080p H.264/AAC output. A local rendered output is reusable only when its
+atomic sidecar matches the complete persisted crop-path digest and output aspect ratio. `uploading` heads
+and lease-finalizes the deterministic output object before completion.
 
 ## Review Finalization
 
