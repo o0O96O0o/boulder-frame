@@ -102,13 +102,16 @@ def test_renderer_maps_only_the_validated_aac_stream() -> None:
         Path("source.mp4"),
         Path("output.mp4"),
         Path("crop.ffscript"),
-        Fraction(30, 1),
         audio_stream_index=3,
     )
 
     assert ["-map", "0:v:0", "-map", "0:3"] == runner.arguments[
-        runner.arguments.index("-map") : runner.arguments.index("-r")
+        runner.arguments.index("-map") : runner.arguments.index("-fps_mode:v")
     ]
+    assert ["-fps_mode:v", "passthrough"] == runner.arguments[
+        runner.arguments.index("-fps_mode:v") : runner.arguments.index("-c:v")
+    ]
+    assert "-r" not in runner.arguments
     assert "-shortest" not in runner.arguments
 
 
@@ -323,7 +326,7 @@ def test_renderer_preserves_bounded_ffmpeg_diagnostics() -> None:
 
     with pytest.raises(WorkerError) as raised:
         FFmpegRenderer(runner=FailingRunner()).render(
-            Path("source.mp4"), Path("output.mp4"), Path("crop.ffscript"), Fraction(30, 1)
+            Path("source.mp4"), Path("output.mp4"), Path("crop.ffscript")
         )
 
     assert raised.value.code is ErrorCode.RENDER_UNAVAILABLE

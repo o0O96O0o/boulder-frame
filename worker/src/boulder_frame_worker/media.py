@@ -428,7 +428,6 @@ class FFmpegRenderer:
         source: Path,
         destination: Path,
         filter_script: Path,
-        fps: Fraction,
         audio_stream_index: int | None = None,
     ) -> None:
         audio_mapping = (
@@ -447,8 +446,8 @@ class FFmpegRenderer:
                     "-map",
                     "0:v:0",
                     *audio_mapping,
-                    "-r",
-                    str(fps),
+                    "-fps_mode:v",
+                    "passthrough",
                     "-c:v",
                     "libx264",
                     "-preset",
@@ -629,7 +628,6 @@ class FFmpegRenderer:
             source,
             destination,
             filter_script,
-            source_metadata.frame_rate,
             source_metadata.audio_stream_index,
         )
         try:
