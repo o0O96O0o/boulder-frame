@@ -35,6 +35,8 @@ class JsonFormatter(logging.Formatter):
             "render_input_frame_count",
             "render_input_near_static_frame_count",
             "render_input_near_static_intervals",
+            "planned_crop_near_static_frame_count",
+            "planned_crop_near_static_intervals",
             "output_near_static_frame_count",
             "output_near_static_intervals",
             "original_source_frame_count",

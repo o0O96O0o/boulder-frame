@@ -664,9 +664,14 @@ class ProcessingPipeline:
     def _log_render_temporal_progress(self, record: JobRecord, inputs: _Inputs) -> None:
         original = inputs.source.parent / "source-original"
         normalized = inputs.source != original
+        output_sample_size = (
+            (192, 108)
+            if inputs.output_settings.aspect_ratio is AspectRatio.LANDSCAPE
+            else (108, 192)
+        )
         try:
             render_input = self.renderer.temporal_frame_progress(inputs.source)
-            output = self.renderer.temporal_frame_progress(inputs.output)
+            output = self.renderer.temporal_frame_progress(inputs.output, output_sample_size)
         except Exception:
             self.logger.warning(
                 "render temporal progress unavailable",
@@ -689,6 +694,31 @@ class ProcessingPipeline:
                 "output_near_static_intervals": _interval_records(output.near_static_intervals),
             },
         )
+        try:
+            planned_crop = self.renderer.crop_path_temporal_progress(
+                inputs.source,
+                self._crop_path(inputs),
+                inputs.metadata,
+                inputs.output_settings.aspect_ratio,
+            )
+        except Exception:
+            self.logger.warning(
+                "planned crop temporal progress unavailable",
+                extra={"job_id": str(record.id), "stage": "rendering"},
+                exc_info=True,
+            )
+        else:
+            self.logger.info(
+                "planned crop temporal progress",
+                extra={
+                    "job_id": str(record.id),
+                    "stage": "rendering",
+                    "planned_crop_near_static_frame_count": planned_crop.near_static_frame_count,
+                    "planned_crop_near_static_intervals": _interval_records(
+                        planned_crop.near_static_intervals
+                    ),
+                },
+            )
         if not normalized:
             return
         try:

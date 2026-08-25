@@ -521,10 +521,14 @@ class FFmpegRenderer:
             ) from error
         return _output_frame_progress(report)
 
-    def temporal_frame_progress(self, source: Path) -> TemporalFrameProgress:
+    def temporal_frame_progress(
+        self, source: Path, sample_size: tuple[int, int] = (192, 108)
+    ) -> TemporalFrameProgress:
         """Return sustained, near-static decoded-frame intervals for debug diagnosis."""
         import cv2
 
+        if sample_size[0] <= 0 or sample_size[1] <= 0:
+            raise ValueError("temporal progress sample dimensions are invalid")
         capture = cv2.VideoCapture(str(source))
         if not capture.isOpened():
             capture.release()
@@ -539,7 +543,7 @@ class FFmpegRenderer:
                     break
                 current = cv2.resize(
                     cv2.cvtColor(pixels, cv2.COLOR_BGR2GRAY),
-                    (192, 108),
+                    sample_size,
                     interpolation=cv2.INTER_AREA,
                 )
                 if previous is not None:
@@ -550,6 +554,58 @@ class FFmpegRenderer:
             capture.release()
         if not frame_count:
             raise ValueError("video has no decoded frames")
+        return TemporalFrameProgress(
+            frame_count, _near_static_intervals(differences, threshold=0.05, minimum_frames=15)
+        )
+
+    def crop_path_temporal_progress(
+        self,
+        source: Path,
+        crop_path: Sequence[CropRect],
+        metadata: MediaMetadata,
+        aspect_ratio: AspectRatio,
+    ) -> TemporalFrameProgress:
+        """Return near-static intervals after applying the planned crop path to decoded input."""
+        import cv2
+
+        if len(crop_path) != expected_frame_count(metadata):
+            raise ValueError("crop path does not cover the source video")
+        capture = cv2.VideoCapture(str(source))
+        if not capture.isOpened():
+            capture.release()
+            raise ValueError("video frames could not be decoded")
+        if not capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0):
+            capture.release()
+            raise ValueError("video rotation could not be normalized")
+        sample_size = (192, 108) if aspect_ratio is AspectRatio.LANDSCAPE else (108, 192)
+        previous = None
+        differences: list[float] = []
+        frame_count = 0
+        try:
+            while True:
+                decoded, pixels = capture.read()
+                if not decoded:
+                    break
+                pixels = _rotate_pixels(pixels, metadata.rotation, cv2)
+                crop = crop_path[frame_count]
+                x, y = int(crop.x), int(crop.y)
+                width, height = int(crop.width), int(crop.height)
+                cropped = pixels[y : y + height, x : x + width]
+                if cropped.size == 0:
+                    raise ValueError("planned crop could not be sampled")
+                current = cv2.resize(
+                    cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY),
+                    sample_size,
+                    interpolation=cv2.INTER_AREA,
+                )
+                if previous is not None:
+                    differences.append(float(cv2.absdiff(current, previous).mean()))
+                previous = current
+                frame_count += 1
+        finally:
+            capture.release()
+        if frame_count != len(crop_path):
+            raise ValueError("video frame count is inconsistent")
         return TemporalFrameProgress(
             frame_count, _near_static_intervals(differences, threshold=0.05, minimum_frames=15)
         )
@@ -634,6 +690,15 @@ def _near_static_intervals(
     if start is not None and len(differences) + 1 - start >= minimum_frames:
         intervals.append((start, len(differences)))
     return tuple(intervals)
+
+
+def _rotate_pixels(pixels: Any, rotation: int, cv2: Any) -> Any:
+    return {
+        0: pixels,
+        90: cv2.rotate(pixels, cv2.ROTATE_90_CLOCKWISE),
+        180: cv2.rotate(pixels, cv2.ROTATE_180),
+        270: cv2.rotate(pixels, cv2.ROTATE_90_COUNTERCLOCKWISE),
+    }[rotation]
 
 
 def validate_output(

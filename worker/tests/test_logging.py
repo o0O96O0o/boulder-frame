@@ -103,6 +103,8 @@ def test_json_formatter_records_temporal_progress() -> None:
             "render_input_frame_count": 627,
             "render_input_near_static_frame_count": 74,
             "render_input_near_static_intervals": [{"start_frame": 444, "end_frame": 518}],
+            "planned_crop_near_static_frame_count": 74,
+            "planned_crop_near_static_intervals": [{"start_frame": 444, "end_frame": 518}],
             "output_near_static_frame_count": 74,
             "output_near_static_intervals": [{"start_frame": 444, "end_frame": 518}],
         },
@@ -112,6 +114,7 @@ def test_json_formatter_records_temporal_progress() -> None:
 
     assert event["render_input_was_normalized"] is True
     assert event["render_input_near_static_intervals"] == [{"start_frame": 444, "end_frame": 518}]
+    assert event["planned_crop_near_static_frame_count"] == 74
     assert event["output_near_static_frame_count"] == 74
 
 

@@ -46,10 +46,11 @@ annotation rather than silent success.
 With `debug_capture`, the worker emits structured render diagnostics after rendering. `render output
 progress` reports the decoded output-frame count, planned crop count, and at most ten intervals of
 exactly repeated decoded frames. `render temporal progress` compares sustained near-static intervals
-in the render input with the output, using 192x108 luma-frame differences at or below 0.05 for at
-least 15 frames. It reports only bounded frame intervals and whether VFR-to-CFR normalization was
-used. For normalized jobs, `original source temporal progress` additionally reports the original
-source's near-static intervals. These logs contain no frame checksums, pixels, or media data. A
+in the render input with the output. `planned crop temporal progress` measures the same source after
+the final crop path. Both use 192x108 (or 108x192 portrait) luma-frame differences at or below 0.05
+for at least 15 frames and report only bounded frame intervals. For normalized jobs, `original source
+temporal progress` additionally reports the original source's near-static intervals. These logs
+contain no frame checksums, pixels, or media data. A
 subsequent `render crop mapping` log compares the first crop change, midpoint, and last source frames
 with the corresponding output frames. It reports only sampled frame indexes and mean absolute pixel
 error; error at or below 24 indicates the sampled crop applied.

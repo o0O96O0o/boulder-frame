@@ -121,8 +121,21 @@ def test_temporal_progress_compares_normalized_input_output_and_original_source(
             super().__init__()
             self.sources: list[Path] = []
 
-        def temporal_frame_progress(self, source: Path) -> TemporalFrameProgress:
+        def temporal_frame_progress(
+            self, source: Path, sample_size: tuple[int, int] = (192, 108)
+        ) -> TemporalFrameProgress:
+            del sample_size
             self.sources.append(source)
+            return TemporalFrameProgress(30, ((4, 20),))
+
+        def crop_path_temporal_progress(
+            self,
+            source: Path,
+            crops: list[CropRect],
+            metadata: MediaMetadata,
+            aspect_ratio: AspectRatio,
+        ) -> TemporalFrameProgress:
+            del source, crops, metadata, aspect_ratio
             return TemporalFrameProgress(30, ((4, 20),))
 
     class Logger:
@@ -146,6 +159,12 @@ def test_temporal_progress_compares_normalized_input_output_and_original_source(
         TargetSelection(0, 0.5, 0.5),
         OutputSettings(AspectRatio.LANDSCAPE, FramingProfile.BALANCED),
     )
+    (tmp_path / "crop-path.jsonl").write_text(
+        """{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":0,"timestamp_ms":0}
+{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":1,"timestamp_ms":500}
+""",
+        encoding="ascii",
+    )
 
     pipeline._log_render_temporal_progress(record(), inputs)
 
@@ -156,9 +175,11 @@ def test_temporal_progress_compares_normalized_input_output_and_original_source(
     ]
     assert [message for message, _ in logger.events] == [
         "render temporal progress",
+        "planned crop temporal progress",
         "original source temporal progress",
     ]
     assert logger.events[0][1]["render_input_was_normalized"] is True
+    assert logger.events[1][1]["planned_crop_near_static_frame_count"] == 17
 
 
 def test_render_progress_is_skipped_without_debug_capture(tmp_path) -> None:
