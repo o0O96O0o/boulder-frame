@@ -7,9 +7,20 @@ import pytest
 
 from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal
 from boulder_frame_worker.measurement import Detection, Rect
-from boulder_frame_worker.media import MediaMetadata
-from boulder_frame_worker.pipeline import DecodedFrame, ProcessingPipeline, _render_mapping_samples
+from boulder_frame_worker.media import MediaMetadata, TemporalFrameProgress
+from boulder_frame_worker.pipeline import (
+    DecodedFrame,
+    ProcessingPipeline,
+    _Inputs,
+    _render_mapping_samples,
+)
 from boulder_frame_worker.planner import CropRect
+from boulder_frame_worker.protocol import (
+    AspectRatio,
+    FramingProfile,
+    OutputSettings,
+    TargetSelection,
+)
 from boulder_frame_worker.state import JobConfiguration, JobRecord, JobState, SourceAsset
 
 
@@ -102,6 +113,76 @@ def test_detector_only_pipeline_persists_aligned_crops_and_widens_later_miss(tmp
     assert trace[1]["framing"]["decision"]["action"] == "widen_on_miss"
     assert "pose" not in json.dumps(trace)
     assert "tracking" not in json.dumps(trace)
+
+
+def test_temporal_progress_compares_normalized_input_output_and_original_source(tmp_path) -> None:
+    class TemporalRenderer(Renderer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sources: list[Path] = []
+
+        def temporal_frame_progress(self, source: Path) -> TemporalFrameProgress:
+            self.sources.append(source)
+            return TemporalFrameProgress(30, ((4, 20),))
+
+    class Logger:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, object]]] = []
+
+        def info(self, message: str, *, extra: dict[str, object]) -> None:
+            self.events.append((message, extra))
+
+        def warning(self, message: str, *, extra: dict[str, object], exc_info: bool) -> None:
+            raise AssertionError(message)
+
+    renderer = TemporalRenderer()
+    pipeline = ProcessingPipeline(Storage(), Finalizer(), inspector=Inspector(), renderer=renderer)
+    logger = Logger()
+    pipeline.logger = logger  # type: ignore[assignment]
+    inputs = _Inputs(
+        tmp_path / "source-cfr.mp4",
+        tmp_path / "output.mp4",
+        Inspector().inspect(tmp_path / "output.mp4"),
+        TargetSelection(0, 0.5, 0.5),
+        OutputSettings(AspectRatio.LANDSCAPE, FramingProfile.BALANCED),
+    )
+
+    pipeline._log_render_temporal_progress(record(), inputs)
+
+    assert [source.name for source in renderer.sources] == [
+        "source-cfr.mp4",
+        "output.mp4",
+        "source-original",
+    ]
+    assert [message for message, _ in logger.events] == [
+        "render temporal progress",
+        "original source temporal progress",
+    ]
+    assert logger.events[0][1]["render_input_was_normalized"] is True
+
+
+def test_render_progress_is_skipped_without_debug_capture(tmp_path) -> None:
+    class FailingRenderer(Renderer):
+        def output_frame_progress(self, output: Path) -> object:
+            del output
+            raise AssertionError("debug diagnostics must be disabled")
+
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=Inspector(),
+        renderer=FailingRenderer(),
+        debug_capture=False,
+    )
+    inputs = _Inputs(
+        tmp_path / "source-original",
+        tmp_path / "output.mp4",
+        Inspector().inspect(tmp_path / "output.mp4"),
+        TargetSelection(0, 0.5, 0.5),
+        OutputSettings(AspectRatio.LANDSCAPE, FramingProfile.BALANCED),
+    )
+
+    pipeline._log_render_progress(record(), inputs)
 
 
 def test_render_reuses_crop_path_without_running_detector(tmp_path) -> None:
