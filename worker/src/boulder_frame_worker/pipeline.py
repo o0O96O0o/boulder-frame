@@ -658,6 +658,36 @@ class ProcessingPipeline:
                 "planned_crop_count": len(set(crops)),
             },
         )
+        self._log_render_mapping(record, inputs, crops)
+
+    def _log_render_mapping(
+        self, record: JobRecord, inputs: _Inputs, crops: Sequence[CropRect]
+    ) -> None:
+        try:
+            samples = _render_mapping_samples(crops)
+            errors = _render_mapping_errors(inputs, crops, samples)
+        except Exception:
+            self.logger.warning(
+                "render crop mapping unavailable",
+                extra={"job_id": str(record.id), "stage": "rendering"},
+                exc_info=True,
+            )
+            return
+        matching = sum(error <= 24.0 for _, error in errors)
+        self.logger.info(
+            "render crop mapping",
+            extra={
+                "job_id": str(record.id),
+                "stage": "rendering",
+                "render_mapping_checked_frames": len(errors),
+                "render_mapping_matching_frames": matching,
+                "render_mapping_max_mean_absolute_error": max(error for _, error in errors),
+                "render_mapping_samples": [
+                    {"frame_index": index, "mean_absolute_error": round(error, 3)}
+                    for index, error in errors
+                ],
+            },
+        )
 
     @staticmethod
     def _render_cache_matches(path: Path, expected: Mapping[str, str]) -> bool:
