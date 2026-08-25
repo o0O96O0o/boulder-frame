@@ -46,7 +46,9 @@ annotation rather than silent success.
 With `debug_capture`, the worker also emits a structured `render output progress` log after rendering.
 It reports the decoded output-frame count, the planned crop count, and at most ten intervals of exactly
 repeated decoded frames. It never logs frame checksums, pixels, or media data. This identifies output
-frame freezes; it does not independently prove crop coordinates.
+frame freezes. A subsequent `render crop mapping` log compares the first crop change, midpoint, and
+last source frames with the corresponding output frames. It reports only sampled frame indexes and
+mean absolute pixel error, never pixel data; error at or below 24 indicates the sampled crop applied.
 
 ## Visual Review
 

@@ -31,6 +31,10 @@ class JsonFormatter(logging.Formatter):
             "repeated_output_frame_count",
             "repeated_output_frame_intervals",
             "planned_crop_count",
+            "render_mapping_checked_frames",
+            "render_mapping_matching_frames",
+            "render_mapping_max_mean_absolute_error",
+            "render_mapping_samples",
             "config_path",
             "configuration",
         ):

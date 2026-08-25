@@ -8,7 +8,7 @@ import pytest
 from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal
 from boulder_frame_worker.measurement import Detection, Rect
 from boulder_frame_worker.media import MediaMetadata
-from boulder_frame_worker.pipeline import DecodedFrame, ProcessingPipeline
+from boulder_frame_worker.pipeline import DecodedFrame, ProcessingPipeline, _render_mapping_samples
 from boulder_frame_worker.planner import CropRect
 from boulder_frame_worker.state import JobConfiguration, JobRecord, JobState, SourceAsset
 
@@ -168,6 +168,17 @@ def test_render_discards_output_when_crop_path_changes(tmp_path) -> None:
 
     assert renderer.calls == 2
     assert renderer.crops == [CropRect(0, 0, 1920, 1080), CropRect(1, 0, 1920, 1080)]
+
+
+def test_render_mapping_samples_include_the_first_crop_change() -> None:
+    crops = [
+        CropRect(0, 0, 1920, 1080),
+        CropRect(0, 0, 1920, 1080),
+        CropRect(20, 0, 1900, 1068.75),
+        CropRect(30, 0, 1890, 1063.125),
+    ]
+
+    assert _render_mapping_samples(crops) == (0, 2, 3)
 
 
 def test_selected_frame_miss_remains_terminal(tmp_path) -> None:

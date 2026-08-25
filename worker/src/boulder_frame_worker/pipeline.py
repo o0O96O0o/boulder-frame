@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from .config import DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
@@ -760,6 +760,60 @@ def _planner_measurements(observations: Sequence[RawFrameObservation]) -> list[F
         FrameMeasurement(observation.detector_bounds, observation.confidence)
         for observation in observations
     ]
+
+
+def _render_mapping_samples(crops: Sequence[CropRect]) -> tuple[int, ...]:
+    if not crops:
+        raise ValueError("crop path must not be empty")
+    first_change = next(
+        (index for index, crop in enumerate(crops[1:], start=1) if crop != crops[index - 1]),
+        0,
+    )
+    return tuple(dict.fromkeys((0, first_change, len(crops) // 2, len(crops) - 1)))
+
+
+def _render_mapping_errors(
+    inputs: _Inputs, crops: Sequence[CropRect], samples: Sequence[int]
+) -> list[tuple[int, float]]:
+    import cv2
+
+    from .frame_reader import OpenCVFrameReader
+
+    sample_set = set(samples)
+    output_width, output_height = output_dimensions(inputs.output_settings.aspect_ratio)
+    output = cv2.VideoCapture(str(inputs.output))
+    if not output.isOpened():
+        output.release()
+        raise ValueError("rendered output could not be decoded")
+    source_frames = OpenCVFrameReader().read(inputs.source, inputs.metadata)
+    errors: list[tuple[int, float]] = []
+    try:
+        for index, source in enumerate(source_frames):
+            decoded, output_pixels = output.read()
+            if not decoded:
+                raise ValueError("rendered output frame alignment failed")
+            if index not in sample_set:
+                continue
+            crop = crops[index]
+            x, y = int(crop.x), int(crop.y)
+            width, height = int(crop.width), int(crop.height)
+            pixels: Any = source.pixels
+            expected = pixels[y : y + height, x : x + width]
+            if expected.size == 0:
+                raise ValueError("planned crop could not be sampled")
+            expected = cv2.resize(
+                expected, (output_width, output_height), interpolation=cv2.INTER_LANCZOS4
+            )
+            difference = cv2.absdiff(expected, output_pixels)
+            errors.append((index, sum(cv2.mean(difference)[:3]) / 3))
+        if len(errors) != len(samples):
+            raise ValueError("source video frame alignment failed")
+    finally:
+        output.release()
+        close = getattr(source_frames, "close", None)
+        if callable(close):
+            close()
+    return errors
 
 
 def _sha256(path: Path) -> str:
