@@ -54,6 +54,16 @@ class MediaMetadata:
         return round(Fraction(index * 1000, 1) / self.frame_rate)
 
 
+@dataclass(frozen=True, slots=True)
+class OutputFrameProgress:
+    frame_count: int
+    repeated_frame_intervals: tuple[tuple[int, int], ...]
+
+    @property
+    def repeated_frame_count(self) -> int:
+        return sum(end - start + 1 for start, end in self.repeated_frame_intervals)
+
+
 class CommandRunner(Protocol):
     def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str: ...
 
@@ -478,6 +488,29 @@ class FFmpegRenderer:
                 ErrorCode.INVALID_OUTPUT, "Rendered video could not be decoded."
             ) from error
 
+    def output_frame_progress(self, output: Path) -> OutputFrameProgress:
+        """Return repeated decoded-output frame intervals without retaining frame content."""
+        try:
+            report = self.runner.run(
+                [
+                    self.binary,
+                    "-v",
+                    "error",
+                    "-i",
+                    str(output),
+                    "-map",
+                    "0:v:0",
+                    "-f",
+                    "framemd5",
+                    "-",
+                ]
+            )
+        except WorkerError as error:
+            raise terminal(
+                ErrorCode.INVALID_OUTPUT, "Rendered video frames could not be inspected."
+            ) from error
+        return _output_frame_progress(report)
+
     def render_crop_path(
         self,
         source: Path,
@@ -515,6 +548,29 @@ class FFmpegRenderer:
         )
         self.decode(destination)
         return output_metadata
+
+
+def _output_frame_progress(report: str) -> OutputFrameProgress:
+    frame_hashes: list[str] = []
+    for line in report.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split(",")
+        if len(fields) != 6:
+            raise ValueError("FFmpeg frame checksum report is invalid")
+        frame_hashes.append(fields[-1].strip())
+    intervals: list[tuple[int, int]] = []
+    repeat_start: int | None = None
+    for index in range(1, len(frame_hashes)):
+        if frame_hashes[index] == frame_hashes[index - 1]:
+            if repeat_start is None:
+                repeat_start = index - 1
+        elif repeat_start is not None:
+            intervals.append((repeat_start, index - 1))
+            repeat_start = None
+    if repeat_start is not None:
+        intervals.append((repeat_start, len(frame_hashes) - 1))
+    return OutputFrameProgress(len(frame_hashes), tuple(intervals))
 
 
 def validate_output(

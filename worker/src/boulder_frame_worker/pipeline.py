@@ -19,6 +19,7 @@ from .debug import (
     serialize_raw_frame_observation,
 )
 from .errors import ErrorCode, WorkerError, terminal
+from .logging import configure_logging
 from .measurement import (
     Detection,
     PersonDetector,
@@ -129,6 +130,7 @@ class ProcessingPipeline:
         self.analyzer = TargetFrameAnalyzer(detector or UnavailableDetector())
         self.planner_factory = planner_factory
         self.debug_capture = debug_capture
+        self.logger = configure_logging()
         self.debug_max_frames = debug_max_frames
         self.debug_max_bytes = debug_max_bytes
         self.review_renderer = review_renderer
@@ -144,6 +146,7 @@ class ProcessingPipeline:
     def rendering(self, record: JobRecord, scratch: Path) -> None:
         inputs = self._inputs(record, scratch)
         self._render(inputs)
+        self._log_render_progress(record, inputs)
 
     def uploading(self, record: JobRecord, scratch: Path) -> None:
         inputs = self._inputs(record, scratch)
@@ -626,6 +629,35 @@ class ProcessingPipeline:
         self._write_render_cache(cache_path, cache)
         self._mark_render_validated(inputs.source.parent / _ANALYSIS_TRACE, self.debug_max_bytes)
         return rendered
+
+    def _log_render_progress(self, record: JobRecord, inputs: _Inputs) -> None:
+        if not self.debug_capture:
+            return
+        try:
+            progress = self.renderer.output_frame_progress(inputs.output)
+        except (ValueError, WorkerError):
+            self.logger.warning(
+                "render output progress unavailable",
+                extra={"job_id": str(record.id), "stage": "rendering"},
+                exc_info=True,
+            )
+            return
+        crops = self._crop_path(inputs)
+        intervals = [
+            {"start_frame": start, "end_frame": end}
+            for start, end in progress.repeated_frame_intervals[:10]
+        ]
+        self.logger.info(
+            "render output progress",
+            extra={
+                "job_id": str(record.id),
+                "stage": "rendering",
+                "output_frame_count": progress.frame_count,
+                "repeated_output_frame_count": progress.repeated_frame_count,
+                "repeated_output_frame_intervals": intervals,
+                "planned_crop_count": len(set(crops)),
+            },
+        )
 
     @staticmethod
     def _render_cache_matches(path: Path, expected: Mapping[str, str]) -> bool:

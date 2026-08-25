@@ -111,6 +111,26 @@ def test_renderer_maps_only_the_validated_aac_stream() -> None:
     assert "-shortest" not in runner.arguments
 
 
+def test_output_frame_progress_reports_only_consecutive_repeats() -> None:
+    class ProgressRunner:
+        def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
+            del arguments, timeout_seconds
+            return """#format: frame checksums
+0,          0,          0,        1,     100, hash-a
+0,          1,          1,        1,     100, hash-a
+0,          2,          2,        1,     100, hash-b
+0,          3,          3,        1,     100, hash-c
+0,          4,          4,        1,     100, hash-c
+0,          5,          5,        1,     100, hash-c
+"""
+
+    progress = FFmpegRenderer(runner=ProgressRunner()).output_frame_progress(Path("output.mp4"))
+
+    assert progress.frame_count == 6
+    assert progress.repeated_frame_intervals == ((0, 1), (3, 5))
+    assert progress.repeated_frame_count == 5
+
+
 def test_normalizer_creates_rotation_normalized_cfr_h264_aac_derivative() -> None:
     class CapturingRunner:
         def __init__(self) -> None:

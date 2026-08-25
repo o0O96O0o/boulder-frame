@@ -62,6 +62,32 @@ def test_json_formatter_records_stage_duration() -> None:
     assert event["duration_ms"] == 123
 
 
+def test_json_formatter_records_output_frame_progress() -> None:
+    logger = logging.getLogger("test_json_formatter")
+    record = logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        0,
+        "render output progress",
+        (),
+        None,
+        extra={
+            "output_frame_count": 627,
+            "repeated_output_frame_count": 5,
+            "repeated_output_frame_intervals": [{"start_frame": 84, "end_frame": 88}],
+            "planned_crop_count": 473,
+        },
+    )
+
+    event = json.loads(JsonFormatter().format(record))
+
+    assert event["output_frame_count"] == 627
+    assert event["repeated_output_frame_count"] == 5
+    assert event["repeated_output_frame_intervals"] == [{"start_frame": 84, "end_frame": 88}]
+    assert event["planned_crop_count"] == 473
+
+
 def test_json_formatter_records_configuration_loading_details() -> None:
     logger = logging.getLogger("test_json_formatter")
     record = logger.makeRecord(

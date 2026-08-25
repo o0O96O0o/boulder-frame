@@ -43,6 +43,11 @@ missed-detection widening, subject scale, and pan/zoom continuity. It requires n
 tracker, root, or tracking-recovery schema fields. A reviewed frame without telemetry is insufficient
 annotation rather than silent success.
 
+With `debug_capture`, the worker also emits a structured `render output progress` log after rendering.
+It reports the decoded output-frame count, the planned crop count, and at most ten intervals of exactly
+repeated decoded frames. It never logs frame checksums, pixels, or media data. This identifies output
+frame freezes; it does not independently prove crop coordinates.
+
 ## Visual Review
 
 The three review phases are ordered and interpreted as follows:

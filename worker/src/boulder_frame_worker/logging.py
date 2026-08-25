@@ -27,6 +27,10 @@ class JsonFormatter(logging.Formatter):
             "duration_ms",
             "error_code",
             "diagnostic",
+            "output_frame_count",
+            "repeated_output_frame_count",
+            "repeated_output_frame_intervals",
+            "planned_crop_count",
             "config_path",
             "configuration",
         ):
