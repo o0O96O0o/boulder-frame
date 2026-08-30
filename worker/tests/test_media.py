@@ -254,6 +254,9 @@ def test_output_validation_requires_requested_1080p_dimensions() -> None:
         validate_output(metadata, AspectRatio.LANDSCAPE)
 
     assert raised.value.code is ErrorCode.INVALID_OUTPUT
+    assert raised.value.diagnostic == (
+        "expected_dimensions=1920x1080 actual_dimensions=3840x2160"
+    )
 
 
 def test_crop_path_filter_normalizes_clockwise_rotation_before_cropping() -> None:
@@ -332,6 +335,24 @@ def test_renderer_preserves_bounded_ffmpeg_diagnostics() -> None:
     assert raised.value.code is ErrorCode.RENDER_UNAVAILABLE
     assert raised.value.message == "Video rendering could not be completed."
     assert raised.value.diagnostic == "FFmpeg failed while configuring crop."
+
+
+def test_decoder_preserves_bounded_ffmpeg_diagnostics() -> None:
+    class FailingRunner:
+        def run(self, arguments: list[str]) -> str:
+            del arguments
+            raise WorkerError(
+                ErrorCode.INVALID_MEDIA,
+                "Video media could not be inspected.",
+                diagnostic="Invalid NAL unit in output stream.",
+            )
+
+    with pytest.raises(WorkerError) as raised:
+        FFmpegRenderer(runner=FailingRunner()).decode(Path("output.mp4"))
+
+    assert raised.value.code is ErrorCode.INVALID_OUTPUT
+    assert raised.value.message == "Rendered video could not be decoded."
+    assert raised.value.diagnostic == "Invalid NAL unit in output stream."
 
 
 @pytest.mark.parametrize(
@@ -620,3 +641,17 @@ def test_output_validation_requires_source_audio_and_duration_within_tolerance()
         )
 
     assert raised.value.code is ErrorCode.INVALID_OUTPUT
+    assert raised.value.diagnostic == "source_has_audio=true output_has_audio=false"
+
+    with pytest.raises(WorkerError) as raised:
+        validate_output(
+            metadata,
+            AspectRatio.LANDSCAPE,
+            expected_duration_ms=1000,
+            duration_tolerance_ms=33,
+        )
+
+    assert raised.value.code is ErrorCode.INVALID_OUTPUT
+    assert raised.value.diagnostic == (
+        "expected_duration_ms=1000 actual_duration_ms=1200 tolerance_ms=33"
+    )

@@ -2,16 +2,33 @@ import json
 import logging
 import time
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 import pytest
 
 from boulder_frame_worker.config import WorkerConfig
 from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal, transient
+from boulder_frame_worker.logging import JsonFormatter
 from boulder_frame_worker.protocol import JobTask
 from boulder_frame_worker.queue_adapter import DeliveryAction
-from boulder_frame_worker.state import InMemoryJobRepository, JobConfiguration, JobRecord, JobState
+from boulder_frame_worker.state import (
+    InMemoryJobRepository,
+    JobConfiguration,
+    JobRecord,
+    JobState,
+    SourceAsset,
+)
 from boulder_frame_worker.worker import Worker
+
+
+class LogRecords(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
 
 
 def worker_for(tmp_path: Path) -> tuple[Worker, InMemoryJobRepository, JobTask]:
@@ -32,6 +49,77 @@ def test_worker_completes_and_removes_job_scratch(tmp_path: Path) -> None:
     assert repository.get(task.job_id).state is JobState.COMPLETED
     assert not (tmp_path / str(task.job_id)).exists()
     assert worker.process(task, no_op, no_op, no_op, no_op) is DeliveryAction.ACK
+
+
+def test_worker_logs_claimed_source_metadata_and_completed_phase_io(tmp_path: Path) -> None:
+
+    source_id = uuid4()
+    record = JobRecord(
+        id=uuid4(),
+        configuration=JobConfiguration(
+            source_id,
+            {},
+            {},
+            "test",
+            "unconfigured",
+            {},
+        ),
+        source_asset=SourceAsset(
+            source_id,
+            uuid4(),
+            "projects/project/source.mp4",
+            "uploaded",
+            "match.mp4",
+            "video/mp4",
+            42_000,
+            3840,
+            2160,
+            29.97,
+            125_000,
+        ),
+    )
+    repository = InMemoryJobRepository([record])
+    worker = Worker(WorkerConfig("test", "unconfigured", tmp_path), repository, worker_id="worker")
+    task = JobTask(record.id, "00000000-0000-0000-0000-000000000042")
+    logs = LogRecords()
+    worker.logger.addHandler(logs)
+
+    def traced_stage(record: JobRecord, scratch: Path) -> dict[str, object]:
+        del scratch
+        return {
+            "inputs": [{"role": "source"}],
+            "outputs": [{"role": record.state.value}],
+        }
+
+    try:
+        assert worker.process(task, traced_stage, traced_stage, traced_stage, traced_stage)
+    finally:
+        worker.logger.removeHandler(logs)
+
+    claimed = next(log for log in logs.records if log.msg == "job claimed")
+    assert claimed.trace_id == task.trace_id
+    assert claimed.worker_id == "worker"
+    assert claimed.source_video == {
+        "asset_id": str(source_id),
+        "storage_key": "projects/project/source.mp4",
+        "upload_state": "uploaded",
+        "content_type": "video/mp4",
+        "size_bytes": 42_000,
+        "recorded_width": 3840,
+        "recorded_height": 2160,
+        "recorded_frame_rate": 29.97,
+        "recorded_duration_ms": 125_000,
+    }
+    completed = [
+        log for log in logs.records if log.msg == "stage response" and log.outcome == "completed"
+    ]
+    assert [log.stage for log in completed] == [
+        "validating",
+        "analyzing",
+        "rendering",
+        "uploading",
+    ]
+    assert completed[-1].phase_io["outputs"] == [{"role": "uploading"}]
 
 
 def test_worker_acknowledges_duplicate_missing_or_terminal_delivery(tmp_path: Path) -> None:
@@ -161,6 +249,95 @@ def test_worker_reclaims_stale_scratch_before_retry(tmp_path: Path) -> None:
     assert not stale.exists()
 
 
+def test_worker_redacts_scratch_paths_urls_and_credentials_from_failure_logs(
+    tmp_path: Path,
+) -> None:
+    worker, _, task = worker_for(tmp_path)
+    logs = LogRecords()
+    worker.logger.addHandler(logs)
+
+    def invalid_media(record: JobRecord, scratch: Path) -> None:
+        del record
+        raise terminal(
+            ErrorCode.INVALID_MEDIA,
+            "bad video",
+            diagnostic=(
+                f"ffprobe rejected {scratch / 'source-original'} "
+                "https://objects.example/source?signature=secret token=secret"
+            ),
+        )
+
+    try:
+        assert worker.process(task, invalid_media, no_op, no_op, no_op)
+    finally:
+        worker.logger.removeHandler(logs)
+
+    events = [
+        json.loads(JsonFormatter().format(record))
+        for record in logs.records
+        if record.msg in {"stage response", "task response"} and hasattr(record, "diagnostic")
+    ]
+    assert len(events) == 2
+    assert all(str(tmp_path) not in json.dumps(event) for event in events)
+    assert all("objects.example" not in json.dumps(event) for event in events)
+    assert all(
+        event["diagnostic"]
+        == "ffprobe rejected <scratch>/source-original <redacted-url> token=<redacted>"
+        for event in events
+    )
+
+
+def test_worker_logs_lease_loss_as_failed_stage_with_completed_io(tmp_path: Path) -> None:
+    class LostLeaseRepository(InMemoryJobRepository):
+        def __init__(self, records: list[JobRecord]) -> None:
+            super().__init__(records)
+            self.handler_started = Event()
+            self.renewal_attempted = Event()
+
+        def renew(self, job_id, worker_id, lease_seconds):
+            del job_id, worker_id, lease_seconds
+            assert self.handler_started.wait(1)
+            self.renewal_attempted.set()
+            return False
+
+    record = JobRecord(id=uuid4())
+    repository = LostLeaseRepository([record])
+    worker = Worker(
+        WorkerConfig(
+            "test",
+            "unconfigured",
+            tmp_path,
+            lease_seconds=2,
+            heartbeat_seconds=0,
+        ),
+        repository,
+        worker_id="worker",
+    )
+    task = JobTask(record.id, "00000000-0000-0000-0000-000000000042")
+    logs = LogRecords()
+    worker.logger.addHandler(logs)
+
+    def completed_handler(record: JobRecord, scratch: Path) -> dict[str, object]:
+        del record, scratch
+        repository.handler_started.set()
+        assert repository.renewal_attempted.wait(1)
+        time.sleep(0.01)
+        return {"inputs": [{"role": "source"}], "outputs": [{"role": "validated"}]}
+
+    try:
+        with pytest.raises(WorkerError) as raised:
+            worker.process(task, completed_handler, no_op, no_op, no_op)
+    finally:
+        worker.logger.removeHandler(logs)
+
+    assert raised.value.code is ErrorCode.DATABASE_UNAVAILABLE
+    stage_responses = [record for record in logs.records if record.msg == "stage response"]
+    assert len(stage_responses) == 1
+    assert stage_responses[0].outcome == "failed"
+    assert stage_responses[0].error_code == ErrorCode.DATABASE_UNAVAILABLE.value
+    assert stage_responses[0].phase_io["outputs"] == [{"role": "validated"}]
+
+
 def test_worker_records_all_phase_timings_before_publishing_debug_bundle(tmp_path: Path) -> None:
     record = JobRecord(id=uuid4())
     repository = InMemoryJobRepository([record])
@@ -194,13 +371,6 @@ def test_worker_records_all_phase_timings_before_publishing_debug_bundle(tmp_pat
 
 
 def test_worker_logs_debug_publish_failure_without_failing_the_job(tmp_path: Path) -> None:
-    class LogRecords(logging.Handler):
-        def __init__(self) -> None:
-            super().__init__()
-            self.records: list[logging.LogRecord] = []
-
-        def emit(self, record: logging.LogRecord) -> None:
-            self.records.append(record)
 
     record = JobRecord(id=uuid4())
     repository = InMemoryJobRepository([record])

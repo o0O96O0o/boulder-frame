@@ -1,8 +1,9 @@
 import json
 import logging
 import sys
+from pathlib import Path
 
-from boulder_frame_worker.logging import JsonFormatter
+from boulder_frame_worker.logging import JsonFormatter, log_context
 
 
 def test_json_formatter_records_unhandled_exception_type_and_message() -> None:
@@ -23,6 +24,34 @@ def test_json_formatter_records_unhandled_exception_type_and_message() -> None:
     event = json.loads(JsonFormatter().format(record))
 
     assert event["error"] == {"message": "ROI has no pixels", "type": "ValueError"}
+
+
+def test_json_formatter_redacts_unhandled_exception_details(tmp_path: Path) -> None:
+    logger = logging.getLogger("test_json_formatter")
+    scratch = tmp_path / "job"
+    try:
+        raise RuntimeError(
+            f"decoder failed at {scratch / 'output.mp4'} "
+            "https://objects.example/output?signature=secret password=secret"
+        )
+    except RuntimeError:
+        record = logger.makeRecord(
+            logger.name,
+            logging.ERROR,
+            __file__,
+            0,
+            "task response",
+            (),
+            exc_info=sys.exc_info(),
+            extra={"scratch_path": scratch},
+        )
+
+    event = json.loads(JsonFormatter().format(record))
+
+    assert event["error"] == {
+        "message": ("decoder failed at <scratch>/output.mp4 <redacted-url> password=<redacted>"),
+        "type": "RuntimeError",
+    }
 
 
 def test_json_formatter_records_internal_diagnostics() -> None:
@@ -116,6 +145,26 @@ def test_json_formatter_records_temporal_progress() -> None:
     assert event["render_input_near_static_intervals"] == [{"start_frame": 444, "end_frame": 518}]
     assert event["planned_crop_near_static_frame_count"] == 74
     assert event["output_near_static_frame_count"] == 74
+
+
+def test_json_formatter_inherits_stage_correlation_context() -> None:
+    logger = logging.getLogger("test_json_formatter")
+    record = logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        0,
+        "render output progress",
+        (),
+        None,
+    )
+
+    with log_context(trace_id="trace-42", job_id="job-7", stage="rendering"):
+        event = json.loads(JsonFormatter().format(record))
+
+    assert event["trace-id"] == "trace-42"
+    assert event["job_id"] == "job-7"
+    assert event["stage"] == "rendering"
 
 
 def test_json_formatter_records_configuration_loading_details() -> None:

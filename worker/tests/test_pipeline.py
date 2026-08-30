@@ -22,11 +22,15 @@ from boulder_frame_worker.protocol import (
     TargetSelection,
 )
 from boulder_frame_worker.state import JobConfiguration, JobRecord, JobState, SourceAsset
+from boulder_frame_worker.storage import StoredObject
 
 
 class Storage:
     def download(self, key: str, destination: Path) -> None:
         destination.write_bytes(b"source")
+
+    def upload(self, key: str, source: Path, content_type: str) -> StoredObject:
+        return StoredObject(key, source.stat().st_size, content_type)
 
 
 class Finalizer:
@@ -75,6 +79,55 @@ def record(frame_time_ms: int = 0) -> JobRecord:
     )
 
 
+def test_validation_phase_reports_persisted_and_inspected_source_metadata(tmp_path) -> None:
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=Inspector(),
+        renderer=Renderer(),
+    )
+    job = record()
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+
+    phase_io = pipeline.validating(job, scratch)
+
+    assert phase_io["inputs"] == [
+        {
+            "kind": "video",
+            "role": "source",
+            "location": "object_storage",
+            "asset_id": str(job.source_asset.id),
+            "storage_key": "source",
+            "upload_state": "uploaded",
+            "content_type": None,
+            "size_bytes": 1,
+            "recorded_width": None,
+            "recorded_height": None,
+            "recorded_frame_rate": None,
+            "recorded_duration_ms": None,
+        }
+    ]
+    output = phase_io["outputs"][0]
+    assert output["role"] == "source_original"
+    assert output["size_bytes"] == len(b"source")
+    assert output["media"] == {
+        "coded_width": 1920,
+        "coded_height": 1080,
+        "display_width": 1920,
+        "display_height": 1080,
+        "duration_ms": 1000,
+        "frame_rate": "2",
+        "frame_rate_fps": 2.0,
+        "expected_frame_count": 2,
+        "video_codec": "h264",
+        "audio_codec": None,
+        "has_audio": False,
+        "audio_stream_index": None,
+        "rotation": 0,
+    }
+
+
 def test_detector_only_pipeline_persists_aligned_crops_and_widens_later_miss(tmp_path) -> None:
     class Pixels:
         def __init__(self, index: int) -> None:
@@ -99,8 +152,8 @@ def test_detector_only_pipeline_persists_aligned_crops_and_widens_later_miss(tmp
     )
     scratch = tmp_path / "job"
     scratch.mkdir()
+    phase_io = pipeline.analyzing(record(), scratch)
     inputs = pipeline._inputs(record(), scratch)
-
     crops = pipeline._crop_path(inputs)
     stored = [json.loads(line) for line in (scratch / "crop-path.jsonl").read_text().splitlines()]
     trace = [
@@ -113,6 +166,10 @@ def test_detector_only_pipeline_persists_aligned_crops_and_widens_later_miss(tmp
     assert trace[1]["framing"]["decision"]["action"] == "widen_on_miss"
     assert "pose" not in json.dumps(trace)
     assert "tracking" not in json.dumps(trace)
+    assert [artifact["role"] for artifact in phase_io["outputs"]] == [
+        "crop_path",
+        "analysis_trace",
+    ]
 
 
 def test_temporal_progress_compares_normalized_input_output_and_original_source(tmp_path) -> None:
@@ -228,8 +285,37 @@ def test_render_reuses_crop_path_without_running_detector(tmp_path) -> None:
         encoding="ascii",
     )
 
-    pipeline.rendering(record(), scratch)
+    phase_io = pipeline.rendering(record(), scratch)
     assert renderer.crops == [CropRect(0, 0, 1920, 1080), CropRect(0, 0, 1920, 1080)]
+    assert phase_io["inputs"][1]["role"] == "crop_path"
+    assert phase_io["outputs"][0]["role"] == "rendered_output"
+
+
+def test_upload_phase_reports_local_input_and_verified_storage_output(tmp_path) -> None:
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=Inspector(),
+        renderer=Renderer(),
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    (scratch / "crop-path.jsonl").write_text(
+        """{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":0,"timestamp_ms":0}
+{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":1,"timestamp_ms":500}
+""",
+        encoding="ascii",
+    )
+
+    phase_io = pipeline.uploading(record(), scratch)
+
+    assert phase_io["inputs"][0]["role"] == "rendered_output"
+    stored = phase_io["outputs"][0]
+    assert stored["role"] == "output"
+    assert stored["location"] == "object_storage"
+    assert stored["size_bytes"] == len(b"output")
+    assert stored["content_type"] == "video/mp4"
+    assert stored["media"]["display_width"] == 1920
 
 
 def test_render_discards_output_when_crop_path_changes(tmp_path) -> None:
@@ -420,6 +506,10 @@ def test_vfr_normalization_stays_job_local_and_reusable(tmp_path) -> None:
     )
     scratch = tmp_path / "job"
     scratch.mkdir()
-    assert pipeline._inputs(record(), scratch).source.name == "source-cfr.mp4"
+    phase_io = pipeline.validating(record(), scratch)
+    assert [artifact["role"] for artifact in phase_io["outputs"]] == [
+        "source_original",
+        "source_normalized",
+    ]
     assert pipeline._inputs(record(), scratch).source.name == "source-cfr.mp4"
     assert normalizer.calls == 1

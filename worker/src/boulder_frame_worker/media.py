@@ -494,7 +494,9 @@ class FFmpegRenderer:
             )
         except WorkerError as error:
             raise terminal(
-                ErrorCode.INVALID_OUTPUT, "Rendered video could not be decoded."
+                ErrorCode.INVALID_OUTPUT,
+                "Rendered video could not be decoded.",
+                diagnostic=error.diagnostic or f"{error.code.value}: {error.message}",
             ) from error
 
     def output_frame_progress(self, output: Path) -> OutputFrameProgress:
@@ -634,7 +636,9 @@ class FFmpegRenderer:
             output_metadata = inspector.inspect(destination)
         except WorkerError as error:
             raise terminal(
-                ErrorCode.INVALID_OUTPUT, "Rendered video could not be inspected."
+                ErrorCode.INVALID_OUTPUT,
+                "Rendered video could not be inspected.",
+                diagnostic=error.diagnostic or f"{error.code.value}: {error.message}",
             ) from error
         validate_output(
             output_metadata,
@@ -709,15 +713,42 @@ def validate_output(
 ) -> None:
     expected_dimensions = output_dimensions(aspect_ratio)
     if (metadata.width, metadata.height) != expected_dimensions:
-        raise terminal(ErrorCode.INVALID_OUTPUT, "Rendered video dimensions are invalid.")
+        raise terminal(
+            ErrorCode.INVALID_OUTPUT,
+            "Rendered video dimensions are invalid.",
+            diagnostic=(
+                f"expected_dimensions={expected_dimensions[0]}x{expected_dimensions[1]} "
+                f"actual_dimensions={metadata.width}x{metadata.height}"
+            ),
+        )
     if metadata.video_codec != "h264":
-        raise terminal(ErrorCode.INVALID_OUTPUT, "Rendered video codec is invalid.")
+        raise terminal(
+            ErrorCode.INVALID_OUTPUT,
+            "Rendered video codec is invalid.",
+            diagnostic=f"expected_video_codec=h264 actual_video_codec={metadata.video_codec}",
+        )
     if metadata.has_audio and metadata.audio_codec != "aac":
-        raise terminal(ErrorCode.INVALID_OUTPUT, "Rendered audio codec is invalid.")
+        raise terminal(
+            ErrorCode.INVALID_OUTPUT,
+            "Rendered audio codec is invalid.",
+            diagnostic=f"expected_audio_codec=aac actual_audio_codec={metadata.audio_codec}",
+        )
     if source_has_audio and not metadata.has_audio:
-        raise terminal(ErrorCode.INVALID_OUTPUT, "Rendered video audio is missing.")
+        raise terminal(
+            ErrorCode.INVALID_OUTPUT,
+            "Rendered video audio is missing.",
+            diagnostic="source_has_audio=true output_has_audio=false",
+        )
     if expected_duration_ms is not None:
         if duration_tolerance_ms is None or duration_tolerance_ms < 0:
             raise ValueError("duration tolerance must be non-negative")
         if abs(metadata.duration_ms - expected_duration_ms) > duration_tolerance_ms:
-            raise terminal(ErrorCode.INVALID_OUTPUT, "Rendered video duration is invalid.")
+            raise terminal(
+                ErrorCode.INVALID_OUTPUT,
+                "Rendered video duration is invalid.",
+                diagnostic=(
+                    f"expected_duration_ms={expected_duration_ms} "
+                    f"actual_duration_ms={metadata.duration_ms} "
+                    f"tolerance_ms={duration_tolerance_ms}"
+                ),
+            )

@@ -99,9 +99,21 @@ succeed.
 
 The frontend sends a UUID in `X-Trace-ID` for every API and direct-upload request. The API validates or
 creates the ID, returns it in the same response header, and writes it to structured logs as the key
-`trace-id`. Job publication copies that ID into the queue payload, and the worker writes it to task
-request/response logs. Request and response bodies are logged in bounded, redacted form; signed URLs,
-credentials, and binary video contents are omitted.
+`trace-id`. Job publication copies that ID into the queue payload. After a successful database claim,
+the worker emits `job claimed` with the source asset ID, storage key, upload state, content type, byte
+size, and recorded dimensions, frame rate, and duration. It omits the user-provided filename.
+
+Every worker stage inherits the job `trace-id`, `job_id`, and stage in its logs. Its terminal
+`stage response` records outcome and duration. Successful responses also include bounded `phase_io`:
+object-storage inputs/outputs identify their storage keys and verified sizes, while scratch artifacts
+identify only stable job-local names, sizes, roles, and inspected media properties. Inspected video
+properties include coded/display dimensions, exact and floating-point frame rate, duration, expected
+frame count, codecs, audio presence/index, and rotation. VFR normalization reports the original and
+normalized sources separately. Failed stages emit the same terminal response envelope with error code
+and safe diagnostic, but no unverified I/O result.
+
+Request and response bodies are logged in bounded, redacted form. Signed URLs, credentials,
+user-provided filenames, binary video contents, and absolute scratch paths are omitted.
 
 ## Operational Diagnostics
 

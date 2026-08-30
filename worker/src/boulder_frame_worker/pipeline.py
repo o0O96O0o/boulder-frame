@@ -19,7 +19,12 @@ from .debug import (
     serialize_raw_frame_observation,
 )
 from .errors import ErrorCode, WorkerError, terminal
-from .logging import configure_logging
+from .logging import (
+    configure_logging,
+    local_artifact_fields,
+    media_metadata_fields,
+    source_video_fields,
+)
 from .measurement import (
     Detection,
     PersonDetector,
@@ -99,6 +104,7 @@ class _Inputs:
     metadata: MediaMetadata
     selection: TargetSelection
     output_settings: OutputSettings
+    original_metadata: MediaMetadata | None = None
 
 
 class ProcessingPipeline:
@@ -136,19 +142,57 @@ class ProcessingPipeline:
         self.review_renderer = review_renderer
         self.normalization_max_source_bytes = normalization_max_source_bytes
 
-    def validating(self, record: JobRecord, scratch: Path) -> None:
-        self._inputs(record, scratch)
-
-    def analyzing(self, record: JobRecord, scratch: Path) -> None:
+    def validating(self, record: JobRecord, scratch: Path) -> Mapping[str, object]:
         inputs = self._inputs(record, scratch)
-        self._crop_path(inputs)
+        source_asset = self._source(record)
+        original_source = scratch / "source-original"
+        outputs = [
+            local_artifact_fields(
+                original_source,
+                "source_original",
+                media=inputs.original_metadata or inputs.metadata,
+            )
+        ]
+        if inputs.source != original_source:
+            outputs.append(
+                local_artifact_fields(inputs.source, "source_normalized", media=inputs.metadata)
+            )
+        return {
+            "inputs": [_source_object_fields(source_asset)],
+            "outputs": outputs,
+        }
 
-    def rendering(self, record: JobRecord, scratch: Path) -> None:
+    def analyzing(self, record: JobRecord, scratch: Path) -> Mapping[str, object]:
         inputs = self._inputs(record, scratch)
-        self._render(inputs)
+        crops = self._crop_path(inputs)
+        outputs = [
+            local_artifact_fields(scratch / _CROP_PATH, "crop_path", record_count=len(crops))
+        ]
+        analysis_trace = scratch / _ANALYSIS_TRACE
+        if analysis_trace.is_file():
+            outputs.append(
+                local_artifact_fields(analysis_trace, "analysis_trace", record_count=len(crops))
+            )
+        return {
+            "inputs": [_processing_source_fields(inputs)],
+            "outputs": outputs,
+        }
+
+    def rendering(self, record: JobRecord, scratch: Path) -> Mapping[str, object]:
+        inputs = self._inputs(record, scratch)
+        output_metadata = self._render(inputs)
         self._log_render_progress(record, inputs)
+        return {
+            "inputs": [
+                _processing_source_fields(inputs),
+                local_artifact_fields(scratch / _CROP_PATH, "crop_path"),
+            ],
+            "outputs": [
+                local_artifact_fields(inputs.output, "rendered_output", media=output_metadata)
+            ],
+        }
 
-    def uploading(self, record: JobRecord, scratch: Path) -> None:
+    def uploading(self, record: JobRecord, scratch: Path) -> Mapping[str, object]:
         inputs = self._inputs(record, scratch)
         output_metadata = self._render(inputs)
         storage_key = output_storage_key(self._source(record).project_id, record.id)
@@ -170,6 +214,22 @@ class ProcessingPipeline:
                 duration_ms=output_metadata.duration_ms,
             ),
         )
+        return {
+            "inputs": [
+                local_artifact_fields(inputs.output, "rendered_output", media=output_metadata)
+            ],
+            "outputs": [
+                {
+                    "kind": "video",
+                    "role": "output",
+                    "location": "object_storage",
+                    "storage_key": stored.key,
+                    "size_bytes": stored.size_bytes,
+                    "content_type": stored.content_type,
+                    "media": media_metadata_fields(output_metadata),
+                }
+            ],
+        }
 
     def publish_debug(self, record: JobRecord, scratch: Path) -> None:
         """Publish optional sanitized telemetry after all stage timing records are complete."""
@@ -391,10 +451,11 @@ class ProcessingPipeline:
             self.storage.download(source_asset.storage_key, source)
         try:
             metadata = self.inspector.inspect(source)
+            original_metadata = metadata
         except WorkerError as error:
             if error.code is not ErrorCode.VARIABLE_FRAME_RATE:
                 raise
-            source_metadata = self.inspector.inspect(source, allow_variable_frame_rate=True)
+            original_metadata = self.inspector.inspect(source, allow_variable_frame_rate=True)
             if source_asset.size_bytes > self.normalization_max_source_bytes:
                 raise terminal(
                     ErrorCode.INVALID_MEDIA,
@@ -405,13 +466,20 @@ class ProcessingPipeline:
                 self.normalizer.normalize(
                     source,
                     normalized_source,
-                    source_metadata.frame_rate,
-                    source_metadata.audio_stream_index,
+                    original_metadata.frame_rate,
+                    original_metadata.audio_stream_index,
                 )
             source = normalized_source
             metadata = self.inspector.inspect(source)
         metadata.frame_for_time_ms(selection.frame_time_ms)
-        return _Inputs(source, scratch / "output.mp4", metadata, selection, output_settings)
+        return _Inputs(
+            source,
+            scratch / "output.mp4",
+            metadata,
+            selection,
+            output_settings,
+            original_metadata,
+        )
 
     def _crop_path(self, inputs: _Inputs) -> list[CropRect]:
         crop_path = inputs.source.parent / _CROP_PATH
@@ -843,6 +911,20 @@ class ProcessingPipeline:
         if record.configuration is None:
             raise terminal(ErrorCode.INVALID_TASK, "The job configuration is unavailable.")
         return record.configuration
+
+
+def _source_object_fields(source: SourceAsset) -> dict[str, object]:
+    return {
+        "kind": "video",
+        "role": "source",
+        "location": "object_storage",
+        **source_video_fields(source),
+    }
+
+
+def _processing_source_fields(inputs: _Inputs) -> dict[str, object]:
+    role = "source_normalized" if inputs.source.name == "source-cfr.mp4" else "source_original"
+    return local_artifact_fields(inputs.source, role, media=inputs.metadata)
 
 
 def _selection(configuration: JobConfiguration) -> TargetSelection:

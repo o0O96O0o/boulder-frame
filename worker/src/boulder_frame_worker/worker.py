@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, Thread
@@ -13,12 +13,12 @@ from uuid import uuid4
 from .config import WorkerConfig
 from .debug import append_debug_record
 from .errors import ErrorCode, WorkerError, terminal, transient
-from .logging import configure_logging
+from .logging import configure_logging, log_context, safe_diagnostic, source_video_fields
 from .protocol import JobTask
 from .queue_adapter import DeliveryAction
 from .state import JobRecord, JobRepository, JobState, fail, transition, utc_now
 
-StageHandler = Callable[[JobRecord, Path], None]
+StageHandler = Callable[[JobRecord, Path], Mapping[str, object] | None]
 
 
 @contextmanager
@@ -76,6 +76,16 @@ class Worker:
             if state is None or state in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}:
                 return DeliveryAction.ACK
             return False
+        claimed_extra: dict[str, object] = {
+            "trace_id": trace_id,
+            "job_id": str(task.job_id),
+            "worker_id": self.worker_id,
+            "pipeline_version": self.config.pipeline_version,
+            "model_version": self.config.model_version,
+        }
+        if record.source_asset is not None:
+            claimed_extra["source_video"] = source_video_fields(record.source_asset)
+        self.logger.info("job claimed", extra=claimed_extra)
         if (
             record.configuration is not None
             and record.configuration.model_version != self.config.model_version
@@ -161,27 +171,55 @@ class Worker:
                         "stage_start",
                         {"stage": state.value, "progress": progress, "monotonic_ms": started},
                     )
+                    phase_io: dict[str, object] | None = None
                     try:
-                        handler(record, scratch)
+                        with log_context(
+                            trace_id=trace_id, job_id=str(task.job_id), stage=state.value
+                        ):
+                            result = handler(record, scratch)
+                        phase_io = None if result is None else dict(result)
+                        ensure_lease()
                     except Exception as error:
+                        duration_ms = (time.monotonic_ns() // 1_000_000) - started
+                        error_code = (
+                            error.code.value
+                            if isinstance(error, WorkerError)
+                            else ErrorCode.INTERNAL.value
+                        )
                         self._stage_trace(
                             scratch,
                             "stage_end",
                             {
                                 "stage": state.value,
                                 "progress": progress,
-                                "duration_ms": (time.monotonic_ns() // 1_000_000) - started,
+                                "duration_ms": duration_ms,
                                 "outcome": "failed",
-                                "error_code": (
-                                    error.code.value
-                                    if isinstance(error, WorkerError)
-                                    else ErrorCode.INTERNAL.value
-                                ),
+                                "error_code": error_code,
                             },
                         )
+                        failure_extra: dict[str, object] = {
+                            "trace_id": trace_id,
+                            "response_body": {
+                                "state": state.value,
+                                "progress": progress,
+                                "outcome": "failed",
+                            },
+                            "job_id": str(task.job_id),
+                            "stage": state.value,
+                            "outcome": "failed",
+                            "progress": progress,
+                            "pipeline_version": self.config.pipeline_version,
+                            "model_version": self.config.model_version,
+                            "duration_ms": duration_ms,
+                            "error_code": error_code,
+                        }
+                        if phase_io is not None:
+                            failure_extra["phase_io"] = phase_io
+                        if isinstance(error, WorkerError):
+                            failure_extra["diagnostic"] = safe_diagnostic(error.diagnostic, scratch)
+                        self.logger.warning("stage response", extra=failure_extra)
                         self._publish_debug(publish_debug, record, scratch, trace_id)
                         raise
-                    ensure_lease()
                     duration_ms = (time.monotonic_ns() // 1_000_000) - started
                     self._stage_trace(
                         scratch,
@@ -193,19 +231,24 @@ class Worker:
                             "outcome": "completed",
                         },
                     )
-                    self.logger.info(
-                        "stage response",
-                        extra={
-                            "trace_id": trace_id,
-                            "response_body": {"state": state.value, "progress": progress},
-                            "job_id": str(task.job_id),
-                            "stage": state.value,
+                    response_extra: dict[str, object] = {
+                        "trace_id": trace_id,
+                        "response_body": {
+                            "state": state.value,
                             "progress": progress,
-                            "pipeline_version": self.config.pipeline_version,
-                            "model_version": self.config.model_version,
-                            "duration_ms": duration_ms,
+                            "outcome": "completed",
                         },
-                    )
+                        "job_id": str(task.job_id),
+                        "stage": state.value,
+                        "outcome": "completed",
+                        "progress": progress,
+                        "pipeline_version": self.config.pipeline_version,
+                        "model_version": self.config.model_version,
+                        "duration_ms": duration_ms,
+                    }
+                    if phase_io is not None:
+                        response_extra["phase_io"] = phase_io
+                    self.logger.info("stage response", extra=response_extra)
                 self._publish_debug(publish_debug, record, scratch, trace_id)
                 record = transition(record, JobState.COMPLETED, 100)
                 self.repository.update(record)
@@ -231,7 +274,10 @@ class Worker:
                         "response_body": {"state": "retry"},
                         "job_id": str(task.job_id),
                         "error_code": error.code.value,
-                        "diagnostic": error.diagnostic,
+                        "diagnostic": safe_diagnostic(
+                            error.diagnostic,
+                            self.config.scratch_root / str(task.job_id),
+                        ),
                     },
                 )
                 raise
@@ -243,7 +289,10 @@ class Worker:
                     "response_body": {"state": "failed"},
                     "job_id": str(task.job_id),
                     "error_code": error.code.value,
-                    "diagnostic": error.diagnostic,
+                    "diagnostic": safe_diagnostic(
+                        error.diagnostic,
+                        self.config.scratch_root / str(task.job_id),
+                    ),
                 },
             )
         except Exception:
@@ -261,6 +310,7 @@ class Worker:
                     "response_body": {"state": "failed"},
                     "job_id": str(task.job_id),
                     "error_code": ErrorCode.INTERNAL.value,
+                    "scratch_path": self.config.scratch_root / str(task.job_id),
                 },
             )
         finally:
@@ -286,7 +336,11 @@ class Worker:
         except Exception:
             self.logger.warning(
                 "debug review publish failed",
-                extra={"trace_id": trace_id, "job_id": str(record.id)},
+                extra={
+                    "trace_id": trace_id,
+                    "job_id": str(record.id),
+                    "scratch_path": scratch,
+                },
                 exc_info=True,
             )
         else:
