@@ -53,6 +53,19 @@ At startup, the backend and worker log the configuration file path and a safe op
 including pipeline/model versions, storage bucket/region, and runtime settings. They never log
 connection URLs or credentials.
 
+## Pipeline Version Cutover
+
+Backend and worker must receive the same `PIPELINE_VERSION`. A new value denotes immutable processing
+behavior and changes the backend job-configuration hash. Because the worker currently enforces model
+version but not pipeline version when claiming work, do not use a rolling deployment across pipeline
+versions.
+
+For a pipeline-version change, stop new submissions, let queued and leased jobs become terminal, and
+confirm the Redis consumer group has no pending deliveries. Stop old workers, deploy backend and worker
+together with the new shared value, verify both startup summaries, then reopen submissions. Never
+rewrite a terminal job's configuration or republish its task UUID; submit the same source and settings
+again to create a new versioned job.
+
 ## Volumes
 
 - `frontend-node-modules` caches frontend dependencies inside the Compose environment.

@@ -70,6 +70,12 @@ func TestJobConfigHashIsStableAndChangesWithConfiguration(t *testing.T) {
 	if a != b {
 		t.Fatal("same configuration produced different hashes")
 	}
+	pipelineChanged := c
+	pipelineChanged.PipelineVersion = "p2"
+	pipelineHash, _ := pipelineChanged.Hash()
+	if a == pipelineHash {
+		t.Fatal("pipeline-version-only change produced same hash")
+	}
 	c.Output.Profile = "safe"
 	d, _ := c.Hash()
 	if a == d {

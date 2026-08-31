@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from boulder_frame_worker.frame_reader import OpenCVFrameReader
+from boulder_frame_worker.frame_reader import OpenCVFrameReader, crop_and_resize_frame
 from boulder_frame_worker.media import MediaMetadata
+from boulder_frame_worker.planner import CropRect
 
 cv2 = pytest.importorskip("cv2")
+np = pytest.importorskip("numpy")
 
 
 def _source(tmp_path: Path) -> Path:
@@ -65,3 +67,20 @@ def test_reader_normalizes_display_rotation(tmp_path: Path, rotation: int, code:
 
     assert rotated.shape[:2] == _metadata(rotation).display_dimensions[::-1]
     assert (rotated == cv2.rotate(original, code)).all()
+
+
+def test_crop_and_resize_uses_fractional_truncation_and_contiguous_uint8() -> None:
+    pixels = np.arange(6 * 8 * 3, dtype=np.uint8).reshape((6, 8, 3))
+    crop = CropRect(1.9, 2.1, 4.9, 3.9)
+
+    resized = crop_and_resize_frame(pixels, crop, (10, 6))
+    expected = cv2.resize(
+        pixels[2:5, 1:5],
+        (10, 6),
+        interpolation=cv2.INTER_LANCZOS4,
+    )
+
+    assert resized.shape == (6, 10, 3)
+    assert resized.dtype == np.uint8
+    assert resized.flags.c_contiguous
+    np.testing.assert_array_equal(resized, expected)

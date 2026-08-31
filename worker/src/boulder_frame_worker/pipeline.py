@@ -19,6 +19,7 @@ from .debug import (
     serialize_raw_frame_observation,
 )
 from .errors import ErrorCode, WorkerError, terminal
+from .frame_reader import DecodedFrame, FrameReader, crop_and_resize_frame
 from .logging import (
     configure_logging,
     local_artifact_fields,
@@ -41,7 +42,6 @@ from .media import (
     MediaMetadata,
     expected_frame_count,
     output_dimensions,
-    validate_output,
 )
 from .planner import (
     CropPlan,
@@ -56,19 +56,6 @@ from .repository import OutputAsset, ReviewArtifact, output_storage_key, review_
 from .review import PHASES, ReviewRenderer
 from .state import JobConfiguration, JobRecord, SourceAsset
 from .storage import S3Storage
-
-
-@dataclass(frozen=True, slots=True)
-class DecodedFrame:
-    """One display-rotation-normalized decoded source frame for target analysis."""
-
-    index: int
-    timestamp_ms: int
-    pixels: object
-
-
-class FrameReader(Protocol):
-    def read(self, source: Path, metadata: MediaMetadata) -> Iterable[DecodedFrame]: ...
 
 
 class OutputFinalizer(Protocol):
@@ -670,21 +657,19 @@ class ProcessingPipeline:
         cache = {
             "aspect_ratio": inputs.output_settings.aspect_ratio.value,
             "crop_path_sha256": _sha256(inputs.source.parent / _CROP_PATH),
+            "renderer_version": "fixed-output-v1",
         }
         if inputs.output.exists() and self._render_cache_matches(cache_path, cache):
-            metadata = self.inspector.inspect(inputs.output)
-            validate_output(
-                metadata,
+            metadata = self.renderer.validate_rendered_output(
+                inputs.output,
+                inputs.metadata,
                 inputs.output_settings.aspect_ratio,
-                expected_duration_ms=inputs.metadata.duration_ms,
-                duration_tolerance_ms=round(1000 / float(inputs.metadata.frame_rate)),
-                source_has_audio=inputs.metadata.has_audio,
+                self.inspector,
             )
             self._mark_render_validated(
                 inputs.source.parent / _ANALYSIS_TRACE, self.debug_max_bytes
             )
             return metadata
-        inputs.output.unlink(missing_ok=True)
         cache_path.unlink(missing_ok=True)
         rendered = self.renderer.render_crop_path(
             inputs.source,
@@ -693,6 +678,7 @@ class ProcessingPipeline:
             inputs.metadata,
             inputs.output_settings.aspect_ratio,
             self.inspector,
+            self.frame_reader,
         )
         self._write_render_cache(cache_path, cache)
         self._mark_render_validated(inputs.source.parent / _ANALYSIS_TRACE, self.debug_max_bytes)
@@ -768,6 +754,7 @@ class ProcessingPipeline:
                 self._crop_path(inputs),
                 inputs.metadata,
                 inputs.output_settings.aspect_ratio,
+                self.frame_reader,
             )
         except Exception:
             self.logger.warning(
@@ -818,7 +805,7 @@ class ProcessingPipeline:
     ) -> None:
         try:
             samples = _render_mapping_samples(crops)
-            errors = _render_mapping_errors(inputs, crops, samples)
+            errors = _render_mapping_errors(inputs, crops, samples, self.frame_reader)
         except Exception:
             self.logger.warning(
                 "render crop mapping unavailable",
@@ -974,11 +961,12 @@ def _interval_records(intervals: Sequence[tuple[int, int]]) -> list[dict[str, in
 
 
 def _render_mapping_errors(
-    inputs: _Inputs, crops: Sequence[CropRect], samples: Sequence[int]
+    inputs: _Inputs,
+    crops: Sequence[CropRect],
+    samples: Sequence[int],
+    frame_reader: FrameReader,
 ) -> list[tuple[int, float]]:
     import cv2
-
-    from .frame_reader import OpenCVFrameReader
 
     sample_set = set(samples)
     output_width, output_height = output_dimensions(inputs.output_settings.aspect_ratio)
@@ -986,24 +974,22 @@ def _render_mapping_errors(
     if not output.isOpened():
         output.release()
         raise ValueError("rendered output could not be decoded")
-    source_frames = OpenCVFrameReader().read(inputs.source, inputs.metadata)
+    source_frames = frame_reader.read(inputs.source, inputs.metadata)
     errors: list[tuple[int, float]] = []
     try:
         for index, source in enumerate(source_frames):
             decoded, output_pixels = output.read()
             if not decoded:
                 raise ValueError("rendered output frame alignment failed")
+            if (
+                source.index != index
+                or source.timestamp_ms != inputs.metadata.timestamp_for_frame(index)
+            ):
+                raise ValueError("source video frame alignment failed")
             if index not in sample_set:
                 continue
-            crop = crops[index]
-            x, y = int(crop.x), int(crop.y)
-            width, height = int(crop.width), int(crop.height)
-            pixels: Any = source.pixels
-            expected = pixels[y : y + height, x : x + width]
-            if expected.size == 0:
-                raise ValueError("planned crop could not be sampled")
-            expected = cv2.resize(
-                expected, (output_width, output_height), interpolation=cv2.INTER_LANCZOS4
+            expected: Any = crop_and_resize_frame(
+                source.pixels, crops[index], (output_width, output_height)
             )
             difference = cv2.absdiff(expected, output_pixels)
             errors.append((index, sum(cv2.mean(difference)[:3]) / 3))

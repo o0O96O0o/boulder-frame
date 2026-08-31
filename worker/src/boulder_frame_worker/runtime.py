@@ -5,7 +5,7 @@ from threading import Event
 from typing import cast
 
 from .config import UNCONFIGURED_MODEL_VERSION, WorkerConfig
-from .frame_reader import FrameReaderUnavailable, OpenCVFrameReader
+from .frame_reader import FrameReader, FrameReaderUnavailable, OpenCVFrameReader
 from .measurement import PersonDetector
 from .media import CFRNormalizer, FFmpegCFRNormalizer, FFmpegRenderer, FFprobeAdapter
 from .models import (
@@ -13,7 +13,7 @@ from .models import (
     ModelVerificationError,
     OnnxSsdMobileNetV1Detector,
 )
-from .pipeline import FrameReader, OutputFinalizer, PlannerFactory, ProcessingPipeline
+from .pipeline import OutputFinalizer, PlannerFactory, ProcessingPipeline
 from .planner import DeterministicCropPlanner
 from .queue_adapter import (
     QueueConsumerAdapter,

@@ -43,17 +43,22 @@ missed-detection widening, subject scale, and pan/zoom continuity. It requires n
 tracker, root, or tracking-recovery schema fields. A reviewed frame without telemetry is insufficient
 annotation rather than silent success.
 
-With `debug_capture`, the worker emits structured render diagnostics after rendering. `render output
-progress` reports the decoded output-frame count, planned crop count, and at most ten intervals of
-exactly repeated decoded frames. `render temporal progress` compares sustained near-static intervals
-in the render input with the output. `planned crop temporal progress` measures the same source after
-the final crop path. Both use 192x108 (or 108x192 portrait) luma-frame differences at or below 0.05
-for at least 15 frames and report only bounded frame intervals. For normalized jobs, `original source
-temporal progress` additionally reports the original source's near-static intervals. These logs
-contain no frame checksums, pixels, or media data. A
-subsequent `render crop mapping` log compares the first crop change, midpoint, and last source frames
-with the corresponding output frames. It reports only sampled frame indexes and mean absolute pixel
-error; error at or below 24 indicates the sampled crop applied.
+Every fresh or cached product output must pass full decode and exact frame-count validation before
+finalization. The mandatory invariant is `source expected frames == crop records == frames written ==
+decoded output frames`; failure is terminal even when debug capture is disabled.
+
+With `debug_capture`, the worker additionally emits optional structured diagnostics after rendering.
+`render output progress` reports the decoded output-frame count, planned crop count, and at most ten
+intervals of exactly repeated decoded frames. `render temporal progress` compares sustained near-static
+intervals in the render input with the output. `planned crop temporal progress` measures the same
+display-normalized source after the final crop path. Both use 192x108 (or 108x192 portrait) luma-frame
+differences at or below 0.05 for at least 15 frames and report only bounded frame intervals. For
+normalized jobs, `original source temporal progress` additionally reports the original source's
+near-static intervals. These logs contain no frame checksums, pixels, or media data. A subsequent
+`render crop mapping` log compares the first crop change, midpoint, and last source frames with the
+corresponding output frames. It reports only sampled frame indexes and mean absolute pixel error;
+error at or below 24 indicates the sampled crop applied. These diagnostics are evidence only and
+cannot replace mandatory product validation.
 
 ## Visual Review
 

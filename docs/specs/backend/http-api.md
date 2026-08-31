@@ -76,6 +76,10 @@ The stored configuration additionally contains:
 
 The configuration is serialized and SHA-256 hashed. The hash is used with `(project_id, configuration_hash)` to make repeated submissions idempotent.
 
+`pipeline_version` identifies immutable processing behavior, not a mutable deployment label. Changing
+it changes the configuration hash and creates a distinct job for the same source and settings. A retry
+retains the original job configuration and never upgrades that job to a newer pipeline behavior.
+
 ## Phase Evaluation Contract
 
 `GET /api/v1/jobs/{jobID}/evaluation` first verifies project ownership. It is available only when the

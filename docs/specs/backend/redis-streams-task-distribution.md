@@ -85,6 +85,12 @@ startup. A provisioned runtime can process only jobs whose immutable model versi
 W0.1 jobs fail model-version compatibility and users must create a new W0.2 job; retrying them cannot
 succeed.
 
+`pipeline_version` likewise identifies immutable processing behavior and participates in the job
+configuration hash, but the worker does not currently reject a claimed job when its pipeline version
+differs from the worker runtime. Backend and worker must therefore use the same value, and deployments
+that change it must drain old queued and leased work before replacing workers. Retrying an old job
+retains its original version; submit a new job to use the new behavior.
+
 ## Retry and Idempotency Rules
 
 - Duplicate delivery must not process a terminal job again.
@@ -94,6 +100,7 @@ succeed.
 - Artifact inserts must be unique per `(job_id, kind)`.
 - State transitions must be guarded and monotonic.
 - Pending entries are recovered by `XAUTOCLAIM`; active handlers heartbeat with `XCLAIM` so they are not reclaimed while their database lease is live.
+- A retry never changes the immutable pipeline or model version; version upgrades require a new job.
 
 ## Trace Logging
 

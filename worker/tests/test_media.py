@@ -1,22 +1,28 @@
 import shutil
 import subprocess
 from copy import deepcopy
+from dataclasses import replace
 from fractions import Fraction
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
 from boulder_frame_worker.errors import ErrorCode, WorkerError
+from boulder_frame_worker.frame_reader import (
+    DecodedFrame,
+    OpenCVFrameReader,
+    crop_and_resize_frame,
+)
 from boulder_frame_worker.media import (
     FFmpegCFRNormalizer,
     FFmpegRenderer,
     FFprobeAdapter,
     MediaMetadata,
     _near_static_intervals,
-    crop_path_filter,
+    _SubprocessMediaProcess,
     metadata_from_ffprobe,
     validate_output,
-    write_crop_path_filter,
 )
 from boulder_frame_worker.planner import CropRect
 from boulder_frame_worker.protocol import AspectRatio
@@ -87,32 +93,47 @@ def test_aac_stream_is_selected_without_mapping_codec_none_tracks() -> None:
     assert metadata.audio_stream_index == 3
 
 
-def test_renderer_maps_only_the_validated_aac_stream() -> None:
-    class CapturingRunner:
-        def __init__(self) -> None:
-            self.arguments: list[str] = []
-
-        def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
-            del timeout_seconds
-            self.arguments = arguments
-            return ""
-
-    runner = CapturingRunner()
-    FFmpegRenderer(runner=runner).render(
-        Path("source.mp4"),
-        Path("output.mp4"),
-        Path("crop.ffscript"),
+def test_renderer_builds_fixed_rawvideo_input_and_maps_only_validated_aac() -> None:
+    metadata = MediaMetadata(
+        320,
+        180,
+        2000,
+        Fraction(174900, 5833),
+        "h264",
+        "aac",
+        0,
+        True,
         audio_stream_index=3,
     )
 
-    assert ["-map", "0:v:0", "-map", "0:3"] == runner.arguments[
-        runner.arguments.index("-map") : runner.arguments.index("-fps_mode:v")
+    arguments = FFmpegRenderer()._render_arguments(
+        Path("source.mp4"), Path("output.mp4"), metadata, AspectRatio.LANDSCAPE
+    )
+
+    assert arguments[:12] == [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-video_size",
+        "1920x1080",
+        "-framerate",
+        "174900/5833",
+        "-i",
+        "pipe:0",
     ]
-    assert ["-fps_mode:v", "passthrough"] == runner.arguments[
-        runner.arguments.index("-fps_mode:v") : runner.arguments.index("-c:v")
+    assert ["-noautorotate", "-i", "source.mp4"] == arguments[12:15]
+    assert ["-map", "0:v:0", "-map", "1:3"] == arguments[
+        arguments.index("-map") : arguments.index("-fps_mode:v")
     ]
-    assert "-r" not in runner.arguments
-    assert "-shortest" not in runner.arguments
+    assert ["-fps_mode:v", "passthrough"] == arguments[
+        arguments.index("-fps_mode:v") : arguments.index("-c:v")
+    ]
+    assert "-r" not in arguments
+    assert "-shortest" not in arguments
+    assert not any("fps=" in argument for argument in arguments)
 
 
 def test_output_frame_progress_reports_only_consecutive_repeats() -> None:
@@ -259,82 +280,230 @@ def test_output_validation_requires_requested_1080p_dimensions() -> None:
     )
 
 
-def test_crop_path_filter_normalizes_clockwise_rotation_before_cropping() -> None:
-    metadata = metadata_from_ffprobe(probe_payload())
-    crop = CropRect(0, 0, 2160, 1215)
-
-    filter_graph = crop_path_filter([crop], metadata, AspectRatio.LANDSCAPE)
-
-    assert filter_graph.startswith("transpose=clock,crop@path=")
-    assert "w=2160.000000:h=1215.000000" in filter_graph
-    assert "scale=1920:1080:flags=lanczos" in filter_graph
-    assert "setsar=1" in filter_graph
 
 
-def test_long_crop_path_filter_is_accepted_by_ffmpeg(tmp_path: Path) -> None:
-    if shutil.which("ffmpeg") is None:
-        pytest.skip("FFmpeg is required for media integration tests")
-    metadata = MediaMetadata(
-        width=160,
-        height=90,
-        duration_ms=42000,
-        frame_rate=Fraction(60, 1),
-        video_codec="h264",
-        audio_codec=None,
-        rotation=0,
-        has_audio=False,
-    )
-    script = tmp_path / "crop.ffscript"
-    write_crop_path_filter(
-        script,
-        [CropRect(0, 0, 160, 90)] * metadata.expected_frame_count,
-        metadata,
-        AspectRatio.LANDSCAPE,
-    )
-
-    completed = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=160x90:rate=60:duration=0.02",
-            "-filter_script:v",
-            str(script),
-            "-frames:v",
-            "1",
-            "-f",
-            "null",
-            "-",
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-
-
-def test_renderer_preserves_bounded_ffmpeg_diagnostics() -> None:
+def test_renderer_preserves_bounded_ffmpeg_diagnostics(tmp_path: Path) -> None:
     class FailingRunner:
-        def run(self, arguments: list[str]) -> str:
+        def start(self, arguments: list[str]):
             del arguments
             raise WorkerError(
                 ErrorCode.INVALID_MEDIA,
-                "Video media could not be inspected.",
-                diagnostic="FFmpeg failed while configuring crop.",
+                "Media process failed.",
+                diagnostic="FFmpeg failed while accepting raw frames.",
             )
 
+    class UnusedReader:
+        def read(self, source, metadata):
+            raise AssertionError("encoder start must precede frame decoding")
+
+    metadata = MediaMetadata(160, 90, 1000, Fraction(1), "h264", None, 0, False)
     with pytest.raises(WorkerError) as raised:
-        FFmpegRenderer(runner=FailingRunner()).render(
-            Path("source.mp4"), Path("output.mp4"), Path("crop.ffscript")
+        FFmpegRenderer(runner=FailingRunner()).render_crop_path(
+            tmp_path / "source.mp4",
+            tmp_path / "output.mp4",
+            [CropRect(0, 0, 160, 90)],
+            metadata,
+            AspectRatio.LANDSCAPE,
+            FFprobeAdapter(),
+            UnusedReader(),
         )
 
     assert raised.value.code is ErrorCode.RENDER_UNAVAILABLE
     assert raised.value.message == "Video rendering could not be completed."
-    assert raised.value.diagnostic == "FFmpeg failed while configuring crop."
+    assert raised.value.diagnostic == "FFmpeg failed while accepting raw frames."
+
+
+
+def test_streaming_process_reaps_encoder_when_stdin_close_fails() -> None:
+    class Stdin:
+        def close(self) -> None:
+            raise BrokenPipeError("encoder closed input")
+
+    class Process:
+        stdin = Stdin()
+
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def wait(self) -> int:
+            self.wait_calls += 1
+            return 1
+
+    process = Process()
+    media_process = _SubprocessMediaProcess(process, BytesIO(b"encoder rejected tail"))  # type: ignore[arg-type]
+
+    with pytest.raises(WorkerError) as raised:
+        media_process.finish()
+
+    assert process.wait_calls == 1
+    assert raised.value.diagnostic == "encoder rejected tail"
+
+
+def test_renderer_rejects_nonfinite_crop_before_start(tmp_path: Path) -> None:
+    class Runner:
+        def start(self, arguments: list[str]):
+            raise AssertionError(f"encoder must not start: {arguments}")
+
+    metadata = MediaMetadata(160, 90, 1000, Fraction(1), "h264", None, 0, False)
+    with pytest.raises(WorkerError) as raised:
+        FFmpegRenderer(runner=Runner()).render_crop_path(
+            tmp_path / "source.mp4",
+            tmp_path / "output.mp4",
+            [CropRect(float("nan"), 0, 160, 90)],
+            metadata,
+            AspectRatio.LANDSCAPE,
+            FFprobeAdapter(),
+            object(),
+        )
+
+    assert raised.value.code is ErrorCode.INVALID_OUTPUT
+    assert raised.value.message == "Planned crop path is invalid."
+
+def test_decoder_rejects_incomplete_progress_report() -> None:
+    class IncompleteProgressRunner:
+        def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
+            del arguments, timeout_seconds
+            return "frame=2\nprogress=continue\n"
+
+    with pytest.raises(WorkerError) as raised:
+        FFmpegRenderer(runner=IncompleteProgressRunner()).decode(Path("output.mp4"))
+
+    assert raised.value.code is ErrorCode.INVALID_OUTPUT
+    assert raised.value.diagnostic == "FFmpeg decode progress was incomplete."
+
+
+def test_rendered_output_validation_requires_exact_decoded_count() -> None:
+    class OneFrameRunner:
+        def run(self, arguments: list[str], *, timeout_seconds: int | None = None) -> str:
+            del arguments, timeout_seconds
+            return "frame=1\nprogress=end\n"
+
+    class OutputInspector:
+        def inspect(self, path: Path, *, allow_variable_frame_rate: bool = False) -> MediaMetadata:
+            del path, allow_variable_frame_rate
+            return MediaMetadata(1920, 1080, 2000, Fraction(1), "h264", None, 0, False)
+
+    source_metadata = MediaMetadata(
+        320, 180, 2000, Fraction(1), "h264", None, 0, False
+    )
+    with pytest.raises(WorkerError) as raised:
+        FFmpegRenderer(runner=OneFrameRunner()).validate_rendered_output(
+            Path("output.mp4"),
+            source_metadata,
+            AspectRatio.LANDSCAPE,
+            OutputInspector(),
+        )
+
+    assert raised.value.code is ErrorCode.INVALID_OUTPUT
+    assert raised.value.message == "Rendered video frame count is invalid."
+    assert raised.value.diagnostic == "expected_frame_count=2 actual_frame_count=1"
+
+
+@pytest.mark.parametrize("frame_index", [None, 1], ids=["missing", "misordered"])
+def test_renderer_aborts_for_incomplete_or_misaligned_source_frame(
+    tmp_path: Path, frame_index: int | None
+) -> None:
+    class Process:
+        aborted = False
+
+        def write(self, data) -> None:
+            raise AssertionError("misaligned frame must not be written")
+
+        def finish(self) -> None:
+            raise AssertionError("misaligned frame must not finish")
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    class Runner:
+        def __init__(self, process: Process) -> None:
+            self.process = process
+
+        def start(self, arguments: list[str]) -> Process:
+            del arguments
+            return self.process
+
+    class MisalignedReader:
+        def read(self, source, metadata):
+            del source, metadata
+            return [] if frame_index is None else [DecodedFrame(frame_index, 0, object())]
+
+    process = Process()
+    metadata = MediaMetadata(160, 90, 1000, Fraction(1), "h264", None, 0, False)
+    with pytest.raises(WorkerError) as raised:
+        FFmpegRenderer(runner=Runner(process)).render_crop_path(
+            tmp_path / "source.mp4",
+            tmp_path / "output.mp4",
+            [CropRect(0, 0, 160, 90)],
+            metadata,
+            AspectRatio.LANDSCAPE,
+            FFprobeAdapter(),
+            MisalignedReader(),
+        )
+
+    assert raised.value.code is ErrorCode.INVALID_MEDIA
+    assert process.aborted
+    assert not (tmp_path / "output.partial.mp4").exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "finish"])
+def test_renderer_aborts_for_encoder_stream_failure(
+    tmp_path: Path, failure_stage: str
+) -> None:
+    np = pytest.importorskip("numpy")
+
+    class Process:
+        aborted = False
+
+        def write(self, data) -> None:
+            del data
+            if failure_stage == "write":
+                raise WorkerError(
+                    ErrorCode.INVALID_MEDIA,
+                    "Media process failed.",
+                    diagnostic="raw frame stream failed",
+                )
+
+        def finish(self) -> None:
+            if failure_stage == "finish":
+                raise WorkerError(
+                    ErrorCode.INVALID_MEDIA,
+                    "Media process failed.",
+                    diagnostic="encoder finalization failed",
+                )
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    class Runner:
+        def __init__(self, process: Process) -> None:
+            self.process = process
+
+        def start(self, arguments: list[str]) -> Process:
+            del arguments
+            return self.process
+
+    class Reader:
+        def read(self, source, metadata):
+            del source, metadata
+            return [DecodedFrame(0, 0, np.zeros((90, 160, 3), dtype=np.uint8))]
+
+    process = Process()
+    metadata = MediaMetadata(160, 90, 1000, Fraction(1), "h264", None, 0, False)
+    with pytest.raises(WorkerError) as raised:
+        FFmpegRenderer(runner=Runner(process)).render_crop_path(
+            tmp_path / "source.mp4",
+            tmp_path / "output.mp4",
+            [CropRect(0, 0, 160, 90)],
+            metadata,
+            AspectRatio.LANDSCAPE,
+            FFprobeAdapter(),
+            Reader(),
+        )
+
+    assert raised.value.code is ErrorCode.RENDER_UNAVAILABLE
+    assert process.aborted
+    assert not (tmp_path / "output.partial.mp4").exists()
 
 
 def test_decoder_preserves_bounded_ffmpeg_diagnostics() -> None:
@@ -437,6 +606,7 @@ def test_renderer_creates_valid_decodable_mp4_with_crop_path(
         source_metadata,
         aspect_ratio,
         inspector,
+        OpenCVFrameReader(),
     )
 
     assert destination.exists()
@@ -532,6 +702,7 @@ def test_normalizer_preserves_vfr_video_duration_with_optional_aac(
         derivative,
         AspectRatio.LANDSCAPE,
         inspector,
+        OpenCVFrameReader(),
     )
 
     assert rendered.duration_ms >= source_metadata.duration_ms - 100
@@ -589,6 +760,7 @@ def test_renderer_applies_the_planned_crop_to_each_source_frame(tmp_path: Path) 
         source_metadata,
         AspectRatio.LANDSCAPE,
         inspector,
+        OpenCVFrameReader(),
     )
     decoded = subprocess.run(
         [
@@ -617,6 +789,147 @@ def test_renderer_applies_the_planned_crop_to_each_source_frame(tmp_path: Path) 
 
     assert rgb(0, 960, 540)[0] > 200
     assert rgb(1, 960, 540)[2] > 200
+
+
+def test_renderer_uses_rotated_display_coordinates(tmp_path: Path) -> None:
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("FFmpeg and ffprobe are required for media integration tests")
+    source = tmp_path / "rotated-source.mp4"
+    destination = tmp_path / "rotated-output.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:size=90x160:rate=2:duration=1,"
+            "drawbox=x=0:y=0:w=90:h=80:color=red:t=fill",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    inspector = FFprobeAdapter()
+    source_metadata = replace(inspector.inspect(source), rotation=90)
+    FFmpegRenderer().render_crop_path(
+        source,
+        destination,
+        [CropRect(0, 22, 80, 45), CropRect(80, 22, 80, 45)],
+        source_metadata,
+        AspectRatio.LANDSCAPE,
+        inspector,
+        OpenCVFrameReader(),
+    )
+    decoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(destination),
+            "-frames:v",
+            "2",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    frame_size = 1920 * 1080 * 3
+
+    def rgb(frame: int) -> tuple[int, int, int]:
+        offset = frame * frame_size + (540 * 1920 + 960) * 3
+        red, green, blue = decoded[offset : offset + 3]
+        return red, green, blue
+
+    assert rgb(0)[2] > 200
+    assert rgb(1)[0] > 200
+
+
+
+
+def test_renderer_encodes_every_zoom_crop_at_non_integer_cfr(tmp_path: Path) -> None:
+    cv2 = pytest.importorskip("cv2")
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("FFmpeg, ffprobe, and OpenCV are required for media integration tests")
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "output.mp4"
+    frame_rate = Fraction(174900, 5833)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc2=size=320x180:rate={frame_rate}",
+            "-frames:v",
+            "60",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    inspector = FFprobeAdapter()
+    source_metadata = inspector.inspect(source)
+    assert source_metadata.expected_frame_count == 60
+    assert source_metadata.frame_rate == frame_rate
+
+    heights = (180, 162, 144, 126, 108, 90, 108, 126, 144, 162, 180, 162)
+    widths = (320, 288, 256, 224, 192, 160, 192, 224, 256, 288, 320, 288)
+    crops = [
+        CropRect((320 - width) / 2, (180 - height) / 2, width, height)
+        for _ in range(5)
+        for width, height in zip(widths, heights, strict=True)
+    ]
+    renderer = FFmpegRenderer()
+    output_metadata = renderer.render_crop_path(
+        source,
+        destination,
+        crops,
+        source_metadata,
+        AspectRatio.LANDSCAPE,
+        inspector,
+        OpenCVFrameReader(),
+    )
+
+    assert renderer.decode(destination) == 60
+    assert output_metadata.frame_rate == frame_rate
+    assert (output_metadata.width, output_metadata.height) == (1920, 1080)
+
+    output = cv2.VideoCapture(str(destination))
+    assert output.isOpened()
+    source_frames = OpenCVFrameReader().read(source, source_metadata)
+    try:
+        for index, source_frame in enumerate(source_frames):
+            decoded, output_pixels = output.read()
+            assert decoded
+            expected = crop_and_resize_frame(
+                source_frame.pixels, crops[index], (1920, 1080)
+            )
+            mean_absolute_error = sum(cv2.mean(cv2.absdiff(expected, output_pixels))[:3]) / 3
+            assert mean_absolute_error <= 24
+        decoded, _ = output.read()
+        assert not decoded
+    finally:
+        output.release()
+        close = getattr(source_frames, "close", None)
+        if callable(close):
+            close()
 
 
 def test_output_validation_requires_source_audio_and_duration_within_tolerance() -> None:

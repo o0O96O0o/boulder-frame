@@ -24,7 +24,7 @@ flowchart LR
   I -->|Supported VFR only| N[Bounded local CFR normalization]
   N --> D
   D --> F[Detector-box framing]
-  F --> R[FFmpeg crop, scale, validate]
+  F --> R[Per-frame crop resize and fixed-frame FFmpeg encode]
   R --> O[Lease-finalize output]
   O --> V[Optional telemetry and review]
   V --> T[Persist terminal state then XACK]
@@ -44,11 +44,14 @@ is normalized consistently for analysis and rendering.
 forward and backward from its detector box. Later candidates must pass the detector-box-relative spatial
 gate; a miss or rejected candidate does not update the reference. `framing` derives the profile-target
 crop, smooths it, contains the current box when possible, reports `source_aspect_limited` when it is not,
-and widens on misses without position extrapolation. `rendering` applies the exact
-crop path without output-side frame duplication or dropping, then validates 1080p H.264/AAC output.
-A local rendered output is reusable only when its
-atomic sidecar matches the complete persisted crop-path digest and output aspect ratio. `uploading` heads
-and lease-finalizes the deterministic output object before completion.
+and widens on misses without position extrapolation. `rendering` reads display-normalized BGR frames,
+applies every planned crop once with OpenCV, resizes each crop to the fixed 1080p output surface, and
+streams the fixed-size frames to FFmpeg for H.264/AAC encoding and muxing. Source, crop, written, and
+fully decoded output frame counts must be exactly equal; the renderer never repairs a short output by
+duplicating frames or applying an output frame-rate filter. A local rendered output is reusable only
+after the same strict media and exact decoded-frame-count validation, and only when its atomic sidecar
+matches the persisted crop-path digest, output aspect ratio, and `fixed-output-v1` renderer version.
+`uploading` heads and lease-finalizes the deterministic output object before completion.
 
 ## Review Finalization
 

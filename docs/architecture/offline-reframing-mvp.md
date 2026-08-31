@@ -57,7 +57,7 @@ flowchart LR
   K --> V[FFprobe and optional VFR to CFR]
   V --> D[ONNX person detection]
   D --> F[Detector-box crop planning]
-  F --> R[FFmpeg crop scale render]
+  F --> R[Display-normalized crop resize and fixed-frame FFmpeg encode]
   R -->|output plus optional review artifacts| S
   K -->|state progress artifacts| P
   W -->|poll job and request download/review| A
@@ -85,9 +85,13 @@ leases and guarded transitions are processing authority. Output finalization is 
 ## Rendering And Durability
 
 The worker validates source media, bounds VFR normalization by configured source-size and timeout
-limits, preserves valid optional AAC without shortening video, rotation-normalizes output coordinates,
-and validates the final H.264/AAC MP4 before finalizing `output`. Source objects and local VFR
-derivatives are never overwritten or persisted as new sources.
+limits, preserves valid optional AAC without shortening video, and rotation-normalizes decoded frames
+into display coordinates. It applies each planned crop once with OpenCV, resizes it to the fixed 1080p
+output surface, and streams fixed-size BGR frames to FFmpeg for H.264/AAC encoding and muxing. Crop
+coverage/geometry and decoded-output count mismatches are terminal `invalid_output`; inconsistent
+decoded source frames are `invalid_media`, while encoder start/write/finalization failures are
+`render_unavailable`. The immutable source object and local VFR derivative are never overwritten or
+persisted as a new source.
 
 Optional debug capture is private and best effort. It publishes only `debug_telemetry`,
 `debug_manifest`, and available `debug_detection`, `debug_framing`, and `debug_render` roles. Its

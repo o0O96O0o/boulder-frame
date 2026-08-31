@@ -6,14 +6,10 @@ from uuid import uuid4
 import pytest
 
 from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal
+from boulder_frame_worker.frame_reader import DecodedFrame
 from boulder_frame_worker.measurement import Detection, Rect
 from boulder_frame_worker.media import MediaMetadata, TemporalFrameProgress
-from boulder_frame_worker.pipeline import (
-    DecodedFrame,
-    ProcessingPipeline,
-    _Inputs,
-    _render_mapping_samples,
-)
+from boulder_frame_worker.pipeline import ProcessingPipeline, _Inputs, _render_mapping_samples
 from boulder_frame_worker.planner import CropRect
 from boulder_frame_worker.protocol import (
     AspectRatio,
@@ -50,14 +46,30 @@ class Renderer:
     def __init__(self) -> None:
         self.crops: list[CropRect] | None = None
         self.calls = 0
+        self.validations = 0
 
     def render_crop_path(
-        self, source, destination, crop_path, source_metadata, aspect_ratio, inspector
+        self,
+        source,
+        destination,
+        crop_path,
+        source_metadata,
+        aspect_ratio,
+        inspector,
+        frame_reader,
     ):
+        del source, source_metadata, aspect_ratio, inspector, frame_reader
         self.calls += 1
         self.crops = crop_path
         destination.write_bytes(b"output")
         return Inspector().inspect(destination)
+
+    def validate_rendered_output(
+        self, output, source_metadata, aspect_ratio, inspector
+    ) -> MediaMetadata:
+        del source_metadata, aspect_ratio, inspector
+        self.validations += 1
+        return Inspector().inspect(output)
 
 
 def record(frame_time_ms: int = 0) -> JobRecord:
@@ -191,8 +203,9 @@ def test_temporal_progress_compares_normalized_input_output_and_original_source(
             crops: list[CropRect],
             metadata: MediaMetadata,
             aspect_ratio: AspectRatio,
+            frame_reader,
         ) -> TemporalFrameProgress:
-            del source, crops, metadata, aspect_ratio
+            del source, crops, metadata, aspect_ratio, frame_reader
             return TemporalFrameProgress(30, ((4, 20),))
 
     class Logger:
@@ -344,6 +357,15 @@ def test_render_discards_output_when_crop_path_changes(tmp_path) -> None:
     pipeline.rendering(record(), scratch)
     pipeline.rendering(record(), scratch)
     assert renderer.calls == 1
+    assert renderer.validations == 1
+    cache_path = scratch / "render-cache.json"
+    cache = json.loads(cache_path.read_text(encoding="ascii"))
+    assert cache["renderer_version"] == "fixed-output-v1"
+    del cache["renderer_version"]
+    cache_path.write_text(json.dumps(cache), encoding="ascii")
+
+    pipeline.rendering(record(), scratch)
+    assert renderer.calls == 2
 
     crop_path.write_text(
         """{\"crop\":{\"height\":1080,\"width\":1920,\"x\":0,\"y\":0},\"frame_index\":0,\"timestamp_ms\":0}
@@ -354,8 +376,48 @@ def test_render_discards_output_when_crop_path_changes(tmp_path) -> None:
 
     pipeline.rendering(record(), scratch)
 
-    assert renderer.calls == 2
+    assert renderer.calls == 3
     assert renderer.crops == [CropRect(0, 0, 1920, 1080), CropRect(1, 0, 1920, 1080)]
+
+
+def test_cached_render_validation_failure_is_terminal_without_cache_rewrite(tmp_path) -> None:
+    class RejectingRenderer(Renderer):
+        def validate_rendered_output(
+            self, output, source_metadata, aspect_ratio, inspector
+        ) -> MediaMetadata:
+            del output, source_metadata, aspect_ratio, inspector
+            raise terminal(
+                ErrorCode.INVALID_OUTPUT,
+                "Rendered video frame count is invalid.",
+                diagnostic="expected_frame_count=2 actual_frame_count=1",
+            )
+
+    renderer = RejectingRenderer()
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=Inspector(),
+        renderer=renderer,
+        frame_reader=object(),
+    )
+    scratch = tmp_path / "job"
+    scratch.mkdir()
+    (scratch / "crop-path.jsonl").write_text(
+        """{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":0,"timestamp_ms":0}
+{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":1,"timestamp_ms":500}
+""",
+        encoding="ascii",
+    )
+    pipeline.rendering(record(), scratch)
+    cache_path = scratch / "render-cache.json"
+    cache_before = cache_path.read_bytes()
+
+    with pytest.raises(WorkerError) as raised:
+        pipeline.rendering(record(), scratch)
+
+    assert raised.value.code is ErrorCode.INVALID_OUTPUT
+    assert renderer.calls == 1
+    assert cache_path.read_bytes() == cache_before
 
 
 def test_render_mapping_samples_include_the_first_crop_change() -> None:
