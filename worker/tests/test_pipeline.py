@@ -184,6 +184,62 @@ def test_detector_only_pipeline_persists_aligned_crops_and_widens_later_miss(tmp
     ]
 
 
+def test_detector_jitter_persists_identical_frame_aligned_crops(tmp_path) -> None:
+    class JitterInspector(Inspector):
+        def inspect(self, path, *, allow_variable_frame_rate=False):
+            return MediaMetadata(1920, 1080, 1000, 4, "h264", None, 0, False)
+
+    class Frames:
+        def read(self, source, metadata):
+            return [DecodedFrame(index, index * 250, index) for index in range(4)]
+
+    class Detector:
+        def detect(self, index):
+            height = (400, 408, 392, 404)[index]
+            center_x = (960, 963, 957, 961)[index]
+            center_y = (540, 542, 538, 541)[index]
+            return [Detection(Rect(center_x - 100, center_y - height / 2, 200, height), 0.9)]
+
+    pipeline = ProcessingPipeline(
+        Storage(),
+        Finalizer(),
+        inspector=JitterInspector(),
+        renderer=Renderer(),
+        frame_reader=Frames(),
+        detector=Detector(),
+        debug_capture=True,
+    )
+    job = record()
+    pipeline.analyzing(job, tmp_path)
+    stored = [json.loads(line) for line in (tmp_path / "crop-path.jsonl").read_text().splitlines()]
+    trace = [
+        json.loads(line) for line in (tmp_path / "analysis-trace.jsonl").read_text().splitlines()
+    ]
+    assert [(row["frame_index"], row["timestamp_ms"]) for row in stored] == [
+        (0, 0),
+        (1, 250),
+        (2, 500),
+        (3, 750),
+    ]
+    assert [(row["frame_index"], row["timestamp_ms"]) for row in trace] == [
+        (0, 0),
+        (1, 250),
+        (2, 500),
+        (3, 750),
+    ]
+    assert all(row["crop"] == stored[0]["crop"] for row in stored[1:])
+    persisted = pipeline._crop_path(pipeline._inputs(job, tmp_path))
+    assert len(persisted) == 4
+    assert all(crop == persisted[0] for crop in persisted[1:])
+    for row in trace[1:]:
+        decision = row["framing"]["decision"]
+        assert decision["action"] == "deadband_hold"
+        assert decision["scale_deadband_applied"]
+        assert decision["center_deadband_applied"]
+        assert not decision["scale_adjusting"]
+        assert not decision["center_adjusting"]
+
+
 def test_temporal_progress_compares_normalized_input_output_and_original_source(tmp_path) -> None:
     class TemporalRenderer(Renderer):
         def __init__(self) -> None:

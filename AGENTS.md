@@ -36,8 +36,9 @@ Update the focused documentation and its index whenever an implementation decisi
 
 ## Framing Rules
 
-- Pan follows the detected person-box center with bounded smoothing.
-- Zoom targets a fixed detected-athlete height fraction: `tight` .60, `balanced` .50, `safe` .40, and `full_movement` .33.
+- Pan follows the detected person-box center with independent hysteresis: hold within 1% of crop dimensions, smooth after crossing that band, and stop within 0.4%.
+- Zoom targets a fixed detected-athlete height fraction: `tight` .60, `balanced` .50, `safe` .40, and `full_movement` .33. Hold dimensions within 5% relative target error; after entering adjustment, smooth until within 2%.
+- Containment and source/aspect bounds override both deadbands. Misses bypass the gates and reset their adjustment state.
 - On a missed detection, widen toward the full source frame. Never extrapolate an athlete position for a close crop.
 - Keep the first deterministic crop planner behind an interface so a future whole-shot optimizer can replace it without changing API or storage contracts.
 

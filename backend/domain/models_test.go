@@ -83,6 +83,68 @@ func TestJobConfigHashIsStableAndChangesWithConfiguration(t *testing.T) {
 	}
 }
 
+func TestJobConfigHashSeparatesPlannerVersionsAndThresholds(t *testing.T) {
+	source := uuid.New()
+	selection := TargetSelection{NormalizedX: .5, NormalizedY: .5}
+	output := OutputSettings{"16:9", "balanced"}
+	config, err := NewJobConfig(source, selection, output, "w0.2.2", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentHash, err := config.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := config
+	legacy.PipelineVersion = "w0.2.1"
+	legacy.Planner = map[string]any{"controller": "deterministic-v1"}
+	legacyHash, err := legacy.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentHash == legacyHash {
+		t.Fatal("planner cutover reused the legacy job hash")
+	}
+
+	expected := map[string]any{
+		"controller":            "deterministic-v2",
+		"scale_enter_fraction":  0.05,
+		"scale_exit_fraction":   0.02,
+		"center_enter_fraction": 0.01,
+		"center_exit_fraction":  0.004,
+	}
+	for key, value := range expected {
+		t.Run(key, func(t *testing.T) {
+			if config.Planner[key] != value {
+				t.Fatalf("immutable planner %s = %v, want %v", key, config.Planner[key], value)
+			}
+			changed, err := NewJobConfig(source, selection, output, "w0.2.2", "m1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if key == "controller" {
+				changed.Planner[key] = "deterministic-v1"
+			} else {
+				changed.Planner[key] = value.(float64) * 2
+			}
+			changedHash, err := changed.Hash()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changedHash == currentHash {
+				t.Fatalf("changing planner %s reused the same job hash", key)
+			}
+			unchangedHash, err := config.Hash()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if unchangedHash != currentHash {
+				t.Fatal("another job's planner mutation changed the original configuration")
+			}
+		})
+	}
+}
+
 func TestParseEvaluationManifestAcceptsWorkerCompatibleRootMetadata(t *testing.T) {
 	reviewID := uuid.New()
 	endMS := int64(20)

@@ -33,14 +33,27 @@ and detector misses widen framing without changing that reference. No former tar
 | `safe` | `.40` |
 | `full_movement` | `.33` |
 
-For a detection, the planner centers an aspect-ratio crop on its box center, targets the fixed height
-fraction, clamps it to source bounds, smoothly limits pan/zoom changes, and overrides smoothing when
-needed to contain the current detection. For a missed detection it widens the previous crop toward
-the full valid source-aspect crop. A first-frame miss uses the full crop. The planner remains behind
-an interface for future replacement without changing API or storage contracts.
-If source bounds or the requested aspect cannot contain a detection, it centers the largest valid crop
-on that detection as far as bounds permit and records a `source_aspect_limited` diagnostic rather than
-claiming containment.
+The `deterministic-v2` planner derives a profile-target aspect-ratio crop on the detection center,
+clamps it to the source, then applies independent scale and center hysteresis against the previous
+final crop. Idle scale holds width and height exactly until relative target-height error exceeds
+5%; adjustment uses `height_alpha = 0.25` until the error is at most 2%. Idle center holds until
+either source-clamped desired-center error exceeds 1% of the corresponding crop dimension;
+adjustment uses `center_alpha = 0.35` until both errors are at most 0.4%. The first detected frame
+without a previous crop uses the desired crop directly. Profile fractions remain centerlines, while
+small detector jitter produces exactly repeated rectangles when no safety constraint intervenes.
+
+Decision order is desired crop/source clamp, scale gate, independent center gate, candidate clamp,
+then containment. Containment may immediately expand or shift a held crop and overrides both
+deadbands and smoothing. If source bounds or the requested aspect cannot contain a detection, the
+planner centers the largest valid crop as far as bounds permit and records `source_aspect_limited`
+rather than claiming containment. These safety results remain separate from gate diagnostics.
+
+A missed detection bypasses both gates, widens the previous crop toward the full valid source-aspect
+crop, and resets both adjustment states to idle. A first-frame miss uses the full crop. Reacquisition
+compares against the widened previous crop, not the previous detection. The planner remains behind
+an interface for future replacement without changing API or storage contracts. Formulas, exact
+threshold boundaries, and diagnostics are specified in
+[Detection and Framing](../specs/worker/measurements-and-planner.md).
 
 ## Architecture
 
@@ -78,6 +91,14 @@ from the active verified worker fails terminally with `model_unavailable` before
 Existing W0.1 jobs are incompatible with W0.2 and fail this check; users must create a new W0.2 job,
 not retry the old job.
 
+The default pipeline is `w0.2.2`. Immutable `planner` configuration contains
+`controller = deterministic-v2`, `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
+`center_enter_fraction = 0.01`, and `center_exit_fraction = 0.004`. These fixed algorithm constants
+are not public job inputs. Pipeline version and planner configuration participate in the job hash,
+so an identical submission cannot reuse an older controller's job or cached crop path. Deploy API
+and worker together using the [drained cutover procedure](../dev/development.md#start-modules);
+retrying an old job does not upgrade its immutable configuration.
+
 Job stages are `queued`, `validating`, `analyzing`, `rendering`, `uploading`, and terminal
 `completed`, `failed`, or reserved `cancelled`. Redis provides at-least-once delivery; PostgreSQL
 leases and guarded transitions are processing authority. Output finalization is idempotent.
@@ -101,7 +122,8 @@ short-lived URLs only for terminal authorized jobs.
 ## Quality Gates
 
 - API/job-state, lease, artifact, and evaluation-projection tests.
-- Detector association, profile fractions, smoothing, containment, and missed-detection widening tests.
+- Detector association, profile fractions, independent hysteresis, exact holds, accumulated changes,
+  containment precedence, and missed-detection widening/reacquisition tests.
 - Output media validation for dimensions, codec, timing, decodability, and audio retention.
 - Browser workflow and phase-review contract tests.
 - Formatting, type checks, documentation links, and `git diff --check` before release.

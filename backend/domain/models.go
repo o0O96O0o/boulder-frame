@@ -345,7 +345,17 @@ func NewJobConfig(source uuid.UUID, selection TargetSelection, output OutputSett
 	if !map[string]bool{"tight": true, "balanced": true, "safe": true, "full_movement": true}[output.Profile] {
 		return JobConfig{}, errors.New("profile is unsupported")
 	}
-	return JobConfig{SourceAssetID: source, TargetSelection: selection, Output: output, PipelineVersion: pipeline, ModelVersion: model, Planner: map[string]any{"controller": "deterministic-v1"}}, nil
+	return JobConfig{
+		SourceAssetID: source, TargetSelection: selection, Output: output,
+		PipelineVersion: pipeline, ModelVersion: model,
+		Planner: map[string]any{
+			"controller":            "deterministic-v2",
+			"scale_enter_fraction":  0.05,
+			"scale_exit_fraction":   0.02,
+			"center_enter_fraction": 0.01,
+			"center_exit_fraction":  0.004,
+		},
+	}, nil
 }
 
 func (c JobConfig) Hash() (string, error) {

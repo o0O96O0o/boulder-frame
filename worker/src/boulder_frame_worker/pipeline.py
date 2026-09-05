@@ -242,7 +242,13 @@ class ProcessingPipeline:
                 }
             )
         planner_config = dict(configuration.planner)
-        planner_config.setdefault("planner_version", "deterministic-v1")
+        planner_config.update(
+            planner_version="deterministic-v2",
+            scale_enter_fraction=DeterministicCropPlanner.scale_enter_fraction,
+            scale_exit_fraction=DeterministicCropPlanner.scale_exit_fraction,
+            center_enter_fraction=DeterministicCropPlanner.center_enter_fraction,
+            center_exit_fraction=DeterministicCropPlanner.center_exit_fraction,
+        )
         if inputs is not None:
             planner_config.setdefault("profile", inputs.output_settings.profile.value)
             planner_config.setdefault("aspect_ratio", inputs.output_settings.aspect_ratio.value)
@@ -981,9 +987,8 @@ def _render_mapping_errors(
             decoded, output_pixels = output.read()
             if not decoded:
                 raise ValueError("rendered output frame alignment failed")
-            if (
-                source.index != index
-                or source.timestamp_ms != inputs.metadata.timestamp_for_frame(index)
+            if source.index != index or source.timestamp_ms != inputs.metadata.timestamp_for_frame(
+                index
             ):
                 raise ValueError("source video frame alignment failed")
             if index not in sample_set:

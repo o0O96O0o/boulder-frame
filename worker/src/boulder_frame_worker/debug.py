@@ -311,6 +311,14 @@ def serialize_planner_trace(trace: PlannerFrameTrace) -> dict[str, object]:
         "smoothing_applied": trace.smoothing_applied,
         "containment_override": trace.containment_override,
         "source_aspect_limited": trace.source_aspect_limited,
+        "observed_height_fraction": _finite(trace.observed_height_fraction),
+        "scale_relative_error": _finite(trace.scale_relative_error),
+        "scale_deadband_applied": trace.scale_deadband_applied,
+        "scale_adjusting": trace.scale_adjusting,
+        "center_error_x_fraction": _finite(trace.center_error_x_fraction),
+        "center_error_y_fraction": _finite(trace.center_error_y_fraction),
+        "center_deadband_applied": trace.center_deadband_applied,
+        "center_adjusting": trace.center_adjusting,
         "action": trace.action,
     }
 

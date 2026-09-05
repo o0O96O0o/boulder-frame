@@ -43,8 +43,11 @@ is normalized consistently for analysis and rendering.
 `analyzing` maps the immutable tap, detects persons, selects the target on that frame, then associates
 forward and backward from its detector box. Later candidates must pass the detector-box-relative spatial
 gate; a miss or rejected candidate does not update the reference. `framing` derives the profile-target
-crop, smooths it, contains the current box when possible, reports `source_aspect_limited` when it is not,
-and widens on misses without position extrapolation. `rendering` reads display-normalized BGR frames,
+crop, independently holds or smooths scale and center through `deterministic-v2` hysteresis, then
+contains the current box when possible and reports `source_aspect_limited` when it is not.
+Misses bypass/reset the gates and widen without position extrapolation. See
+[Detection and Framing](measurements-and-planner.md) for threshold and safety precedence.
+`rendering` reads display-normalized BGR frames,
 applies every planned crop once with OpenCV, resizes each crop to the fixed 1080p output surface, and
 streams the fixed-size frames to FFmpeg for H.264/AAC encoding and muxing. Source, crop, written, and
 fully decoded output frame counts must be exactly equal; the renderer never repairs a short output by
@@ -52,6 +55,11 @@ duplicating frames or applying an output frame-rate filter. A local rendered out
 after the same strict media and exact decoded-frame-count validation, and only when its atomic sidecar
 matches the persisted crop-path digest, output aspect ratio, and `fixed-output-v1` renderer version.
 `uploading` heads and lease-finalizes the deterministic output object before completion.
+
+The `w0.2.2` pipeline and immutable planner controller/threshold hash create distinct jobs for the
+same input and settings under the new controller. Old jobs must drain on old workers before the
+[version cutover](../../dev/development.md#start-modules), because claim-time compatibility checks
+cover model version, not pipeline version. Never carry old job scratch or crop paths into a new job.
 
 ## Review Finalization
 

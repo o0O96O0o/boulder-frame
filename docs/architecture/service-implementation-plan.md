@@ -25,9 +25,11 @@ flowchart LR
 ## Cross-Service Contract
 
 - Job configuration is immutable and includes source asset, target selection, output settings,
-  pipeline version, model version, and planner identifier.
-- Profiles are `tight`, `balanced`, `safe`, `full_movement`, with fixed detected-athlete height
-  fractions `.60`, `.50`, `.40`, `.33`; `balanced` is `.50`.
+  pipeline version, model version, and planner configuration. The current default is `w0.2.2` with
+  `deterministic-v2` and four fixed scale/center enter/exit thresholds included in the job hash.
+- Profiles are `tight`, `balanced`, `safe`, `full_movement`, with target detected-athlete height
+  fractions `.60`, `.50`, `.40`, `.33`; `balanced` is `.50`. Independent scale/center hysteresis
+  holds small jitter exactly, while containment and source/aspect safety remain authoritative.
 - The selected model is `w0.2-ssd-mobilenetv1-12-onnx-detector-only-1`; configuration contains no
   additional CV state beyond detector framing.
 - The worker review phases are ordered `detection`, `framing`, `render`. Phase roles are exactly

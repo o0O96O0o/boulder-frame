@@ -36,6 +36,35 @@ records with source-display coordinates and these sections:
 Missing detection is `null`, not an invented position. Telemetry records only current detector and
 crop-decision values; it records detector association as deterministic evidence, not identity proof.
 
+For controller `deterministic-v2` (pipeline `w0.2.2`), the header's planner configuration includes
+the four fixed thresholds: `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
+`center_enter_fraction = 0.01`, and `center_exit_fraction = 0.004`. The additive framing trace fields
+explain the independent hysteresis decisions:
+
+| Field | Meaning |
+| --- | --- |
+| `observed_height_fraction` | Current detector height divided by previous final crop height. |
+| `scale_relative_error` | Observed height fraction divided by profile target fraction, minus one. |
+| `center_error_x_fraction` | Source-clamped desired-center x displacement divided by previous crop width. |
+| `center_error_y_fraction` | Source-clamped desired-center y displacement divided by previous crop height. |
+| `scale_deadband_applied` | Scale gate chose to hold the preceding dimensions. |
+| `scale_adjusting` | Scale gate remains in adjustment after this frame's gate decision. |
+| `center_deadband_applied` | Center gate chose to hold the preceding center. |
+| `center_adjusting` | Center gate remains in adjustment after this frame's gate decision. |
+
+The four numeric fields are bounded finite numbers or `null`; missing detection or a missing previous
+crop reference yields `null`, never invented zero error. The four state/decision fields are booleans.
+Misses bypass both gates; all four booleans are false on a miss or the first frame without a previous
+crop. Reacquisition uses the widened previous crop as its reference. A gate hold is evidence of the
+pre-safety decision, not a guarantee that containment
+or source clamping left the final crop unchanged.
+
+Actions distinguish `deadband_hold`, `smoothed`, `containment_override`, `source_aspect_limited`,
+and `widen_on_miss`. Containment and source/aspect diagnostics remain separate from gate decisions:
+required expansion or shifting wins over jitter suppression. See
+[Detection and Framing](measurements-and-planner.md#independent-hysteresis-gates) for the formulas,
+inclusive hold/exit boundaries, and causal decision order.
+
 The sanitizer removes URLs, object keys, credentials, endpoints, command diagnostics, bytes, pixels,
 and media payloads. Human-reviewed annotations remain separate. Evaluation reports detector
 availability/IoU and selection, crop containment, source/aspect-limited framing, output mapping,

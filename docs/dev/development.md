@@ -50,15 +50,17 @@ MODEL_VERSION=w0.2-ssd-mobilenetv1-12-onnx-detector-only-1
 worker to exit before it can process jobs. Existing W0.1 jobs cannot be retried against W0.2: create
 new jobs after the backend is configured with the W0.2 version.
 
-Set one shared immutable processing-behavior version for the backend and worker. The fixed-output
-renderer release uses:
+Set one shared immutable processing-behavior version for the backend and worker. The independent
+crop-deadband/hysteresis release (`deterministic-v2`) uses:
 
 ```dotenv
-PIPELINE_VERSION=w0.2.1
+PIPELINE_VERSION=w0.2.2
 ```
 
-Changing this value changes the job configuration hash. It creates a new job for an otherwise
-identical submission; retrying an existing job retains that job's original pipeline version.
+Set this explicitly in your private `.env`; changing `.env.example` does not migrate existing
+environments. The version and the fixed planner controller/threshold configuration enter the job
+hash. An otherwise identical submission creates a new job; retrying an existing job retains that
+job's original configuration and does not upgrade its controller behavior.
 
 For a non-default host artifact directory, set `MODEL_DIR_HOST` both when preparing the artifact and
 in `.env`; Compose mounts it read-only at the in-container `MODEL_DIR` path.
@@ -85,12 +87,17 @@ docker compose up --build -d
 The worker is built as `linux/amd64`, including on Apple Silicon hosts. The pinned ONNX Runtime
 deployment target is x86_64; Docker/Podman must have x86_64 emulation available.
 
-For an existing environment, deploy a pipeline-version change as a drained cutover: pause job
-submissions, wait for queued and leased jobs to reach terminal state, confirm the Redis consumer-group
-pending count is zero, and stop old workers. Start backend and worker together with the same new
-`PIPELINE_VERSION`, verify both startup summaries, and only then resume submissions. The worker
-currently enforces model-version compatibility but not pipeline-version compatibility, so overlapping
-old and new workers is unsafe.
+For an existing environment, deploy as a drained cutover: pause submissions, let the **old workers**
+finish every queued and leased old-version job, confirm the Redis consumer-group pending count is
+zero, and stop old workers. Set `PIPELINE_VERSION=w0.2.2` in the deployment `.env`, start backend
+and worker together with the new code and shared version, verify both startup summaries, and only
+then resume submissions. The worker enforces model-version compatibility but not pipeline-version
+compatibility: replacing workers before the drain or overlapping versions could run new code under
+an old immutable configuration.
+
+Submit a new job for the new behavior. Never rewrite old job configuration, republish an old UUID,
+or copy an old job's scratch/crop paths into a new job. New version/configuration hashes create
+distinct jobs and isolate their caches; retrying an old job is not a migration.
 
 The application binds to all host interfaces for trusted-network access. With the configured values
 from `.env`, the endpoints are:

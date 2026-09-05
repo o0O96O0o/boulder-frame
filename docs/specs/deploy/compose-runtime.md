@@ -60,11 +60,15 @@ behavior and changes the backend job-configuration hash. Because the worker curr
 version but not pipeline version when claiming work, do not use a rolling deployment across pipeline
 versions.
 
-For a pipeline-version change, stop new submissions, let queued and leased jobs become terminal, and
-confirm the Redis consumer group has no pending deliveries. Stop old workers, deploy backend and worker
-together with the new shared value, verify both startup summaries, then reopen submissions. Never
-rewrite a terminal job's configuration or republish its task UUID; submit the same source and settings
-again to create a new versioned job.
+For the `deterministic-v2` crop-deadband release, set `PIPELINE_VERSION=w0.2.2` explicitly in the
+deployment's private `.env`; the example file does not migrate it. Stop new submissions, let the old
+workers finish all queued and leased jobs, and confirm the Redis consumer group has no pending
+deliveries. Stop old workers, deploy backend and worker together with the new shared value, verify
+both startup summaries, then reopen submissions. Never replace workers before this drain.
+
+Pipeline version plus immutable planner controller and threshold values produce a new job hash.
+Never rewrite a terminal job's configuration, republish its task UUID, or copy old scratch/crop paths
+into a new job; submit the same source and settings again to create a new versioned job instead.
 
 ## Volumes
 

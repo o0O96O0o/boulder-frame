@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import isclose
 from typing import Protocol, overload
 
 from .measurement import Point, Rect
@@ -55,6 +56,14 @@ class PlannerFrameTrace:
     containment_override: bool
     source_aspect_limited: bool
     action: str
+    observed_height_fraction: float | None
+    scale_relative_error: float | None
+    center_error_x_fraction: float | None
+    center_error_y_fraction: float | None
+    scale_deadband_applied: bool
+    scale_adjusting: bool
+    center_deadband_applied: bool
+    center_adjusting: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +129,10 @@ class DeterministicCropPlanner:
     center_alpha = 0.35
     height_alpha = 0.25
     miss_widen_alpha = 0.35
+    scale_enter_fraction = 0.05
+    scale_exit_fraction = 0.02
+    center_enter_fraction = 0.01
+    center_exit_fraction = 0.004
 
     def __init__(
         self,
@@ -140,49 +153,88 @@ class DeterministicCropPlanner:
         crops: list[CropRect] = []
         traces: list[PlannerFrameTrace] = []
         previous: CropRect | None = None
+        scale_adjusting = center_adjusting = False
         for measurement in measurements:
             detection = measurement.detector_bounds
+            observed_fraction = scale_error = x_error = y_error = None
+            scale_held = center_held = False
+            contained = source_aspect_limited = False
             if detection is None:
                 desired = self.full_frame if previous is None else self._widen(previous)
                 crop = desired
+                scale_adjusting = center_adjusting = False
+                smoothing_applied = previous is not None
                 action = "full_frame" if previous is None else "widen_on_miss"
-                traces.append(
-                    PlannerFrameTrace(
-                        self.target_height_fraction,
-                        desired,
-                        True,
-                        previous is not None,
-                        False,
-                        False,
-                        action,
-                    )
-                )
             else:
                 desired = self._desired_crop(detection)
-                smoothed = desired if previous is None else self._smooth(previous, desired)
-                crop, source_aspect_limited = self._contain(smoothed, detection)
-                contained = crop != smoothed and not source_aspect_limited
-                traces.append(
-                    PlannerFrameTrace(
-                        self.target_height_fraction,
-                        desired,
-                        False,
-                        previous is not None,
-                        contained,
-                        source_aspect_limited,
-                        "source_aspect_limited"
-                        if source_aspect_limited
-                        else "containment_override"
-                        if contained
-                        else "smoothed"
-                        if previous
-                        else "initial",
+                if previous is None:
+                    candidate = desired
+                else:
+                    observed_fraction = detection.height / previous.height
+                    scale_error = observed_fraction / self.target_height_fraction - 1
+                    previous_center = previous.center
+                    desired_center = desired.center
+                    x_error = (desired_center.x - previous_center.x) / previous.width
+                    y_error = (desired_center.y - previous_center.y) / previous.height
+                    scale_threshold = (
+                        self.scale_exit_fraction if scale_adjusting else self.scale_enter_fraction
                     )
+                    center_threshold = (
+                        self.center_exit_fraction
+                        if center_adjusting
+                        else self.center_enter_fraction
+                    )
+                    scale_adjusting = self._outside_deadband(scale_error, scale_threshold)
+                    center_adjusting = self._outside_deadband(
+                        x_error, center_threshold
+                    ) or self._outside_deadband(y_error, center_threshold)
+                    scale_held = not scale_adjusting
+                    center_held = not center_adjusting
+                    candidate = self._adjust(previous, desired, scale_adjusting, center_adjusting)
+                crop, source_aspect_limited = self._contain(candidate, detection)
+                contained = crop != candidate and not source_aspect_limited
+                smoothing_applied = scale_adjusting or center_adjusting
+                action = (
+                    "source_aspect_limited"
+                    if source_aspect_limited
+                    else "containment_override"
+                    if contained
+                    else "smoothed"
+                    if smoothing_applied
+                    else "deadband_hold"
+                    if previous is not None
+                    else "initial"
                 )
+            traces.append(
+                PlannerFrameTrace(
+                    target_height_fraction=self.target_height_fraction,
+                    desired_crop=desired,
+                    detection_missed=detection is None,
+                    smoothing_applied=smoothing_applied,
+                    containment_override=contained,
+                    source_aspect_limited=source_aspect_limited,
+                    action=action,
+                    observed_height_fraction=observed_fraction,
+                    scale_relative_error=scale_error,
+                    center_error_x_fraction=x_error,
+                    center_error_y_fraction=y_error,
+                    scale_deadband_applied=scale_held,
+                    scale_adjusting=scale_adjusting,
+                    center_deadband_applied=center_held,
+                    center_adjusting=center_adjusting,
+                )
+            )
             crop = clamp_crop(crop, self.source_width, self.source_height)
             crops.append(crop)
             previous = crop
         return CropPlan(tuple(crops), tuple(traces))
+
+    @staticmethod
+    def _outside_deadband(error: float, threshold: float) -> bool:
+        # Division and center subtraction can round an exact boundary just above it.
+        # Treat only floating-point noise as equality, preserving inclusive hold/exit bands.
+        magnitude = abs(error)
+        return magnitude > threshold and not isclose(magnitude, threshold, rel_tol=1e-12)
 
     def _desired_crop(self, detection: Rect) -> CropRect:
         height = min(self.full_frame.height, detection.height / self.target_height_fraction)
@@ -196,13 +248,26 @@ class DeterministicCropPlanner:
             self.source_height,
         )
 
-    def _smooth(self, previous: CropRect, desired: CropRect) -> CropRect:
-        height = previous.height + (desired.height - previous.height) * self.height_alpha
-        width = height * self.aspect_ratio.value_float
-        center = Point(
-            previous.center.x + (desired.center.x - previous.center.x) * self.center_alpha,
-            previous.center.y + (desired.center.y - previous.center.y) * self.center_alpha,
-        )
+    def _adjust(
+        self,
+        previous: CropRect,
+        desired: CropRect,
+        scale_adjusting: bool,
+        center_adjusting: bool,
+    ) -> CropRect:
+        if not scale_adjusting and not center_adjusting:
+            return previous
+        height, width = previous.height, previous.width
+        if scale_adjusting:
+            height += (desired.height - height) * self.height_alpha
+            width = height * self.aspect_ratio.value_float
+        center = previous.center
+        if center_adjusting:
+            desired_center = desired.center
+            center = Point(
+                center.x + (desired_center.x - center.x) * self.center_alpha,
+                center.y + (desired_center.y - center.y) * self.center_alpha,
+            )
         return clamp_crop(
             CropRect(center.x - width / 2, center.y - height / 2, width, height),
             self.source_width,
@@ -222,6 +287,8 @@ class DeterministicCropPlanner:
         )
 
     def _contain(self, crop: CropRect, detection: Rect) -> tuple[CropRect, bool]:
+        if crop.contains(detection):
+            return crop, False
         if detection.width > self.full_frame.width or detection.height > self.full_frame.height:
             # No valid crop of the requested aspect can contain this box. Preserve as much of
             # the current detection as source/aspect bounds allow without falsely claiming it.
@@ -242,7 +309,7 @@ class DeterministicCropPlanner:
             crop.height, detection.height, detection.width / self.aspect_ratio.value_float
         )
         height = min(required_height, self.full_frame.height)
-        width = height * self.aspect_ratio.value_float
+        width = crop.width if height == crop.height else height * self.aspect_ratio.value_float
         x = min(crop.x, detection.x)
         x = max(x, detection.right - width)
         y = min(crop.y, detection.y)

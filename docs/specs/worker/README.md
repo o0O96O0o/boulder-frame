@@ -6,17 +6,18 @@ job state and object storage owns video assets.
 
 ## Documents
 
-- [Runtime and Pipeline](runtime-and-pipeline.md): configuration, task boundary, media validation, and durable processing.
+- [Runtime and Pipeline](runtime-and-pipeline.md): configuration, task boundary, media validation, cache isolation across version cutovers, and durable processing.
 - [Model Manifest](models.md): W0.2 detector artifact, license, checksum, tensor contract, and provisioning.
-- [Detection and Framing](measurements-and-planner.md): selection association, source coordinates, fixed profile fractions, smoothing, and miss behavior.
-- [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md): bounded private telemetry and detector-only visual-review contract.
+- [Detection and Framing](measurements-and-planner.md): selection association, source coordinates, profile targets, independent scale/center hysteresis, safety precedence, and miss/reacquisition behavior.
+- [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md): bounded private telemetry, gate errors/states, and detector-only visual-review contract.
 
 ## Current Contract
 
 The worker consumes Redis Streams tasks under a PostgreSQL lease, downloads and validates the source,
-normalizes supported VFR input only in job scratch, detects the selected athlete, derives a smooth
-detector-box crop path, renders and validates 1080p H.264/AAC output, and finalizes it under the
-active lease. It uses model version
+normalizes supported VFR input only in job scratch, detects the selected athlete, derives a
+`deterministic-v2` crop path with independent scale/center hysteresis, renders and validates 1080p
+H.264/AAC output, and finalizes it under the active lease. The default pipeline is `w0.2.2`.
+It uses model version
 `w0.2-ssd-mobilenetv1-12-onnx-detector-only-1`; a matching unconfigured runtime fails jobs safely
 with `model_unavailable`, while a configured W0.2 runtime with an unavailable decoder or invalid
 artifact fails startup.

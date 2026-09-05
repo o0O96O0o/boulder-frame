@@ -1,4 +1,7 @@
 import json
+from dataclasses import replace
+
+import pytest
 
 from boulder_frame_worker.debug import (
     canonical_json_bytes,
@@ -37,7 +40,23 @@ def test_detector_and_framing_serializers_contain_no_pose_or_tracking_data() -> 
             False,
         ),
     )
-    trace = PlannerFrameTrace(0.5, CropRect(0, 0, 100, 100), False, True, False, False, "smoothed")
+    trace = PlannerFrameTrace(
+        target_height_fraction=0.5,
+        desired_crop=CropRect(0, 0, 100, 100),
+        detection_missed=False,
+        smoothing_applied=True,
+        containment_override=False,
+        source_aspect_limited=False,
+        action="smoothed",
+        observed_height_fraction=0.6,
+        scale_relative_error=0.2,
+        scale_deadband_applied=False,
+        scale_adjusting=True,
+        center_error_x_fraction=0.03,
+        center_error_y_fraction=0.0,
+        center_deadband_applied=False,
+        center_adjusting=True,
+    )
 
     serialized = serialize_raw_frame_observation(observation)
     assert serialized["detection"] == {
@@ -57,3 +76,30 @@ def test_detector_and_framing_serializers_contain_no_pose_or_tracking_data() -> 
 def test_canonical_json_remains_safe_and_deterministic() -> None:
     assert json.loads(canonical_json_bytes({"b": 2, "a": 1})) == {"a": 1, "b": 2}
     assert json.loads(canonical_json_bytes({"token": "secret", "pixels": "raw"})) == {}
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf"), -float("inf")])
+def test_planner_diagnostics_serialize_missing_and_nonfinite_values_as_null(value) -> None:
+    from boulder_frame_worker.planner import DeterministicCropPlanner
+    from boulder_frame_worker.protocol import AspectRatio, FramingProfile
+
+    plan = DeterministicCropPlanner(
+        1920, 1080, AspectRatio.LANDSCAPE, FramingProfile.BALANCED
+    ).plan([FrameMeasurement(Rect(700, 200, 200, 400))])
+    trace = replace(
+        plan.trace[0],
+        observed_height_fraction=value,
+        scale_relative_error=value,
+        center_error_x_fraction=value,
+        center_error_y_fraction=value,
+    )
+    serialized = serialize_planner_trace(trace)
+    # The direct serializer must be safe even before bundle-level sanitization.
+    decoded = json.loads(json.dumps(serialized, allow_nan=False))
+    for field in (
+        "observed_height_fraction",
+        "scale_relative_error",
+        "center_error_x_fraction",
+        "center_error_y_fraction",
+    ):
+        assert decoded[field] is None
