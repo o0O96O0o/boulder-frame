@@ -33,26 +33,30 @@ and detector misses widen framing without changing that reference. No former tar
 | `safe` | `.40` |
 | `full_movement` | `.33` |
 
-The `deterministic-v2` planner derives a profile-target aspect-ratio crop on the detection center,
+The `deterministic-v3` planner derives a profile-target aspect-ratio crop on the detection center,
 clamps it to the source, then applies independent scale and center hysteresis against the previous
-final crop. Idle scale holds width and height exactly until relative target-height error exceeds
-5%; adjustment uses `height_alpha = 0.25` until the error is at most 2%. Idle center holds until
-either source-clamped desired-center error exceeds 1% of the corresponding crop dimension;
-adjustment uses `center_alpha = 0.35` until both errors are at most 0.4%. The first detected frame
-without a previous crop uses the desired crop directly. Profile fractions remain centerlines, while
-small detector jitter produces exactly repeated rectangles when no safety constraint intervenes.
+final crop. Scale enters adjustment beyond 5% relative target-height error and closes its gate at
+2%; center enters beyond 1% of either crop dimension and closes within 0.4% on both axes.
+Strictly increasing measurement timestamps drive speed/acceleration-limited log-height zoom and
+source-normalized pan, with braking near targets and preserved velocity when a detection retargets
+motion. Closing a gate allows a short braking/settling interval, not an instant stop. Idle crops at
+rest hold exactly. The first detected frame without a previous crop uses the desired crop directly.
+Profile fractions remain centerlines, while small detector jitter leaves settled crops unchanged
+when no safety constraint intervenes.
 
-Decision order is desired crop/source clamp, scale gate, independent center gate, candidate clamp,
-then containment. Containment may immediately expand or shift a held crop and overrides both
-deadbands and smoothing. If source bounds or the requested aspect cannot contain a detection, the
-planner centers the largest valid crop as far as bounds permit and records `source_aspect_limited`
-rather than claiming containment. These safety results remain separate from gate diagnostics.
+Decision order is desired crop/source clamp, independent scale/center gates, timestamp-based motion
+or settling, candidate clamp, then containment. Containment may immediately expand or shift a crop
+and overrides deadbands and motion limits. Corrections reset velocity only for affected components.
+If source bounds or the requested aspect cannot contain a detection, the planner centers the largest
+valid crop as far as bounds permit and records `source_aspect_limited` rather than claiming
+containment. These safety results remain separate from gate diagnostics.
 
-A missed detection bypasses both gates, widens the previous crop toward the full valid source-aspect
-crop, and resets both adjustment states to idle. A first-frame miss uses the full crop. Reacquisition
-compares against the widened previous crop, not the previous detection. The planner remains behind
-an interface for future replacement without changing API or storage contracts. Formulas, exact
-threshold boundaries, and diagnostics are specified in
+A missed detection bypasses/resets both gates, cancels pan and inward zoom velocity, and widens the
+previous crop with timestamp-based zoom limits toward the full valid source-aspect height. Outward
+zoom velocity is retained; center changes only for necessary clamping, never position extrapolation.
+A first-frame miss uses the full crop. Reacquisition compares against the widened previous crop,
+not the previous detection. The planner remains behind an interface for future replacement without
+changing API or storage contracts. Formulas, limits, and diagnostics are specified in
 [Detection and Framing](../specs/worker/measurements-and-planner.md).
 
 ## Architecture
@@ -91,10 +95,12 @@ from the active verified worker fails terminally with `model_unavailable` before
 Existing W0.1 jobs are incompatible with W0.2 and fail this check; users must create a new W0.2 job,
 not retry the old job.
 
-The default pipeline is `w0.2.2`. Immutable `planner` configuration contains
-`controller = deterministic-v2`, `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
-`center_enter_fraction = 0.01`, and `center_exit_fraction = 0.004`. These fixed algorithm constants
-are not public job inputs. Pipeline version and planner configuration participate in the job hash,
+The default pipeline is `w0.2.3`. Immutable `planner` configuration contains
+`controller = deterministic-v3`, `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
+`center_enter_fraction = 0.01`, `center_exit_fraction = 0.004`, `zoom_max_speed = 0.5`,
+`zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, and `pan_max_acceleration = 0.5`.
+These fixed algorithm constants are not public job inputs. Pipeline version and planner
+configuration participate in the job hash,
 so an identical submission cannot reuse an older controller's job or cached crop path. Deploy API
 and worker together using the [drained cutover procedure](../dev/development.md#start-modules);
 retrying an old job does not upgrade its immutable configuration.

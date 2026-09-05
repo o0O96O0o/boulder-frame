@@ -36,10 +36,12 @@ records with source-display coordinates and these sections:
 Missing detection is `null`, not an invented position. Telemetry records only current detector and
 crop-decision values; it records detector association as deterministic evidence, not identity proof.
 
-For controller `deterministic-v2` (pipeline `w0.2.2`), the header's planner configuration includes
-the four fixed thresholds: `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
-`center_enter_fraction = 0.01`, and `center_exit_fraction = 0.004`. The additive framing trace fields
-explain the independent hysteresis decisions:
+For controller `deterministic-v3` (pipeline `w0.2.3`), the header's planner configuration includes
+the unchanged thresholds `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
+`center_enter_fraction = 0.01`, and `center_exit_fraction = 0.004`, plus `zoom_max_speed = 0.5`,
+`zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, and `pan_max_acceleration = 0.5`.
+Zoom limits use log-height per second and per second²; pan limits use source dimension per second
+and per second² on each axis. Existing framing trace fields explain the independent gates and motion:
 
 | Field | Meaning |
 | --- | --- |
@@ -47,23 +49,25 @@ explain the independent hysteresis decisions:
 | `scale_relative_error` | Observed height fraction divided by profile target fraction, minus one. |
 | `center_error_x_fraction` | Source-clamped desired-center x displacement divided by previous crop width. |
 | `center_error_y_fraction` | Source-clamped desired-center y displacement divided by previous crop height. |
-| `scale_deadband_applied` | Scale gate chose to hold the preceding dimensions. |
+| `scale_deadband_applied` | Scale gate is idle; residual zoom velocity may still be braking. |
 | `scale_adjusting` | Scale gate remains in adjustment after this frame's gate decision. |
-| `center_deadband_applied` | Center gate chose to hold the preceding center. |
+| `center_deadband_applied` | Center gate is idle; residual pan velocity may still be braking. |
 | `center_adjusting` | Center gate remains in adjustment after this frame's gate decision. |
+| `smoothing_applied` | Crop motion includes active transitions or braking/settling after a gate closes. |
 
 The four numeric fields are bounded finite numbers or `null`; missing detection or a missing previous
 crop reference yields `null`, never invented zero error. The four state/decision fields are booleans.
 Misses bypass both gates; all four booleans are false on a miss or the first frame without a previous
 crop. Reacquisition uses the widened previous crop as its reference. A gate hold is evidence of the
-pre-safety decision, not a guarantee that containment
-or source clamping left the final crop unchanged.
+pre-safety gate decision, not a guarantee that settling, containment, or source clamping left the
+final crop unchanged. No new trace fields are required for velocity or animation state.
 
 Actions distinguish `deadband_hold`, `smoothed`, `containment_override`, `source_aspect_limited`,
 and `widen_on_miss`. Containment and source/aspect diagnostics remain separate from gate decisions:
-required expansion or shifting wins over jitter suppression. See
-[Detection and Framing](measurements-and-planner.md#independent-hysteresis-gates) for the formulas,
-inclusive hold/exit boundaries, and causal decision order.
+required expansion or shifting wins over motion limits and jitter suppression. Misses cancel pan
+and inward zoom velocity without extrapolating a subject position. See
+[Detection and Framing](measurements-and-planner.md#independent-hysteresis-gates) for threshold
+boundaries, timestamp-based braking and retargeting, and causal decision order.
 
 The sanitizer removes URLs, object keys, credentials, endpoints, command diagnostics, bytes, pixels,
 and media payloads. Human-reviewed annotations remain separate. Evaluation reports detector

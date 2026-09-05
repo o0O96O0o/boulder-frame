@@ -21,8 +21,9 @@ is `OnnxSsdMobileNetV1Detector`; its local artifact, tensor contract, checksum, 
 
 ## Detector-Box Planner
 
-`FrameMeasurement` has only `detector_bounds` and detector confidence. The
-`DeterministicCropPlanner` uses a fixed target height fraction of the detected person box:
+`FrameMeasurement` contains `detector_bounds`, required integer `timestamp_ms`, and detector
+`confidence` (default `0`). Timestamps must strictly increase, including on misses.
+The `DeterministicCropPlanner` uses a fixed target height fraction of the detected person box:
 
 | Profile | Detected athlete height / crop height |
 | --- | --- |
@@ -31,7 +32,7 @@ is `OnnxSsdMobileNetV1Detector`; its local artifact, tensor contract, checksum, 
 | `safe` | `.40` |
 | `full_movement` | `.33` |
 
-The `deterministic-v2` controller uses the profile fraction as its centerline, not a per-frame mandate
+The `deterministic-v3` controller uses the profile fraction as its centerline, not a per-frame mandate
 to resize. It first derives the desired crop height as `detection.height / target_height_fraction`,
 centers the aspect-ratio crop on the detector box, and clamps it to source/aspect bounds.
 The first frame with a detection and no previous crop uses that desired crop directly.
@@ -49,49 +50,76 @@ center_error_x_fraction = (desired_center.x - previous_center.x) / previous_crop
 center_error_y_fraction = (desired_center.y - previous_center.y) / previous_crop.height
 ```
 
-The desired center in these formulas is source-clamped. Fixed algorithm constants are persisted as
-flat immutable `planner` keys alongside `controller = deterministic-v2`:
+The desired center in these formulas is source-clamped. The unchanged hysteresis thresholds are
+flat immutable `planner` keys alongside `controller = deterministic-v3`:
 
-| Gate | Enter adjustment from idle | Stop adjustment and hold | Adjustment coefficient |
-| --- | --- | --- | --- |
-| Scale | `abs(scale_relative_error) > scale_enter_fraction` (`0.05`) | `abs(scale_relative_error) <= scale_exit_fraction` (`0.02`) | `height_alpha = 0.25` |
-| Center | Either absolute center error `> center_enter_fraction` (`0.01`) | Both absolute center errors `<= center_exit_fraction` (`0.004`) | `center_alpha = 0.35` |
+| Gate | Enter adjustment from idle | Close adjustment gate |
+| --- | --- | --- |
+| Scale | `abs(scale_relative_error) > scale_enter_fraction` (`0.05`) | `abs(scale_relative_error) <= scale_exit_fraction` (`0.02`) |
+| Center | Either absolute center error `> center_enter_fraction` (`0.01`) | Both absolute center errors `<= center_exit_fraction` (`0.004`) |
 
-When idle, scale holds the preceding width and height exactly; center holds the preceding center
-exactly. While adjusting, each gate retains bounded exponential smoothing until its inner threshold
-is reached. Equality at the outer boundary holds; equality at the inner boundary stops adjustment.
-For `balanced`, an idle crop holds between 47.5% and 52.5% detected height and an active zoom settles
-inside 49% to 51%. Accumulated gradual scale movement eventually crosses the band because the
-reference is the current crop, not an immediately preceding detection.
+Equality at the outer boundary leaves an idle gate closed; equality at the inner boundary closes
+an active gate. An idle gate at rest holds its preceding dimensions or center exactly. Closing a gate
+while moving instead brakes its existing velocity to zero over a short settling interval, then holds
+exactly; it does not stop the crop instantly. For `balanced`, scale entry corresponds to leaving
+47.5%–52.5% detected height and gate closure to entering 49%–51%, not a promise about the final
+post-settling fraction. Accumulated gradual movement eventually crosses the band because the reference
+is the current crop, not an immediately preceding detection.
+
+### Timestamp-Based Motion
+
+Elapsed time is `(timestamp_ms - previous_timestamp_ms) / 1000`. Zoom moves in `log(crop.height)`;
+pan moves in `(center.x / source_width, center.y / source_height)`. Pan motion limits therefore use
+source dimensions, while the center gate above deliberately retains crop-dimension normalization.
+
+| Immutable planner key | Value | Units |
+| --- | --- | --- |
+| `zoom_max_speed` | `0.5` | log-height / second |
+| `zoom_max_acceleration` | `1.0` | log-height / second² |
+| `pan_max_speed` | `0.25` | source dimension / second, per axis |
+| `pan_max_acceleration` | `0.5` | source dimension / second², per axis |
+
+Each active component accelerates, cruises within its speed cap, and brakes based on stopping
+distance as it approaches the target. Updates integrate those motion phases over actual elapsed
+time, rather than applying per-frame exponential coefficients. Retargeting preserves velocity:
+new detector boxes do not restart an animation. A target that suddenly moves inside the current
+stopping distance can be crossed before reversal; velocity changes still obey acceleration limits
+unless a safety override intervenes. Scale and center settle independently after their gates close.
 
 ### Safety Precedence And Misses
 
-For detected frames, the order is: derive and clamp the desired crop; apply scale hysteresis; apply
-center hysteresis; build and clamp the candidate; then contain the current detector box. Containment
-may immediately expand or shift a held crop. This safety override takes precedence over deadband
-holds and smoothing. If the source bounds or requested aspect make containment impossible, use the
-largest valid crop centered on the detection as far as bounds allow and mark `source_aspect_limited`
-instead of claiming containment.
+For detected frames, the order is: derive and clamp the desired crop; apply scale and center
+hysteresis; advance active motion or idle braking; build and clamp the candidate; then contain the
+current detector box. Containment may immediately expand or shift a crop. This safety override takes
+precedence over deadband holds, settling, and motion limits. Source/aspect corrections and containment
+reset velocity only for the corrected components. If source bounds or the requested aspect make
+containment impossible, use the largest valid crop centered on the detection as far as bounds allow
+and mark `source_aspect_limited` instead of claiming containment.
 
-A missed detection bypasses both gates, widens from the previous crop toward the full valid
-source-aspect crop, and resets both adjustment states to idle. A first-frame miss uses the full crop
-immediately. Reacquisition compares the detection with that widened final crop, so a material error
-resumes adjustment naturally. The planner never extrapolates an athlete position for a close crop
-and performs no additional subject-state or future-motion inference.
+A missed detection bypasses both gates and resets their adjustment states to idle. It immediately
+cancels pan velocity and any inward zoom velocity; outward zoom velocity is retained while targeting
+the full valid source-aspect height with the same timestamp-based zoom limits. The previous center is
+held except for source/aspect clamping required as the crop widens. A first-frame miss uses the full
+crop immediately. Reacquisition compares the detection with that widened final crop, so a material
+error resumes adjustment naturally. The planner never extrapolates an athlete position for a close
+crop and performs no additional subject-state or future-motion inference.
 
 ### Diagnostics
 
 Each `CropPlan` contains final crops and frame-aligned traces with the target fraction, desired crop,
 miss flag, smoothing status, containment override, source/aspect limitation, and action. The four
 numeric errors/fractions above are finite floats or `null` when there is no detection or previous
-crop reference. `scale_deadband_applied`, `scale_adjusting`, `center_deadband_applied`, and
-`center_adjusting` record each gate's hold/adjust decision independently of the final safety result.
+crop reference. `scale_deadband_applied` and `center_deadband_applied` indicate idle gates, not an
+instantaneously stationary crop; `scale_adjusting` and `center_adjusting` describe active gates.
+`smoothing_applied` includes braking/settling after a gate closes. These decisions remain independent
+of the final safety result.
 Actions distinguish `deadband_hold`, `smoothed`, `containment_override`, `source_aspect_limited`,
 and `widen_on_miss`; a safety action does not erase the gate diagnostics. See the
 [telemetry contract](debug-telemetry-and-evaluation.md#telemetry-contract) for serialization.
 
-Thresholds are algorithm constants, not frontend controls or public job inputs. Pipeline `w0.2.2`
-and the immutable planner configuration separate this behavior from older cached paths.
+All eight thresholds and motion limits are algorithm constants, not frontend controls or public job
+inputs. Pipeline `w0.2.3` and the immutable planner configuration separate this behavior from older
+cached paths.
 
 ```mermaid
 flowchart LR
@@ -99,15 +127,15 @@ flowchart LR
   D[Per-frame person detection] --> A
   A -->|accepted box or no detection| F[Frame measurement]
   F -->|detection| P[Profile crop and source clamp]
-  P --> S1[Scale hold or smooth]
-  S1 --> S2[Independent center hold or smooth]
+  P --> S1[Scale gate and timestamp motion]
+  S1 --> S2[Independent center gate and timestamp motion]
   S2 --> B[Build and clamp candidate]
   B --> C[Contain box or mark source aspect limit]
   C --> R[Final source crop]
   F -->|miss| W[Widen and reset both gates]
   W --> R
-  R -.->|previous final crop and gate states| S1
-  R -.->|previous final crop and gate states| S2
+  R -.->|previous crop, gates, velocity and timestamp| S1
+  R -.->|previous crop, gates, velocity and timestamp| S2
 ```
 
 `CropRect` exposes right/bottom bounds, center, and containment; `full_frame_crop` derives the

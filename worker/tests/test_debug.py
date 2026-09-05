@@ -65,7 +65,7 @@ def test_detector_and_framing_serializers_contain_no_pose_or_tracking_data() -> 
     }
     assert "pose" not in serialized
     assert "tracking" not in json.dumps(serialized)
-    assert serialize_frame_measurement(FrameMeasurement(bounds, 0.9)) == {
+    assert serialize_frame_measurement(FrameMeasurement(bounds, 0, 0.9)) == {
         "detector_bounds": {"x": 10, "y": 20, "width": 30, "height": 40},
         "confidence": 0.9,
         "detection_missed": False,
@@ -85,7 +85,7 @@ def test_planner_diagnostics_serialize_missing_and_nonfinite_values_as_null(valu
 
     plan = DeterministicCropPlanner(
         1920, 1080, AspectRatio.LANDSCAPE, FramingProfile.BALANCED
-    ).plan([FrameMeasurement(Rect(700, 200, 200, 400))])
+    ).plan([FrameMeasurement(Rect(700, 200, 200, 400), 0)])
     trace = replace(
         plan.trace[0],
         observed_height_fraction=value,

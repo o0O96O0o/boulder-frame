@@ -4,7 +4,7 @@ The backend is a Go HTTP process. It owns request validation, PostgreSQL metadat
 
 ## Documents
 
-- [HTTP API](http-api.md): routes, request validation, response shapes, ownership checks, lifecycle behavior, and immutable `deterministic-v2` planner thresholds/hash cutover.
+- [HTTP API](http-api.md): routes, request validation, response shapes, ownership checks, lifecycle behavior, and immutable `deterministic-v3` planner thresholds/motion limits and hash cutover.
 - [Persistence](persistence.md): PostgreSQL entities, constraints, immutable configuration, and repository responsibilities.
 - [Redis Streams Task Distribution](redis-streams-task-distribution.md): stream/group configuration, task payload, idempotency, pending recovery, lease authority, and worker handoff.
 

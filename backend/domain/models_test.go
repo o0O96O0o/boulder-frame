@@ -83,11 +83,11 @@ func TestJobConfigHashIsStableAndChangesWithConfiguration(t *testing.T) {
 	}
 }
 
-func TestJobConfigHashSeparatesPlannerVersionsAndThresholds(t *testing.T) {
+func TestJobConfigHashSeparatesPlannerVersionsAndMotionConstants(t *testing.T) {
 	source := uuid.New()
 	selection := TargetSelection{NormalizedX: .5, NormalizedY: .5}
 	output := OutputSettings{"16:9", "balanced"}
-	config, err := NewJobConfig(source, selection, output, "w0.2.2", "m1")
+	config, err := NewJobConfig(source, selection, output, "w0.2.3", "m1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,8 +96,14 @@ func TestJobConfigHashSeparatesPlannerVersionsAndThresholds(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy := config
-	legacy.PipelineVersion = "w0.2.1"
-	legacy.Planner = map[string]any{"controller": "deterministic-v1"}
+	legacy.PipelineVersion = "w0.2.2"
+	legacy.Planner = map[string]any{
+		"controller":            "deterministic-v2",
+		"scale_enter_fraction":  0.05,
+		"scale_exit_fraction":   0.02,
+		"center_enter_fraction": 0.01,
+		"center_exit_fraction":  0.004,
+	}
 	legacyHash, err := legacy.Hash()
 	if err != nil {
 		t.Fatal(err)
@@ -107,23 +113,27 @@ func TestJobConfigHashSeparatesPlannerVersionsAndThresholds(t *testing.T) {
 	}
 
 	expected := map[string]any{
-		"controller":            "deterministic-v2",
+		"controller":            "deterministic-v3",
 		"scale_enter_fraction":  0.05,
 		"scale_exit_fraction":   0.02,
 		"center_enter_fraction": 0.01,
 		"center_exit_fraction":  0.004,
+		"zoom_max_speed":        0.5,
+		"zoom_max_acceleration": 1.0,
+		"pan_max_speed":         0.25,
+		"pan_max_acceleration":  0.5,
 	}
 	for key, value := range expected {
 		t.Run(key, func(t *testing.T) {
 			if config.Planner[key] != value {
 				t.Fatalf("immutable planner %s = %v, want %v", key, config.Planner[key], value)
 			}
-			changed, err := NewJobConfig(source, selection, output, "w0.2.2", "m1")
+			changed, err := NewJobConfig(source, selection, output, "w0.2.3", "m1")
 			if err != nil {
 				t.Fatal(err)
 			}
 			if key == "controller" {
-				changed.Planner[key] = "deterministic-v1"
+				changed.Planner[key] = "deterministic-v2"
 			} else {
 				changed.Planner[key] = value.(float64) * 2
 			}

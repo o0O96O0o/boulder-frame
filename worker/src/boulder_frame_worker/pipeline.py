@@ -243,11 +243,15 @@ class ProcessingPipeline:
             )
         planner_config = dict(configuration.planner)
         planner_config.update(
-            planner_version="deterministic-v2",
+            planner_version="deterministic-v3",
             scale_enter_fraction=DeterministicCropPlanner.scale_enter_fraction,
             scale_exit_fraction=DeterministicCropPlanner.scale_exit_fraction,
             center_enter_fraction=DeterministicCropPlanner.center_enter_fraction,
             center_exit_fraction=DeterministicCropPlanner.center_exit_fraction,
+            zoom_max_speed=DeterministicCropPlanner.zoom_max_speed,
+            zoom_max_acceleration=DeterministicCropPlanner.zoom_max_acceleration,
+            pan_max_speed=DeterministicCropPlanner.pan_max_speed,
+            pan_max_acceleration=DeterministicCropPlanner.pan_max_acceleration,
         )
         if inputs is not None:
             planner_config.setdefault("profile", inputs.output_settings.profile.value)
@@ -947,7 +951,9 @@ def _output_settings(configuration: JobConfiguration) -> OutputSettings:
 
 def _planner_measurements(observations: Sequence[RawFrameObservation]) -> list[FrameMeasurement]:
     return [
-        FrameMeasurement(observation.detector_bounds, observation.confidence)
+        FrameMeasurement(
+            observation.detector_bounds, observation.timestamp_ms, observation.confidence
+        )
         for observation in observations
     ]
 

@@ -50,15 +50,15 @@ MODEL_VERSION=w0.2-ssd-mobilenetv1-12-onnx-detector-only-1
 worker to exit before it can process jobs. Existing W0.1 jobs cannot be retried against W0.2: create
 new jobs after the backend is configured with the W0.2 version.
 
-Set one shared immutable processing-behavior version for the backend and worker. The independent
-crop-deadband/hysteresis release (`deterministic-v2`) uses:
+Set one shared immutable processing-behavior version for the backend and worker. The timestamp-based
+smooth-transition release (`deterministic-v3`), retaining independent crop hysteresis, uses:
 
 ```dotenv
-PIPELINE_VERSION=w0.2.2
+PIPELINE_VERSION=w0.2.3
 ```
 
 Set this explicitly in your private `.env`; changing `.env.example` does not migrate existing
-environments. The version and the fixed planner controller/threshold configuration enter the job
+environments. The version and fixed planner controller, thresholds, and motion limits enter the job
 hash. An otherwise identical submission creates a new job; retrying an existing job retains that
 job's original configuration and does not upgrade its controller behavior.
 
@@ -89,7 +89,7 @@ deployment target is x86_64; Docker/Podman must have x86_64 emulation available.
 
 For an existing environment, deploy as a drained cutover: pause submissions, let the **old workers**
 finish every queued and leased old-version job, confirm the Redis consumer-group pending count is
-zero, and stop old workers. Set `PIPELINE_VERSION=w0.2.2` in the deployment `.env`, start backend
+zero, and stop old workers. Set `PIPELINE_VERSION=w0.2.3` in the deployment `.env`, start backend
 and worker together with the new code and shared version, verify both startup summaries, and only
 then resume submissions. The worker enforces model-version compatibility but not pipeline-version
 compatibility: replacing workers before the drain or overlapping versions could run new code under

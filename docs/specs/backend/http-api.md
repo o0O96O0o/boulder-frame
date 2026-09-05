@@ -70,32 +70,38 @@ The API rejects negative frame times, coordinates outside `[0, 1]`, unsupported 
 The stored configuration additionally contains:
 
 - `source_asset_id`
-- `pipeline_version = w0.2.2` by default
+- `pipeline_version = w0.2.3` by default
 - `model_version`
 - Fixed planner configuration:
 
 ```json
 {
   "planner": {
-    "controller": "deterministic-v2",
+    "controller": "deterministic-v3",
     "scale_enter_fraction": 0.05,
     "scale_exit_fraction": 0.02,
     "center_enter_fraction": 0.01,
-    "center_exit_fraction": 0.004
+    "center_exit_fraction": 0.004,
+    "zoom_max_speed": 0.5,
+    "zoom_max_acceleration": 1.0,
+    "pan_max_speed": 0.25,
+    "pan_max_acceleration": 0.5
   }
 }
 ```
 
-The planner constants implement independent scale/center hysteresis and are not public request
-fields or user-tunable controls. See [Detection and Framing](../worker/measurements-and-planner.md).
+The planner constants implement unchanged independent scale/center hysteresis plus timestamp-based
+speed/acceleration limits for log-height zoom and source-normalized pan. They are not public request
+fields or user-tunable controls. Units, braking, and settling are specified in
+[Detection and Framing](../worker/measurements-and-planner.md#timestamp-based-motion).
 
 The configuration is serialized and SHA-256 hashed. The hash is used with `(project_id, configuration_hash)` to make repeated submissions idempotent.
 
 `pipeline_version` identifies immutable processing behavior, not a mutable deployment label. Changing
 it changes the configuration hash and creates a distinct job for the same source and settings. A retry
 retains the original job configuration and never upgrades that job to a newer pipeline behavior.
-The controller and all four thresholds also participate in the hash, preventing a new submission from
-reusing an older planner's cached job/output. Before deploying this cutover, drain old jobs with the old
+The controller and all eight thresholds/motion limits also participate in the hash, preventing a new
+submission from reusing an older planner's cached job/output. Before deploying this cutover, drain old jobs with the old
 workers; the worker does not enforce pipeline-version compatibility at claim time. Never retry or
 republish an old job UUID to request the new behavior; submit a new job with the new configuration.
 

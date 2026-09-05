@@ -175,7 +175,9 @@ def test_detector_only_pipeline_persists_aligned_crops_and_widens_later_miss(tmp
     assert len(crops) == len(stored) == len(trace) == 2
     assert crops[1].height > crops[0].height
     assert trace[1]["detection"]["selection_outcome"] == "no_detections"
-    assert trace[1]["framing"]["decision"]["action"] == "widen_on_miss"
+    assert trace[1]["framing"]["decision"]["detection_missed"]
+    assert 0 <= crops[1].x < crops[1].right <= 1920
+    assert 0 <= crops[1].y < crops[1].bottom <= 1080
     assert "pose" not in json.dumps(trace)
     assert "tracking" not in json.dumps(trace)
     assert [artifact["role"] for artifact in phase_io["outputs"]] == [

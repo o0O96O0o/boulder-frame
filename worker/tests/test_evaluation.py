@@ -172,7 +172,7 @@ def test_published_detector_only_telemetry_loads_and_evaluates(tmp_path: Path) -
             source_metadata=source_json(),
             pipeline_version="pipeline-v1",
             model_version="w0.2-ssd-mobilenetv1-12-onnx-detector-only-1",
-            planner_config={"planner_version": "deterministic-v2", "profile": "balanced"},
+            planner_config={"planner_version": "deterministic-v3", "profile": "balanced"},
             model_manifest={"model_version": "w0.2-ssd-mobilenetv1-12-onnx-detector-only-1"},
         ),
     ) as writer:

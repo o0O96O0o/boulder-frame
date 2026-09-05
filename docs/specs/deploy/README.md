@@ -7,4 +7,4 @@ not define or provision those services.
 ## Documents
 
 - [Compose Runtime](compose-runtime.md): module services, networks, volumes, environment propagation,
-  startup ordering, external dependencies, and drained `w0.2.2` pipeline cutover/cache isolation.
+  startup ordering, external dependencies, and drained `w0.2.3` pipeline cutover/cache isolation.

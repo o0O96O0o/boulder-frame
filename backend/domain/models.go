@@ -349,11 +349,15 @@ func NewJobConfig(source uuid.UUID, selection TargetSelection, output OutputSett
 		SourceAssetID: source, TargetSelection: selection, Output: output,
 		PipelineVersion: pipeline, ModelVersion: model,
 		Planner: map[string]any{
-			"controller":            "deterministic-v2",
+			"controller":            "deterministic-v3",
 			"scale_enter_fraction":  0.05,
 			"scale_exit_fraction":   0.02,
 			"center_enter_fraction": 0.01,
 			"center_exit_fraction":  0.004,
+			"zoom_max_speed":        0.5,
+			"zoom_max_acceleration": 1.0,
+			"pan_max_speed":         0.25,
+			"pan_max_acceleration":  0.5,
 		},
 	}, nil
 }
