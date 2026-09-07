@@ -1,17 +1,18 @@
-import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
+import { loadEnv } from 'vite'
 import { defineConfig } from 'vitest/config'
 
 function loadFrontendConfig(mode: string) {
-  const filename = mode === 'development' ? 'config.dev.json' : 'config.json'
-  const path = fileURLToPath(new URL(`./conf/${filename}`, import.meta.url))
-  const source = readFileSync(path, 'utf8').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, key: string) => process.env[key] ?? '')
-  const config = JSON.parse(source) as { api_base_url?: string; max_upload_bytes?: number }
-  if (!config.api_base_url || !config.max_upload_bytes) throw new Error(`frontend configuration is incomplete: ${path}`)
-  return config
+  const env = loadEnv(mode, fileURLToPath(new URL('..', import.meta.url)), ['API_BASE_URL', 'MAX_UPLOAD_BYTES'])
+  const apiBaseUrl = env.API_BASE_URL || '/'
+  const maxUploadBytes = Number(env.MAX_UPLOAD_BYTES || '2147483648')
+  if (!Number.isSafeInteger(maxUploadBytes) || maxUploadBytes <= 0) {
+    throw new Error('MAX_UPLOAD_BYTES must be a positive safe integer')
+  }
+  return { api_base_url: apiBaseUrl, max_upload_bytes: maxUploadBytes }
 }
 
 export default defineConfig(({ mode }) => ({

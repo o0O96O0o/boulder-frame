@@ -52,7 +52,6 @@ _LOG_FIELDS = (
     "render_mapping_matching_frames",
     "render_mapping_max_mean_absolute_error",
     "render_mapping_samples",
-    "config_path",
     "configuration",
 )
 

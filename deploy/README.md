@@ -3,6 +3,10 @@
 The Compose file starts only the repository modules. PostgreSQL, Redis, and S3-compatible object
 storage are external dependencies and are not provisioned by this repository.
 
+Runtime configuration comes directly from the root `.env`; no JSON configuration files are generated
+or loaded. See [environment configuration](../docs/dev/development.md#environment-configuration)
+for variable names, native commands, and migration from the removed JSON files.
+
 ```sh
 cp .env.example .env
 ./deploy/bin/local prepare-model

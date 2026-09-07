@@ -1,202 +1,192 @@
+import os
+
 import pytest
 
 from boulder_frame_worker.config import (
-    DEFAULT_DEBUG_MAX_BYTES,
-    DEFAULT_DEBUG_MAX_FRAMES,
-    DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES,
-    DEFAULT_NORMALIZATION_TIMEOUT_SECONDS,
-    DEFAULT_REVIEW_HEIGHT,
-    DEFAULT_REVIEW_MAX_BYTES,
-    DEFAULT_REVIEW_MAX_DURATION_MS,
-    DEFAULT_REVIEW_TIMEOUT_SECONDS,
-    DEFAULT_REVIEW_WIDTH,
     LOCAL_ENV_UNCONFIGURED_MODEL_VERSION,
     UNCONFIGURED_MODEL_VERSION,
     ConfigError,
     WorkerConfig,
 )
-from boulder_frame_worker.models import MODEL_VERSION
 
 
-def test_config_uses_safe_defaults() -> None:
-    config = WorkerConfig.from_mapping({})
-
-    assert config.pipeline_version == "development"
-    assert config.model_version == UNCONFIGURED_MODEL_VERSION
-    assert config.lease_seconds == 300
-    assert not config.retain_debug_artifacts
-    assert not config.debug_capture
-    assert not config.debug_visual_capture
-    assert config.debug_require_private_storage
-    assert config.debug_max_frames == DEFAULT_DEBUG_MAX_FRAMES
-    assert config.debug_max_bytes == DEFAULT_DEBUG_MAX_BYTES
-    assert config.review_max_duration_ms == DEFAULT_REVIEW_MAX_DURATION_MS
-    assert config.review_width == DEFAULT_REVIEW_WIDTH
-    assert config.review_height == DEFAULT_REVIEW_HEIGHT
-    assert config.review_max_bytes == DEFAULT_REVIEW_MAX_BYTES
-    assert config.review_timeout_seconds == DEFAULT_REVIEW_TIMEOUT_SECONDS
-    assert config.normalization_max_source_bytes == DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
-    assert config.normalization_timeout_seconds == DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch):
+    monkeypatch.setattr(os, "environ", {})
 
 
-def test_config_normalizes_local_env_unconfigured_model_sentinel() -> None:
-    config = WorkerConfig.from_mapping({"model_version": LOCAL_ENV_UNCONFIGURED_MODEL_VERSION})
-
-    assert config.model_version == UNCONFIGURED_MODEL_VERSION
-
-
-def test_config_preserves_explicit_baseline_model_configuration(tmp_path) -> None:
-    config = WorkerConfig.from_mapping(
-        {"model_version": MODEL_VERSION, "model_dir": str(tmp_path / "models")}
-    )
-
-    assert config.model_version == MODEL_VERSION
-    assert config.model_dir == tmp_path / "models"
-
-
-@pytest.mark.parametrize("value", ["0", "-1", "nope"])
-def test_config_rejects_invalid_lease(value: str) -> None:
-    with pytest.raises(ConfigError, match="lease_seconds"):
-        WorkerConfig.from_mapping({"lease_seconds": value})
+@pytest.fixture
+def runtime_environment(monkeypatch):
+    for name, value in {
+        "DATABASE_URL": "postgresql://db/app",
+        "REDIS_URL": "redis://redis/0",
+        "S3_ENDPOINT": "http://storage:9000",
+        "S3_PRESIGN_ENDPOINT": "http://storage:9000",
+        "S3_REGION": "us-east-1",
+        "S3_BUCKET": "boulder-frame",
+        "S3_ACCESS_KEY": "key",
+        "S3_SECRET_KEY": "secret",
+        "WORKER_ID": "worker-1",
+    }.items():
+        monkeypatch.setenv(name, value)
 
 
-def test_config_rejects_invalid_boolean() -> None:
-    with pytest.raises(ConfigError, match="retain_debug_artifacts"):
-        WorkerConfig.from_mapping({"retain_debug_artifacts": "sometimes"})
+def test_config_normalizes_local_env_unconfigured_model_sentinel(monkeypatch) -> None:
+    monkeypatch.setenv("MODEL_VERSION", LOCAL_ENV_UNCONFIGURED_MODEL_VERSION)
+
+    assert WorkerConfig.from_env().model_version == UNCONFIGURED_MODEL_VERSION
 
 
-def test_config_parses_debug_capture_and_visual_capture_separately_from_scratch_retention() -> None:
-    config = WorkerConfig.from_mapping(
-        {"debug_capture": "true", "debug_require_private_storage": "false"}
-    )
+@pytest.mark.parametrize(
+    "name",
+    [
+        "PIPELINE_VERSION",
+        "MODEL_VERSION",
+        "WORKER_STREAM_NAME",
+        "WORKER_STREAM_GROUP",
+    ],
+)
+def test_config_rejects_empty_identifiers(monkeypatch, name: str) -> None:
+    monkeypatch.setenv(name, "   ")
+
+    with pytest.raises(ConfigError, match=name):
+        WorkerConfig.from_env()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "WORKER_LEASE_SECONDS",
+        "WORKER_HEARTBEAT_SECONDS",
+        "WORKER_CONCURRENCY",
+        "WORKER_STREAM_RECLAIM_IDLE_MS",
+        "WORKER_STREAM_BLOCK_MS",
+        "WORKER_DEBUG_MAX_FRAMES",
+        "WORKER_DEBUG_MAX_BYTES",
+        "WORKER_REVIEW_MAX_DURATION_MS",
+        "WORKER_REVIEW_WIDTH",
+        "WORKER_REVIEW_HEIGHT",
+        "WORKER_REVIEW_MAX_BYTES",
+        "WORKER_REVIEW_TIMEOUT_SECONDS",
+        "WORKER_NORMALIZATION_MAX_SOURCE_BYTES",
+        "WORKER_NORMALIZATION_TIMEOUT_SECONDS",
+    ],
+)
+@pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
+def test_config_rejects_invalid_positive_integers(monkeypatch, name: str, value: str) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError, match=name):
+        WorkerConfig.from_env()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "S3_FORCE_PATH_STYLE",
+        "WORKER_RETAIN_DEBUG_ARTIFACTS",
+        "WORKER_DEBUG_CAPTURE",
+        "WORKER_DEBUG_VISUAL_CAPTURE",
+        "WORKER_DEBUG_REQUIRE_PRIVATE_STORAGE",
+    ],
+)
+def test_config_rejects_invalid_boolean(monkeypatch, name: str) -> None:
+    monkeypatch.setenv(name, "sometimes")
+
+    with pytest.raises(ConfigError, match=name):
+        WorkerConfig.from_env()
+
+
+def test_config_keeps_debug_capture_separate_from_scratch_retention(monkeypatch) -> None:
+    monkeypatch.setenv("WORKER_DEBUG_CAPTURE", "true")
+    monkeypatch.setenv("WORKER_DEBUG_REQUIRE_PRIVATE_STORAGE", "false")
+    config = WorkerConfig.from_env()
 
     assert config.debug_capture
     assert not config.debug_visual_capture
     assert not config.debug_require_private_storage
     assert not config.retain_debug_artifacts
 
-    with pytest.raises(ConfigError, match="debug_capture"):
-        WorkerConfig.from_mapping({"debug_capture": "sometimes"})
-    with pytest.raises(ConfigError, match="debug_visual_capture"):
-        WorkerConfig.from_mapping({"debug_visual_capture": "sometimes"})
-    with pytest.raises(ConfigError, match="requires debug_capture"):
-        WorkerConfig.from_mapping({"debug_visual_capture": True})
-    assert WorkerConfig.from_mapping(
-        {"debug_capture": True, "debug_visual_capture": True}
-    ).debug_visual_capture
-    with pytest.raises(ConfigError, match="debug_require_private_storage"):
-        WorkerConfig.from_mapping({"debug_require_private_storage": "sometimes"})
 
+def test_visual_capture_requires_debug_capture(monkeypatch) -> None:
+    monkeypatch.setenv("WORKER_DEBUG_VISUAL_CAPTURE", "true")
+    with pytest.raises(ConfigError, match="requires WORKER_DEBUG_CAPTURE"):
+        WorkerConfig.from_env()
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "debug_max_frames",
-        "debug_max_bytes",
-        "review_max_duration_ms",
-        "review_width",
-        "review_height",
-        "review_max_bytes",
-        "review_timeout_seconds",
-        "normalization_max_source_bytes",
-        "normalization_timeout_seconds",
-    ],
-)
-@pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
-def test_config_rejects_invalid_debug_limits(name: str, value: str) -> None:
-    with pytest.raises(ConfigError, match=name):
-        WorkerConfig.from_mapping({name: value})
-
-
-def test_config_parses_debug_limits_separately_from_capture() -> None:
-    config = WorkerConfig.from_mapping(
-        {
-            "debug_max_frames": "25",
-            "debug_max_bytes": "4096",
-            "review_max_duration_ms": "1000",
-            "review_width": "320",
-            "review_height": "180",
-            "review_max_bytes": "8192",
-            "review_timeout_seconds": "30",
-            "normalization_max_source_bytes": "8192",
-            "normalization_timeout_seconds": "60",
-        }
-    )
-
-    assert not config.debug_capture
-    assert config.debug_max_frames == 25
-    assert config.debug_max_bytes == 4096
-    assert config.review_max_duration_ms == 1000
-    assert (config.review_width, config.review_height) == (320, 180)
-    assert config.review_max_bytes == 8192
-    assert config.review_timeout_seconds == 30
-    assert config.normalization_max_source_bytes == 8192
-    assert config.normalization_timeout_seconds == 60
+    monkeypatch.setenv("WORKER_DEBUG_CAPTURE", "true")
+    assert WorkerConfig.from_env().debug_visual_capture
 
 
 def test_runtime_config_requires_adapter_urls() -> None:
     with pytest.raises(ConfigError, match="database_url"):
-        WorkerConfig.from_mapping({}).validate_runtime()
+        WorkerConfig.from_env().validate_runtime()
 
 
-def test_runtime_config_requires_object_storage() -> None:
-    config = WorkerConfig.from_mapping(
-        {"database_url": "postgresql://db/app", "redis_url": "redis://redis/0"}
-    )
-
-    with pytest.raises(ConfigError, match="s3_endpoint"):
-        config.validate_runtime()
-
-
-def test_runtime_config_rejects_invalid_s3_url() -> None:
-    config = WorkerConfig.from_mapping({**_runtime_values(), "s3_endpoint": "s3://bucket"})
+def test_runtime_config_requires_object_storage(monkeypatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://db/app")
+    monkeypatch.setenv("REDIS_URL", "redis://redis/0")
 
     with pytest.raises(ConfigError, match="s3_endpoint"):
-        config.validate_runtime()
+        WorkerConfig.from_env().validate_runtime()
 
 
-def test_config_rejects_heartbeat_longer_than_lease() -> None:
-    with pytest.raises(ConfigError, match="heartbeat_seconds"):
-        WorkerConfig.from_mapping({"lease_seconds": 10, "heartbeat_seconds": 10})
+@pytest.mark.parametrize(
+    "name, value, match",
+    [
+        ("S3_ENDPOINT", "s3://bucket", "s3_endpoint"),
+        ("S3_PRESIGN_ENDPOINT", "/bucket", "s3_presign_endpoint"),
+        ("DATABASE_URL", "http://db", "database_url"),
+        ("REDIS_URL", "http://redis", "redis_url"),
+    ],
+)
+def test_runtime_config_rejects_invalid_url_scheme(
+    monkeypatch, runtime_environment, name: str, value: str, match: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError, match=match):
+        WorkerConfig.from_env().validate_runtime()
 
 
-def test_runtime_config_rejects_invalid_url_scheme() -> None:
-    config = WorkerConfig.from_mapping({**_runtime_values(), "database_url": "http://db"})
-    with pytest.raises(ConfigError, match="database_url"):
-        config.validate_runtime()
+def test_config_rejects_heartbeat_as_long_as_lease(monkeypatch) -> None:
+    monkeypatch.setenv("WORKER_LEASE_SECONDS", "10")
+    monkeypatch.setenv("WORKER_HEARTBEAT_SECONDS", "10")
+
+    with pytest.raises(ConfigError, match="WORKER_HEARTBEAT_SECONDS"):
+        WorkerConfig.from_env()
 
 
-def test_runtime_config_requires_worker_id_and_defaults_consumer_to_it() -> None:
-    config = WorkerConfig.from_mapping(_runtime_values())
+def test_runtime_config_requires_worker_id_and_defaults_consumer_to_it(
+    monkeypatch, runtime_environment
+) -> None:
+    monkeypatch.delenv("WORKER_ID")
     with pytest.raises(ConfigError, match="worker_id"):
-        config.validate_runtime()
+        WorkerConfig.from_env().validate_runtime()
 
-    config = WorkerConfig.from_mapping({**_runtime_values(), "worker_id": "worker-1"})
+    monkeypatch.setenv("WORKER_ID", "worker-1")
+    config = WorkerConfig.from_env()
     config.validate_runtime()
     assert config.stream_consumer == "worker-1"
 
 
-@pytest.mark.parametrize(
-    "values, match",
-    [
-        ({"stream_reclaim_idle_ms": 299_999}, "stream_reclaim_idle_ms"),
-    ],
-)
-def test_runtime_config_requires_safe_stream_lease_timing(values, match: str) -> None:
-    config = WorkerConfig.from_mapping({**_runtime_values(), "worker_id": "worker-1", **values})
+def test_reclaim_timing_tracks_lease_unless_explicitly_configured(
+    monkeypatch, runtime_environment
+) -> None:
+    monkeypatch.setenv("WORKER_LEASE_SECONDS", "600")
+    config = WorkerConfig.from_env()
+    config.validate_runtime()
+    assert config.stream_reclaim_idle_ms == 600_000
 
-    with pytest.raises(ConfigError, match=match):
-        config.validate_runtime()
+    monkeypatch.setenv("WORKER_STREAM_RECLAIM_IDLE_MS", "599999")
+    with pytest.raises(ConfigError, match="stream_reclaim_idle_ms"):
+        WorkerConfig.from_env().validate_runtime()
 
 
-def _runtime_values() -> dict[str, object]:
-    return {
-        "database_url": "postgresql://db/app",
-        "redis_url": "redis://redis/0",
-        "s3_endpoint": "http://storage:9000",
-        "s3_presign_endpoint": "http://storage:9000",
-        "s3_region": "us-east-1",
-        "s3_bucket": "boulder-frame",
-        "s3_access_key": "key",
-        "s3_secret_key": "secret",
-    }
+def test_environment_credentials_are_literal(monkeypatch, runtime_environment) -> None:
+    secret = 'quoted"value\\with\n${OTHER_SECRET}'
+    monkeypatch.setenv("S3_SECRET_KEY", secret)
+    monkeypatch.setenv("OTHER_SECRET", "must-not-expand")
+
+    config = WorkerConfig.from_env()
+    config.validate_runtime()
+    assert config.s3_secret_key == secret

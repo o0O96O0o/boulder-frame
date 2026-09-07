@@ -1,11 +1,8 @@
-"""JSON configuration with no import-time dependency checks."""
+"""Typed environment configuration with no import-time dependency checks."""
 
 from __future__ import annotations
 
-import json
 import os
-import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,9 +25,9 @@ DEFAULT_REVIEW_MAX_BYTES = 250 * 1024 * 1024
 DEFAULT_REVIEW_TIMEOUT_SECONDS = 10 * 60
 
 
-def _positive_int(value: str, name: str) -> int:
+def _positive_int(name: str, default: int) -> int:
     try:
-        parsed = int(value)
+        parsed = int(os.environ.get(name, str(default)))
     except ValueError as error:
         raise ConfigError(f"{name} must be an integer") from error
     if parsed <= 0:
@@ -38,10 +35,11 @@ def _positive_int(value: str, name: str) -> int:
     return parsed
 
 
-def _boolean(value: str, name: str) -> bool:
-    if value.lower() in {"1", "true", "yes"}:
+def _boolean(name: str, default: bool) -> bool:
+    value = os.environ.get(name, str(default)).lower()
+    if value in {"1", "true", "yes"}:
         return True
-    if value.lower() in {"0", "false", "no"}:
+    if value in {"0", "false", "no"}:
         return False
     raise ConfigError(f"{name} must be true or false")
 
@@ -87,117 +85,78 @@ class WorkerConfig:
     normalization_timeout_seconds: int = DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
 
     @classmethod
-    def from_mapping(cls, values: Mapping[str, object]) -> WorkerConfig:
-        worker = values
-        pipeline_version = str(worker.get("pipeline_version", "development")).strip()
-        model_version = str(worker.get("model_version", UNCONFIGURED_MODEL_VERSION)).strip()
+    def from_env(cls) -> WorkerConfig:
+        pipeline_version = os.environ.get("PIPELINE_VERSION", "development").strip()
+        model_version = os.environ.get("MODEL_VERSION", UNCONFIGURED_MODEL_VERSION).strip()
         if model_version == LOCAL_ENV_UNCONFIGURED_MODEL_VERSION:
             model_version = UNCONFIGURED_MODEL_VERSION
         if not pipeline_version:
-            raise ConfigError("WORKER_PIPELINE_VERSION must not be empty")
+            raise ConfigError("PIPELINE_VERSION must not be empty")
         if not model_version:
-            raise ConfigError("WORKER_MODEL_VERSION must not be empty")
-        scratch_root = Path(worker.get("scratch_root", "/tmp/boulder-frame-worker"))
-        lease_seconds = _positive_int(str(worker.get("lease_seconds", 300)), "lease_seconds")
-        heartbeat_seconds = _positive_int(
-            str(worker.get("heartbeat_seconds", 30)), "heartbeat_seconds"
-        )
+            raise ConfigError("MODEL_VERSION must not be empty")
+        lease_seconds = _positive_int("WORKER_LEASE_SECONDS", 300)
+        heartbeat_seconds = _positive_int("WORKER_HEARTBEAT_SECONDS", 30)
         if heartbeat_seconds >= lease_seconds:
-            raise ConfigError("heartbeat_seconds must be less than lease_seconds")
-        stream_name = str(worker.get("stream_name", "boulder-frame:jobs")).strip()
-        stream_group = str(worker.get("stream_group", "boulder-frame:job-processors")).strip()
-        worker_id = str(worker.get("worker_id", "")).strip()
-        stream_consumer = str(worker.get("stream_consumer", worker_id)).strip()
+            raise ConfigError("WORKER_HEARTBEAT_SECONDS must be less than WORKER_LEASE_SECONDS")
+        stream_name = os.environ.get("WORKER_STREAM_NAME", "boulder-frame:jobs").strip()
+        stream_group = os.environ.get("WORKER_STREAM_GROUP", "boulder-frame:job-processors").strip()
+        worker_id = os.environ.get("WORKER_ID", "").strip()
+        stream_consumer = os.environ.get("WORKER_STREAM_CONSUMER", worker_id).strip()
         if not stream_name:
-            raise ConfigError("stream_name must not be empty")
+            raise ConfigError("WORKER_STREAM_NAME must not be empty")
         if not stream_group:
-            raise ConfigError("stream_group must not be empty")
-        debug_capture = _boolean(str(worker.get("debug_capture", False)), "debug_capture")
-        debug_visual_capture = _boolean(
-            str(worker.get("debug_visual_capture", False)), "debug_visual_capture"
-        )
+            raise ConfigError("WORKER_STREAM_GROUP must not be empty")
+        debug_capture = _boolean("WORKER_DEBUG_CAPTURE", False)
+        debug_visual_capture = _boolean("WORKER_DEBUG_VISUAL_CAPTURE", False)
         if debug_visual_capture and not debug_capture:
-            raise ConfigError("debug_visual_capture requires debug_capture")
+            raise ConfigError("WORKER_DEBUG_VISUAL_CAPTURE requires WORKER_DEBUG_CAPTURE")
         return cls(
             pipeline_version=pipeline_version,
             model_version=model_version,
-            scratch_root=scratch_root,
-            model_dir=Path(worker.get("model_dir") or "/models"),
-            database_url=str(worker.get("database_url", "")).strip(),
-            redis_url=str(worker.get("redis_url", "")).strip(),
-            s3_endpoint=str(worker.get("s3_endpoint", "")).strip(),
-            s3_presign_endpoint=str(worker.get("s3_presign_endpoint", "")).strip(),
-            s3_region=str(worker.get("s3_region", "us-east-1")).strip(),
-            s3_bucket=str(worker.get("s3_bucket", "")).strip(),
-            s3_access_key=str(worker.get("s3_access_key", "")).strip(),
-            s3_secret_key=str(worker.get("s3_secret_key", "")).strip(),
-            s3_use_path_style=_boolean(
-                str(worker.get("s3_use_path_style", False)), "s3_use_path_style"
-            ),
-            ffprobe_bin=str(worker.get("ffprobe_bin", "ffprobe")),
-            ffmpeg_bin=str(worker.get("ffmpeg_bin", "ffmpeg")),
+            scratch_root=Path(os.environ.get("WORKER_SCRATCH_ROOT", "/tmp/boulder-frame-worker")),
+            model_dir=Path(os.environ.get("MODEL_DIR") or "/models"),
+            database_url=os.environ.get("DATABASE_URL", "").strip(),
+            redis_url=os.environ.get("REDIS_URL", "").strip(),
+            s3_endpoint=os.environ.get("S3_ENDPOINT", "").strip(),
+            s3_presign_endpoint=os.environ.get("S3_PRESIGN_ENDPOINT", "").strip(),
+            s3_region=os.environ.get("S3_REGION", "us-east-1").strip(),
+            s3_bucket=os.environ.get("S3_BUCKET", "").strip(),
+            s3_access_key=os.environ.get("S3_ACCESS_KEY", "").strip(),
+            s3_secret_key=os.environ.get("S3_SECRET_KEY", "").strip(),
+            s3_use_path_style=_boolean("S3_FORCE_PATH_STYLE", False),
+            ffprobe_bin=os.environ.get("FFPROBE_BIN", "ffprobe"),
+            ffmpeg_bin=os.environ.get("FFMPEG_BIN", "ffmpeg"),
             lease_seconds=lease_seconds,
             heartbeat_seconds=heartbeat_seconds,
-            concurrency=_positive_int(str(worker.get("concurrency", 1)), "concurrency"),
+            concurrency=_positive_int("WORKER_CONCURRENCY", 1),
             worker_id=worker_id,
             stream_name=stream_name,
             stream_group=stream_group,
             stream_consumer=stream_consumer,
             stream_reclaim_idle_ms=_positive_int(
-                str(worker.get("stream_reclaim_idle_ms", lease_seconds * 1000)),
-                "stream_reclaim_idle_ms",
+                "WORKER_STREAM_RECLAIM_IDLE_MS", lease_seconds * 1000
             ),
-            stream_block_ms=_positive_int(
-                str(worker.get("stream_block_ms", 1000)), "stream_block_ms"
-            ),
-            retain_debug_artifacts=_boolean(
-                str(worker.get("retain_debug_artifacts", False)), "retain_debug_artifacts"
-            ),
+            stream_block_ms=_positive_int("WORKER_STREAM_BLOCK_MS", 1000),
+            retain_debug_artifacts=_boolean("WORKER_RETAIN_DEBUG_ARTIFACTS", False),
             debug_capture=debug_capture,
             debug_visual_capture=debug_visual_capture,
-            debug_require_private_storage=_boolean(
-                str(worker.get("debug_require_private_storage", True)),
-                "debug_require_private_storage",
-            ),
-            debug_max_frames=_positive_int(
-                str(worker.get("debug_max_frames", DEFAULT_DEBUG_MAX_FRAMES)), "debug_max_frames"
-            ),
-            debug_max_bytes=_positive_int(
-                str(worker.get("debug_max_bytes", DEFAULT_DEBUG_MAX_BYTES)), "debug_max_bytes"
-            ),
+            debug_require_private_storage=_boolean("WORKER_DEBUG_REQUIRE_PRIVATE_STORAGE", True),
+            debug_max_frames=_positive_int("WORKER_DEBUG_MAX_FRAMES", DEFAULT_DEBUG_MAX_FRAMES),
+            debug_max_bytes=_positive_int("WORKER_DEBUG_MAX_BYTES", DEFAULT_DEBUG_MAX_BYTES),
             review_max_duration_ms=_positive_int(
-                str(worker.get("review_max_duration_ms", DEFAULT_REVIEW_MAX_DURATION_MS)),
-                "review_max_duration_ms",
+                "WORKER_REVIEW_MAX_DURATION_MS", DEFAULT_REVIEW_MAX_DURATION_MS
             ),
-            review_width=_positive_int(
-                str(worker.get("review_width", DEFAULT_REVIEW_WIDTH)), "review_width"
-            ),
-            review_height=_positive_int(
-                str(worker.get("review_height", DEFAULT_REVIEW_HEIGHT)), "review_height"
-            ),
-            review_max_bytes=_positive_int(
-                str(worker.get("review_max_bytes", DEFAULT_REVIEW_MAX_BYTES)),
-                "review_max_bytes",
-            ),
+            review_width=_positive_int("WORKER_REVIEW_WIDTH", DEFAULT_REVIEW_WIDTH),
+            review_height=_positive_int("WORKER_REVIEW_HEIGHT", DEFAULT_REVIEW_HEIGHT),
+            review_max_bytes=_positive_int("WORKER_REVIEW_MAX_BYTES", DEFAULT_REVIEW_MAX_BYTES),
             review_timeout_seconds=_positive_int(
-                str(worker.get("review_timeout_seconds", DEFAULT_REVIEW_TIMEOUT_SECONDS)),
-                "review_timeout_seconds",
+                "WORKER_REVIEW_TIMEOUT_SECONDS", DEFAULT_REVIEW_TIMEOUT_SECONDS
             ),
             normalization_max_source_bytes=_positive_int(
-                str(
-                    worker.get(
-                        "normalization_max_source_bytes", DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
-                    )
-                ),
-                "normalization_max_source_bytes",
+                "WORKER_NORMALIZATION_MAX_SOURCE_BYTES", DEFAULT_NORMALIZATION_MAX_SOURCE_BYTES
             ),
             normalization_timeout_seconds=_positive_int(
-                str(
-                    worker.get(
-                        "normalization_timeout_seconds", DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
-                    )
-                ),
-                "normalization_timeout_seconds",
+                "WORKER_NORMALIZATION_TIMEOUT_SECONDS", DEFAULT_NORMALIZATION_TIMEOUT_SECONDS
             ),
         )
 
@@ -231,19 +190,3 @@ class WorkerConfig:
             raise ConfigError("worker_id is required for --serve")
         if self.stream_reclaim_idle_ms < self.lease_seconds * 1000:
             raise ConfigError("stream_reclaim_idle_ms must be at least lease_seconds * 1000")
-
-    @classmethod
-    def from_file(cls, path: str | Path) -> WorkerConfig:
-        try:
-            source = Path(path).read_text()
-            source = re.sub(
-                r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
-                lambda match: os.environ.get(match.group(1), ""),
-                source,
-            )
-            values = json.loads(source)
-        except (OSError, json.JSONDecodeError) as error:
-            raise ConfigError(f"could not read configuration {path}: {error}") from error
-        if not isinstance(values, Mapping):
-            raise ConfigError("configuration must be an object")
-        return cls.from_mapping(values)

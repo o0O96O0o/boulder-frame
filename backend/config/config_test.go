@@ -1,32 +1,70 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRejectsMissingDependencies(t *testing.T) {
-	path := writeConfig(t, `{"signed_url_ttl":"15m","max_upload_bytes":1}`)
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected missing configuration error")
+	for _, name := range []string{"DATABASE_URL", "REDIS_URL", "S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY"} {
+		t.Run(name, func(t *testing.T) {
+			setConfigEnv(t)
+			t.Setenv(name, "")
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("Load() error = %v, want missing %s", err, name)
+			}
+		})
 	}
 }
 
-func TestLoadParsesOverrides(t *testing.T) {
-	path := writeConfig(t, `{"http_addr":":9090","database_url":"postgres://localhost/db","redis_url":"redis://localhost:6379","s3_endpoint":"http://localhost:9000","s3_presign_endpoint":"http://localhost:9000","s3_region":"us-east-1","s3_bucket":"boulder-frame","s3_access_key":"key","s3_secret_key":"secret","s3_use_path_style":false,"signed_url_ttl":"2m","max_upload_bytes":1234,"pipeline_version":"test","model_version":"test","development_owner":"test"}`)
-	c, err := Load(path)
+func TestLoadParsesEnvironmentTypes(t *testing.T) {
+	setConfigEnv(t)
+	t.Setenv("S3_FORCE_PATH_STYLE", "false")
+	t.Setenv("SIGNED_URL_TTL", "2m")
+	t.Setenv("MAX_UPLOAD_BYTES", "1234")
+	c, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.HTTPAddr != ":9090" || c.URLTTL.String() != "2m0s" || c.MaxUploadBytes != 1234 || c.S3UsePathStyle {
-		t.Fatalf("unexpected overrides: %+v", c)
+	if c.URLTTL != 2*time.Minute || c.MaxUploadBytes != 1234 || c.S3UsePathStyle {
+		t.Fatalf("unexpected parsed values: TTL=%v, max upload=%d, path style=%v", c.URLTTL, c.MaxUploadBytes, c.S3UsePathStyle)
+	}
+}
+
+func TestLoadRejectsMalformedEnvironment(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"S3_FORCE_PATH_STYLE", "not-a-bool"},
+		{"SIGNED_URL_TTL", "15"},
+		{"SIGNED_URL_TTL", "0s"},
+		{"SIGNED_URL_TTL", "-1m"},
+		{"MAX_UPLOAD_BYTES", "not-an-integer"},
+		{"MAX_UPLOAD_BYTES", "1.5"},
+		{"MAX_UPLOAD_BYTES", "9223372036854775808"},
+		{"MAX_UPLOAD_BYTES", "0"},
+		{"MAX_UPLOAD_BYTES", "-1"},
+		{"DATABASE_URL", "://invalid"},
+		{"REDIS_URL", "redis://%zz"},
+		{"S3_ENDPOINT", "localhost"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/"+tc.value, func(t *testing.T) {
+			setConfigEnv(t)
+			t.Setenv(tc.name, tc.value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.name) {
+				t.Fatalf("Load() error = %v, want invalid %s", err, tc.name)
+			}
+		})
 	}
 }
 
 func TestLoadNormalizesLocalEnvUnconfiguredModelSentinel(t *testing.T) {
-	path := writeConfig(t, `{"database_url":"postgres://localhost/db","redis_url":"redis://localhost:6379","s3_endpoint":"http://localhost:9000","s3_presign_endpoint":"http://localhost:9000","s3_region":"us-east-1","s3_bucket":"boulder-frame","s3_access_key":"key","s3_secret_key":"secret","signed_url_ttl":"2m","max_upload_bytes":1234,"model_version":"unset-until-pinned"}`)
-	c, err := Load(path)
+	setConfigEnv(t)
+	t.Setenv("MODEL_VERSION", "unset-until-pinned")
+	c, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,60 +74,27 @@ func TestLoadNormalizesLocalEnvUnconfiguredModelSentinel(t *testing.T) {
 }
 
 func TestLoadDetectionSampleFPS(t *testing.T) {
-	base := `{"database_url":"postgres://localhost/db","redis_url":"redis://localhost:6379","s3_endpoint":"http://localhost:9000","s3_access_key":"key","s3_secret_key":"secret","signed_url_ttl":"2m","max_upload_bytes":1234`
-	cases := []struct {
-		name    string
-		field   string
-		want    float64
-		wantErr bool
-	}{
-		{"absent defaults to ten", "", 10, false},
-		{"zero means every frame", `,"detection_sample_fps":0`, 0, false},
-		{"fractional rate", `,"detection_sample_fps":12.5`, 12.5, false},
-		{"upper boundary", `,"detection_sample_fps":1000`, 1000, false},
-		{"negative rate", `,"detection_sample_fps":-1`, 0, true},
-		{"over upper boundary", `,"detection_sample_fps":1000.01`, 0, true},
-		{"not a number", `,"detection_sample_fps":"NaN"`, 0, true},
-		{"infinity", `,"detection_sample_fps":"Infinity"`, 0, true},
-		{"overflow", `,"detection_sample_fps":1e999`, 0, true},
-		{"null", `,"detection_sample_fps":null`, 0, true},
-		{"boolean", `,"detection_sample_fps":true`, 0, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := Load(writeConfig(t, base+tc.field+"}"))
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Load() error = %v, wantErr %v", err, tc.wantErr)
-			}
-			if err == nil && cfg.DetectionSampleFPS != tc.want {
-				t.Fatalf("detection sample rate = %v, want %v", cfg.DetectionSampleFPS, tc.want)
-			}
-		})
-	}
-}
-
-func TestLoadDetectionSampleFPSEnvironment(t *testing.T) {
-	template := `{"database_url":"postgres://localhost/db","redis_url":"redis://localhost:6379","s3_endpoint":"http://localhost:9000","s3_access_key":"key","s3_secret_key":"secret","signed_url_ttl":"2m","max_upload_bytes":1234,"detection_sample_fps":"${DETECTION_SAMPLE_FPS}"}`
 	cases := []struct {
 		name    string
 		value   string
 		want    float64
 		wantErr bool
 	}{
-		{"missing env", "", 10, false},
-		{"every frame", "0", 0, false},
-		{"fractional env", "7.5", 7.5, false},
-		{"invalid env", "not-a-rate", 0, true},
+		{"zero means every frame", "0", 0, false},
+		{"fractional rate", "12.5", 12.5, false},
+		{"upper boundary", "1000", 1000, false},
+		{"negative rate", "-1", 0, true},
+		{"over upper boundary", "1000.01", 0, true},
+		{"not a number", "NaN", 0, true},
+		{"infinity", "Infinity", 0, true},
+		{"overflow", "1e999", 0, true},
+		{"invalid number", "not-a-rate", 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			setConfigEnv(t)
 			t.Setenv("DETECTION_SAMPLE_FPS", tc.value)
-			if tc.value == "" {
-				if err := os.Unsetenv("DETECTION_SAMPLE_FPS"); err != nil {
-					t.Fatal(err)
-				}
-			}
-			cfg, err := Load(writeConfig(t, template))
+			cfg, err := Load()
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("Load() error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -100,11 +105,27 @@ func TestLoadDetectionSampleFPSEnvironment(t *testing.T) {
 	}
 }
 
-func writeConfig(t *testing.T, contents string) string {
+func setConfigEnv(t *testing.T) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
+	for name, value := range map[string]string{
+		"HTTP_ADDR":            "",
+		"DATABASE_URL":         "postgres://localhost/db",
+		"REDIS_URL":            "redis://localhost:6379",
+		"S3_ENDPOINT":          "http://localhost:9000",
+		"S3_PRESIGN_ENDPOINT":  "",
+		"S3_REGION":            "",
+		"S3_BUCKET":            "",
+		"S3_ACCESS_KEY":        "key",
+		"S3_SECRET_KEY":        "secret",
+		"S3_FORCE_PATH_STYLE":  "",
+		"SIGNED_URL_TTL":       "",
+		"MAX_UPLOAD_BYTES":     "",
+		"PIPELINE_VERSION":     "",
+		"DETECTION_SAMPLE_FPS": "",
+		"MODEL_VERSION":        "",
+		"DEVELOPMENT_OWNER":    "",
+		"WEB_BASE_URL":         "",
+	} {
+		t.Setenv(name, value)
 	}
-	return path
 }

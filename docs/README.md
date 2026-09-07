@@ -9,7 +9,7 @@
 
 ## Development
 
-- [Development](dev/development.md): Docker Compose startup, external dependencies, configurable detection sampling, and drained `w0.2.4` deployment cutover.
+- [Development](dev/development.md): shared environment configuration, Docker Compose startup, external dependencies, configurable detection sampling, and drained `w0.2.4` deployment cutover.
 
 ## References
 

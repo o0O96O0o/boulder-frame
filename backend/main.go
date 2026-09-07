@@ -23,13 +23,12 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	cfg, err := config.Load(configPath(os.Args[1:]))
+	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("configuration loaded",
-		"config_path", cfg.SourcePath,
 		"http_addr", cfg.HTTPAddr,
 		"s3_bucket", cfg.S3Bucket,
 		"s3_region", cfg.S3Region,
@@ -81,18 +80,6 @@ func main() {
 		logger.Error("graceful shutdown failed", "error", err)
 		os.Exit(1)
 	}
-}
-
-func configPath(args []string) string {
-	for index, arg := range args {
-		if arg == "--config" && index+1 < len(args) {
-			return args[index+1]
-		}
-		if len(arg) > len("--config=") && arg[:len("--config=")] == "--config=" {
-			return arg[len("--config="):]
-		}
-	}
-	return ""
 }
 
 func hasArgument(args []string, expected string) bool {

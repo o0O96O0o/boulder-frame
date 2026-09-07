@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from 'vitest'
 import { api, ApiError, sourceContentType } from './api'
 import { evaluationResponseFixture } from './fixtures/evaluation'
 
+vi.mock('./config', () => ({
+  appConfig: { api_base_url: '/', max_upload_bytes: 2147483648 },
+}))
+
 describe('API client contract', () => {
   it('uses QuickTime MIME type for iCloud MOV files', () => {
     expect(sourceContentType(new File(['video'], 'session.MOV', { type: '' }))).toBe('video/quicktime')

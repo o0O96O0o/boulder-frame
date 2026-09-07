@@ -2,8 +2,8 @@
 
 ## Base URL
 
-The API is REST over JSON under `/api/v1`. The browser uses `api_base_url` from
-`frontend/conf/config.json` or `frontend/conf/config.dev.json` to select the API origin.
+The API is REST over JSON under `/api/v1`. The browser uses `API_BASE_URL` from the
+build/dev-server environment to select the API origin (default `/`).
 
 The initial implementation uses the fixed development owner `development-owner`. This is not authentication.
 

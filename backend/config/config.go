@@ -1,17 +1,16 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 )
 
 type Config struct {
-	SourcePath         string
 	HTTPAddr           string
 	DatabaseURL        string
 	RedisURL           string
@@ -36,80 +35,45 @@ const (
 	unconfiguredModelVersion         = "unconfigured"
 )
 
-func Load(paths ...string) (Config, error) {
-	path := "conf/config.json"
-	if len(paths) > 0 && paths[0] != "" {
-		path = paths[0]
-	} else if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		path = "backend/conf/config.json"
-	}
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("read configuration %q: %w", path, err)
-	}
-	var raw struct {
-		HTTPAddr           string       `json:"http_addr"`
-		DatabaseURL        string       `json:"database_url"`
-		RedisURL           string       `json:"redis_url"`
-		S3Endpoint         string       `json:"s3_endpoint"`
-		S3PresignEndpoint  string       `json:"s3_presign_endpoint"`
-		S3Region           string       `json:"s3_region"`
-		S3Bucket           string       `json:"s3_bucket"`
-		S3AccessKey        string       `json:"s3_access_key"`
-		S3SecretKey        string       `json:"s3_secret_key"`
-		S3UsePathStyle     bool         `json:"s3_use_path_style"`
-		SignedURLTTL       string       `json:"signed_url_ttl"`
-		MaxUploadBytes     int64        `json:"max_upload_bytes"`
-		PipelineVersion    string       `json:"pipeline_version"`
-		DetectionSampleFPS *json.Number `json:"detection_sample_fps"`
-		ModelVersion       string       `json:"model_version"`
-		DevelopmentOwner   string       `json:"development_owner"`
-		WebBaseURL         string       `json:"web_base_url"`
-	}
-	defaultDetectionSampleFPS := json.Number("10")
-	raw.DetectionSampleFPS = &defaultDetectionSampleFPS
-	contents = []byte(os.Expand(string(contents), func(name string) string {
-		value := os.Getenv(name)
-		if name == "DETECTION_SAMPLE_FPS" && value == "" {
-			return "10"
-		}
-		return value
-	}))
-	if err := json.Unmarshal(contents, &raw); err != nil {
-		return Config{}, fmt.Errorf("parse configuration %q: %w", path, err)
-	}
-	if raw.DetectionSampleFPS == nil {
-		return Config{}, errors.New("detection_sample_fps must be a finite number between 0 and 1000")
-	}
-	detectionSampleFPS, err := raw.DetectionSampleFPS.Float64()
-	if err != nil || math.IsNaN(detectionSampleFPS) || math.IsInf(detectionSampleFPS, 0) || detectionSampleFPS < 0 || detectionSampleFPS > 1000 {
-		return Config{}, errors.New("detection_sample_fps must be a finite number between 0 and 1000")
-	}
+func Load() (Config, error) {
 	c := Config{
-		SourcePath: path,
-		HTTPAddr:   raw.HTTPAddr, DatabaseURL: raw.DatabaseURL, RedisURL: raw.RedisURL,
-		S3Endpoint: raw.S3Endpoint, S3PresignEndpoint: raw.S3PresignEndpoint,
-		S3Region: raw.S3Region, S3Bucket: raw.S3Bucket, S3AccessKey: raw.S3AccessKey,
-		S3SecretKey: raw.S3SecretKey, S3UsePathStyle: raw.S3UsePathStyle,
-		PipelineVersion: raw.PipelineVersion, ModelVersion: raw.ModelVersion,
-		DetectionSampleFPS: detectionSampleFPS,
-		DevelopmentOwner:   raw.DevelopmentOwner, WebBaseURL: raw.WebBaseURL,
+		HTTPAddr:          envOrDefault("HTTP_ADDR", ":8080"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		RedisURL:          os.Getenv("REDIS_URL"),
+		S3Endpoint:        os.Getenv("S3_ENDPOINT"),
+		S3PresignEndpoint: os.Getenv("S3_PRESIGN_ENDPOINT"),
+		S3Region:          os.Getenv("S3_REGION"),
+		S3Bucket:          os.Getenv("S3_BUCKET"),
+		S3AccessKey:       os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:       os.Getenv("S3_SECRET_KEY"),
+		PipelineVersion:   os.Getenv("PIPELINE_VERSION"),
+		ModelVersion:      os.Getenv("MODEL_VERSION"),
+		DevelopmentOwner:  envOrDefault("DEVELOPMENT_OWNER", "deployment"),
+		WebBaseURL:        os.Getenv("WEB_BASE_URL"),
 	}
 	if c.ModelVersion == localEnvUnconfiguredModelVersion {
 		c.ModelVersion = unconfiguredModelVersion
 	}
-	if c.HTTPAddr == "" {
-		c.HTTPAddr = ":8080"
+	var err error
+	c.S3UsePathStyle, err = strconv.ParseBool(envOrDefault("S3_FORCE_PATH_STYLE", "true"))
+	if err != nil {
+		return Config{}, fmt.Errorf("S3_FORCE_PATH_STYLE must be a boolean: %w", err)
 	}
-	d, err := time.ParseDuration(raw.SignedURLTTL)
-	if err != nil || d <= 0 {
-		return Config{}, fmt.Errorf("signed_url_ttl must be a positive duration: %w", err)
+	c.URLTTL, err = time.ParseDuration(envOrDefault("SIGNED_URL_TTL", "15m"))
+	if err != nil {
+		return Config{}, fmt.Errorf("SIGNED_URL_TTL must be a positive duration: %w", err)
 	}
-	c.URLTTL = d
-	if raw.MaxUploadBytes <= 0 {
-		return Config{}, errors.New("max_upload_bytes must be a positive integer")
+	if c.URLTTL <= 0 {
+		return Config{}, errors.New("SIGNED_URL_TTL must be a positive duration")
 	}
-	c.MaxUploadBytes = raw.MaxUploadBytes
+	c.MaxUploadBytes, err = strconv.ParseInt(envOrDefault("MAX_UPLOAD_BYTES", "2147483648"), 10, 64)
+	if err != nil || c.MaxUploadBytes <= 0 {
+		return Config{}, errors.New("MAX_UPLOAD_BYTES must be a positive integer")
+	}
+	c.DetectionSampleFPS, err = strconv.ParseFloat(envOrDefault("DETECTION_SAMPLE_FPS", "10"), 64)
+	if err != nil || math.IsNaN(c.DetectionSampleFPS) || math.IsInf(c.DetectionSampleFPS, 0) || c.DetectionSampleFPS < 0 || c.DetectionSampleFPS > 1000 {
+		return Config{}, errors.New("DETECTION_SAMPLE_FPS must be a finite number between 0 and 1000")
+	}
 	for name, value := range map[string]string{"DATABASE_URL": c.DatabaseURL, "REDIS_URL": c.RedisURL, "S3_ENDPOINT": c.S3Endpoint, "S3_ACCESS_KEY": c.S3AccessKey, "S3_SECRET_KEY": c.S3SecretKey} {
 		if value == "" {
 			return Config{}, fmt.Errorf("%s is required", name)
@@ -125,4 +89,11 @@ func Load(paths ...string) (Config, error) {
 		return Config{}, errors.New("S3_ENDPOINT must be an absolute URL")
 	}
 	return c, nil
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }

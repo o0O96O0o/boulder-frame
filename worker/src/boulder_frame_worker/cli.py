@@ -21,19 +21,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--serve", action="store_true", help="run the worker process until it receives a signal"
     )
-    parser.add_argument(
-        "--config", default="/workspace/worker/conf/config.json", help="JSON configuration path"
-    )
     options = parser.parse_args(arguments)
     logger = configure_logging()
     try:
-        config = WorkerConfig.from_file(options.config)
+        config = WorkerConfig.from_env()
     except ConfigError as error:
         parser.error(str(error))
     logger.info(
         "configuration loaded",
         extra={
-            "config_path": options.config,
             "configuration": {
                 "pipeline_version": config.pipeline_version,
                 "model_version": config.model_version,

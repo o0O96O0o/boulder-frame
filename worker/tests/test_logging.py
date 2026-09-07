@@ -165,25 +165,3 @@ def test_json_formatter_inherits_stage_correlation_context() -> None:
     assert event["trace-id"] == "trace-42"
     assert event["job_id"] == "job-7"
     assert event["stage"] == "rendering"
-
-
-def test_json_formatter_records_configuration_loading_details() -> None:
-    logger = logging.getLogger("test_json_formatter")
-    record = logger.makeRecord(
-        logger.name,
-        logging.INFO,
-        __file__,
-        0,
-        "configuration loaded",
-        (),
-        None,
-        extra={
-            "config_path": "/workspace/worker/conf/config.json",
-            "configuration": {"model_version": "unconfigured"},
-        },
-    )
-
-    event = json.loads(JsonFormatter().format(record))
-
-    assert event["config_path"] == "/workspace/worker/conf/config.json"
-    assert event["configuration"] == {"model_version": "unconfigured"}

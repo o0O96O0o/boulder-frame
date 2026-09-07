@@ -17,6 +17,41 @@ Keep `.env` out of version control. Configure the external database, Redis Strea
 object-storage bucket separately, including credentials, CORS, and retention policy. The API writes
 to stream `boulder-frame:jobs`; workers consume group `boulder-frame:job-processors`.
 
+### Environment Configuration
+
+The root `.env` is the local configuration source; `.env.example` lists supported settings.
+Compose passes it directly to the backend and worker. Both read typed environment values at startup;
+there are no runtime `conf/config*.json` files or `--config` flags. Restart services after changing
+values. Existing custom JSON values must be moved into `.env` before upgrading.
+
+```mermaid
+flowchart LR
+    Env["Root .env"] --> Compose
+    Compose --> API["Go API environment"]
+    Compose --> Worker["Python worker environment"]
+    Env --> Vite
+    Compose --> Vite
+    Vite --> Browser["Browser: API_BASE_URL and MAX_UPLOAD_BYTES only"]
+```
+
+Shared database, Redis, S3, pipeline, and model settings use the same names in both services.
+`S3_FORCE_PATH_STYLE` now controls both clients. API-specific options include `HTTP_ADDR`,
+`SIGNED_URL_TTL`, `MAX_UPLOAD_BYTES`, `DETECTION_SAMPLE_FPS`, `WEB_BASE_URL`, and `DEVELOPMENT_OWNER`.
+Worker-only options use `WORKER_` plus the uppercase former JSON key, except `worker_id` is
+`WORKER_ID`, and executable paths are `FFMPEG_BIN` and `FFPROBE_BIN`. Model paths use `MODEL_DIR`.
+`APP_ENV` no longer selects a configuration file.
+
+Vite loads the repository-root `.env` (and standard Vite mode/local variants), with existing process
+environment taking precedence. Only `API_BASE_URL` and `MAX_UPLOAD_BYTES` are compiled into browser
+configuration; database and storage credentials are never included. An unset API URL uses `/`;
+an unset upload limit uses 2 GiB. Rebuild the frontend to change these values in a production bundle.
+
+For native backend/worker commands, export the environment first; they do not parse dotenv files.
+If your `.env` is shell-compatible, run `set -a; . ./.env; set +a` from the repository root, then
+`(cd backend && go run .)` or `(cd worker && uv run boulder-frame-worker --check)`.
+For native worker runs, use a writable `WORKER_SCRATCH_ROOT` and a local `MODEL_DIR`.
+Compose keeps `/work` and the existing debug-capture defaults; deployments can override them in `.env`.
+
 When those dependencies run on the Docker host, containers must use
 `host.docker.internal` rather than `localhost` in their URLs. For example, use
 `postgres://user:password@host.docker.internal:5432/database?sslmode=disable`. Compose maps that
@@ -24,7 +59,7 @@ name to Docker's host gateway for the backend and worker. `localhost` from eithe
 to that container, not the host.
 
 The worker requires PostgreSQL and Redis URLs plus a stable `WORKER_ID`; `.env.example` provides a
-local value. Its stream settings include an optional `stream_consumer` override, read block interval,
+local value. Its stream settings include an optional `WORKER_STREAM_CONSUMER` override, read block interval,
 pending-entry reclaim idle time, heartbeat interval, and concurrency. Set unique consumer identities
 for concurrent worker processes. PostgreSQL remains the job-lease authority; Redis consumer-group
 pending state is only delivery coordination.
@@ -68,8 +103,8 @@ The version, fixed controller, thresholds, and motion limits also enter the hash
 For a non-default host artifact directory, set `MODEL_DIR_HOST` both when preparing the artifact and
 in `.env`; Compose mounts it read-only at the in-container `MODEL_DIR` path.
 
-Worker `conf/config.json` and `conf/config.dev.json` set VFR normalization limits:
-`normalization_max_source_bytes` defaults to 1 GiB and `normalization_timeout_seconds` to 1,800.
+Worker `WORKER_NORMALIZATION_MAX_SOURCE_BYTES` sets the VFR normalization source cap (default 1 GiB);
+`WORKER_NORMALIZATION_TIMEOUT_SECONDS` sets its timeout (default 1,800 seconds).
 The API upload ceiling is 2 GiB; the lower VFR cap reserves scratch capacity for the immutable download
 and temporary CFR derivative. Lower either value for a deployment with less disk or processing budget.
 
@@ -134,7 +169,7 @@ outputs, and durable metadata remain in their configured external services.
 
 ## Debug Review Troubleshooting
 
-`debug_capture` is read when the worker starts and affects only jobs processed by that worker after
+`WORKER_DEBUG_CAPTURE` is read when the worker starts and affects only jobs processed by that worker after
 startup. It cannot add review artifacts to an already terminal job. For a job whose evaluation returns
 `{"available":false}`, first confirm that the configured worker processed that exact UUID by finding
 its `task request` and `debug review published` log records. If the latter is instead `debug review

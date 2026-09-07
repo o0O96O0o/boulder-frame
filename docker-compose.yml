@@ -1,7 +1,6 @@
 name: boulder-frame
 
 x-application-environment: &application-environment
-  APP_ENV: ${APP_ENV}
   DATABASE_URL: ${DATABASE_URL}
   REDIS_URL: ${REDIS_URL}
   S3_ENDPOINT: ${S3_ENDPOINT}
@@ -27,6 +26,7 @@ services:
     environment:
       API_BASE_URL: ${API_BASE_URL}
       WEB_BASE_URL: ${WEB_BASE_URL}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-2147483648}
     volumes:
       - ./frontend:/workspace/frontend
       - frontend-node-modules:/workspace/frontend/node_modules
@@ -50,11 +50,13 @@ services:
       context: .
       dockerfile: deploy/docker/backend.Dockerfile
     image: boulder-frame/backend:local
+    env_file: .env
     environment:
       <<: *application-environment
       API_BASE_URL: ${API_BASE_URL}
       WEB_BASE_URL: ${WEB_BASE_URL}
       DETECTION_SAMPLE_FPS: ${DETECTION_SAMPLE_FPS:-10}
+      DEVELOPMENT_OWNER: ${DEVELOPMENT_OWNER:-development-owner}
     volumes:
       - ./backend:/workspace/backend
     ports:
@@ -77,8 +79,14 @@ services:
       context: .
       dockerfile: deploy/docker/worker.Dockerfile
     image: boulder-frame/worker:local
-    environment: *application-environment
-    command: [ "boulder-frame-worker", "--config", "/workspace/worker/conf/config.dev.json", "--serve" ]
+    env_file: .env
+    environment:
+      <<: *application-environment
+      WORKER_SCRATCH_ROOT: ${WORKER_SCRATCH_ROOT:-/work}
+      WORKER_RETAIN_DEBUG_ARTIFACTS: ${WORKER_RETAIN_DEBUG_ARTIFACTS:-true}
+      WORKER_DEBUG_CAPTURE: ${WORKER_DEBUG_CAPTURE:-true}
+      WORKER_DEBUG_VISUAL_CAPTURE: ${WORKER_DEBUG_VISUAL_CAPTURE:-true}
+      WORKER_DEBUG_REQUIRE_PRIVATE_STORAGE: ${WORKER_DEBUG_REQUIRE_PRIVATE_STORAGE:-false}
     volumes:
       - ./worker:/workspace/worker
       - ${MODEL_DIR_HOST:-./worker/models}:${MODEL_DIR:-/models}:ro
