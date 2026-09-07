@@ -86,7 +86,7 @@ func (p *PG) CreateOrGetJob(ctx context.Context, j domain.Job, hash string) (dom
 	var x domain.Job
 	var code, msg sql.NullString
 	var inserted bool
-	err = p.pool.QueryRow(ctx, `INSERT INTO processing_jobs (id,project_id,source_asset_id,state,stage,progress,configuration,configuration_hash) VALUES ($1,$2,$3,'queued','queued',0,$4,$5) ON CONFLICT (project_id,configuration_hash) DO UPDATE SET id=processing_jobs.id RETURNING id,project_id,source_asset_id,state,stage,progress,configuration,output_asset_id,error_code,error_message,created_at,started_at,completed_at,(xmax=0)`, j.ID, j.ProjectID, j.SourceAssetID, b, hash).Scan(&x.ID, &x.ProjectID, &x.SourceAssetID, &x.State, &x.Stage, &x.Progress, &b, &x.OutputAssetID, &code, &msg, &x.CreatedAt, &x.StartedAt, &x.CompletedAt, &inserted)
+	err = p.pool.QueryRow(ctx, `INSERT INTO processing_jobs (id,project_id,source_asset_id,state,stage,progress,configuration,configuration_hash) VALUES ($1,$2,$3,'queued','queued',0,$4,$5) ON CONFLICT (project_id,configuration_hash) DO UPDATE SET id=processing_jobs.id RETURNING id,project_id,source_asset_id,state,stage,progress,configuration,output_asset_id,error_code,error_message,created_at,started_at,completed_at,report,(xmax=0)`, j.ID, j.ProjectID, j.SourceAssetID, b, hash).Scan(&x.ID, &x.ProjectID, &x.SourceAssetID, &x.State, &x.Stage, &x.Progress, &b, &x.OutputAssetID, &code, &msg, &x.CreatedAt, &x.StartedAt, &x.CompletedAt, (*[]byte)(&x.Report), &inserted)
 	if err != nil {
 		return j, false, err
 	}
@@ -105,7 +105,7 @@ func (p *PG) queryJob(ctx context.Context, where string, args ...any) (domain.Jo
 	var x domain.Job
 	var b []byte
 	var code, msg *string
-	err := p.pool.QueryRow(ctx, `SELECT id,project_id,source_asset_id,state,stage,progress,configuration,output_asset_id,error_code,error_message,created_at,started_at,completed_at FROM processing_jobs `+where, args...).Scan(&x.ID, &x.ProjectID, &x.SourceAssetID, &x.State, &x.Stage, &x.Progress, &b, &x.OutputAssetID, &code, &msg, &x.CreatedAt, &x.StartedAt, &x.CompletedAt)
+	err := p.pool.QueryRow(ctx, `SELECT id,project_id,source_asset_id,state,stage,progress,configuration,output_asset_id,error_code,error_message,created_at,started_at,completed_at,report FROM processing_jobs `+where, args...).Scan(&x.ID, &x.ProjectID, &x.SourceAssetID, &x.State, &x.Stage, &x.Progress, &b, &x.OutputAssetID, &code, &msg, &x.CreatedAt, &x.StartedAt, &x.CompletedAt, (*[]byte)(&x.Report))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return x, ErrNotFound
 	}

@@ -1,6 +1,9 @@
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from threading import Event
 from uuid import uuid4
@@ -18,6 +21,7 @@ from boulder_frame_worker.state import (
     JobRecord,
     JobState,
     SourceAsset,
+    utc_now,
 )
 from boulder_frame_worker.worker import Worker
 
@@ -237,7 +241,64 @@ def test_worker_leaves_transient_error_for_queue_retry(tmp_path: Path) -> None:
     assert repository.get(task.job_id).lease_owner is None
 
 
-def test_worker_reclaims_stale_scratch_before_retry(tmp_path: Path) -> None:
+def test_reclaimed_attempt_survives_previous_attempt_cleanup(tmp_path: Path) -> None:
+    worker, repository, task = worker_for(tmp_path)
+    first_started = Event()
+    second_started = Event()
+    finish_first = Event()
+    finish_second = Event()
+    attempts: list[tuple[JobRecord, Path]] = []
+
+    def first_stage(record: JobRecord, scratch: Path) -> None:
+        attempts.append((record, scratch))
+        (scratch / "marker").write_text("first")
+        first_started.set()
+        assert finish_first.wait(5)
+        raise transient(ErrorCode.DATABASE_UNAVAILABLE, "lease renewal interrupted")
+
+    def second_stage(record: JobRecord, scratch: Path) -> None:
+        attempts.append((record, scratch))
+        (scratch / "marker").write_text("second")
+        second_started.set()
+        assert finish_second.wait(5)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(worker.process, task, first_stage, no_op, no_op, no_op)
+        try:
+            assert first_started.wait(5)
+            repository.records[task.job_id] = replace(
+                repository.get(task.job_id),
+                lease_expires_at=utc_now() - timedelta(seconds=1),
+            )
+            second = pool.submit(worker.process, task, second_stage, no_op, no_op, no_op)
+            assert second_started.wait(5)
+            finish_first.set()
+            with pytest.raises(WorkerError) as raised:
+                first.result(timeout=5)
+            assert raised.value.transient
+
+            old_record, old_scratch = attempts[0]
+            new_record, new_scratch = attempts[1]
+            assert repository.get(task.job_id).lease_owner == new_record.lease_owner
+            assert new_record.lease_owner is not None
+            assert repository.renew(task.job_id, new_record.lease_owner, 300)
+            assert old_record.lease_owner is not None
+            assert not repository.renew(task.job_id, old_record.lease_owner, 300)
+            assert not repository.release(task.job_id, old_record.lease_owner)
+            with pytest.raises(ValueError, match="lease"):
+                repository.update(old_record)
+            assert not old_scratch.exists()
+            assert (new_scratch / "marker").read_text() == "second"
+            finish_second.set()
+            assert second.result(timeout=5)
+            assert repository.get(task.job_id).state is JobState.COMPLETED
+            assert not new_scratch.exists()
+        finally:
+            finish_first.set()
+            finish_second.set()
+
+
+def test_worker_ignores_other_attempt_scratch(tmp_path: Path) -> None:
     worker, repository, task = worker_for(tmp_path)
     stale = tmp_path / str(task.job_id)
     stale.mkdir()
@@ -246,7 +307,7 @@ def test_worker_reclaims_stale_scratch_before_retry(tmp_path: Path) -> None:
     assert worker.process(task, no_op, no_op, no_op, no_op)
 
     assert repository.get(task.job_id).state is JobState.COMPLETED
-    assert not stale.exists()
+    assert (stale / "partial-output").read_text() == "stale"
 
 
 def test_worker_redacts_scratch_paths_urls_and_credentials_from_failure_logs(

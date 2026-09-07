@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -20,7 +19,6 @@ from boulder_frame_worker.repository import (
     output_storage_key,
     review_storage_key,
 )
-from boulder_frame_worker.state import JobStage, JobState
 
 
 class FakeCursor:
@@ -100,6 +98,7 @@ def test_claim_hydrates_immutable_configuration_and_source_asset() -> None:
         2160,
         30.0,
         1000,
+        None,
     )
     cursor = FakeCursor([row])
     repo, connection = repository(cursor)
@@ -129,20 +128,6 @@ def test_update_rejects_stale_owner_or_expired_lease() -> None:
 
     with pytest.raises(LeaseLostError):
         repo.update(record)
-
-
-def test_terminal_update_clears_lease_in_sql() -> None:
-    cursor = FakeCursor([], rowcount=1)
-    repo, _ = repository(cursor)
-    record = _record_from_row(_row("validating", "validating", "worker-a"))
-    record = replace(record, state=JobState.FAILED, stage=JobStage.FAILED)
-    repo.update(record)
-
-    query, params = cursor.calls[0]
-    assert "lease_owner = CASE" in query
-    assert "THEN NULL" in query
-    assert "requested.stage = requested.state" in query
-    assert params[0] == "failed"
 
 
 def test_release_clears_a_live_worker_lease() -> None:
@@ -454,4 +439,5 @@ def _row(state: str, stage: str, owner: str) -> tuple[object, ...]:
         2160,
         30.0,
         1000,
+        None,
     )

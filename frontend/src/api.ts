@@ -20,6 +20,8 @@ export interface Job {
   id: string; project_id: string; source_asset_id: string; state: JobState; stage: JobStage; progress: number
   configuration: JobConfiguration; output_asset_id?: string | null; error?: SafeError | null
   created_at: string; started_at?: string | null; completed_at?: string | null
+  /** Opaque worker-produced JSON; null when no report has been stored. */
+  report: unknown
 }
 export type EvaluationPhaseID = 'detection' | 'framing' | 'render'
 export type EvaluationPhaseStatus = 'ready' | 'partial' | 'unavailable' | 'warning'

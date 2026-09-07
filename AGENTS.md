@@ -8,6 +8,7 @@ The W0.2 product is a detector-only virtual camera: it holds the selected athlet
 
 ## Authoritative Documents
 
+- [Roadmap](road-map.md) defines target status and scope boundaries. Before every task, read it to establish what is in scope and out of scope; do not pull in planned or excluded work unless the user explicitly requests it.
 - `docs/architecture/offline-reframing-mvp.md` is the implementation contract and contains the product rationale and algorithm decisions for the approved MVP.
 - `docs/architecture/service-implementation-plan.md` defines the service-by-service implementation sequence, interfaces, dependencies, and verification gates.
 - `docs/dev/development.md` defines Docker Compose startup for repository modules and external dependency configuration.

@@ -83,18 +83,19 @@ type JobError struct {
 	Message string `json:"message"`
 }
 type Job struct {
-	ID            uuid.UUID  `json:"id"`
-	ProjectID     uuid.UUID  `json:"project_id"`
-	SourceAssetID uuid.UUID  `json:"source_asset_id"`
-	State         string     `json:"state"`
-	Stage         string     `json:"stage"`
-	Progress      int        `json:"progress"`
-	Configuration JobConfig  `json:"configuration"`
-	OutputAssetID *uuid.UUID `json:"output_asset_id"`
-	Error         *JobError  `json:"error"`
-	CreatedAt     time.Time  `json:"created_at"`
-	StartedAt     *time.Time `json:"started_at"`
-	CompletedAt   *time.Time `json:"completed_at"`
+	ID            uuid.UUID       `json:"id"`
+	ProjectID     uuid.UUID       `json:"project_id"`
+	SourceAssetID uuid.UUID       `json:"source_asset_id"`
+	State         string          `json:"state"`
+	Stage         string          `json:"stage"`
+	Progress      int             `json:"progress"`
+	Configuration JobConfig       `json:"configuration"`
+	OutputAssetID *uuid.UUID      `json:"output_asset_id"`
+	Error         *JobError       `json:"error"`
+	CreatedAt     time.Time       `json:"created_at"`
+	StartedAt     *time.Time      `json:"started_at"`
+	CompletedAt   *time.Time      `json:"completed_at"`
+	Report        json.RawMessage `json:"report"`
 }
 type Artifact struct {
 	ID        uuid.UUID `json:"id"`

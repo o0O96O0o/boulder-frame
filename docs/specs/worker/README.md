@@ -6,7 +6,7 @@ job state and object storage owns video assets.
 
 ## Documents
 
-- [Runtime and Pipeline](runtime-and-pipeline.md): configuration, task boundary, media validation, cache isolation across version cutovers, and durable processing.
+- [Runtime and Pipeline](runtime-and-pipeline.md): configuration, task boundary, attempt-scoped leases and scratch, opaque JSON processing reports, media validation, cache isolation across version cutovers, and durable processing.
 - [Model Manifest](models.md): W0.2 detector artifact, license, checksum, tensor contract, and provisioning.
 - [Detection and Framing](measurements-and-planner.md): configurable sampled detection, held camera targets, selection association, coordinates, profile targets, hysteresis, timestamp-based speed/acceleration limits, braking/settling, and safety/miss behavior.
 - [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md): bounded private telemetry, gate/settling evidence, immutable motion configuration, and detector-only visual-review contract.

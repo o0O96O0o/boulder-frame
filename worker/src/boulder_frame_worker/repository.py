@@ -147,6 +147,7 @@ class PostgresJobRepository:
                 record.progress,
                 error_code,
                 error_message,
+                json.dumps(record.report) if record.report is not None else None,
                 record.id,
                 record.lease_owner,
             ),
@@ -325,7 +326,7 @@ _RETURNING_COLUMNS = """
     jobs.completed_at, jobs.lease_owner, jobs.lease_expires_at, assets.id, assets.project_id,
     assets.storage_key, assets.upload_state, assets.filename, assets.content_type,
     assets.size_bytes,
-    assets.width, assets.height, assets.frame_rate, assets.duration_ms
+    assets.width, assets.height, assets.frame_rate, assets.duration_ms, jobs.report::text
 """
 
 _CLAIM_SQL = f"""
@@ -364,7 +365,7 @@ _CURRENT_STATE_SQL = "SELECT state FROM processing_jobs WHERE id = %s"
 _UPDATE_SQL = """
 WITH requested AS (
   SELECT %s::text AS state, %s::text AS stage, %s::integer AS progress,
-         %s::text AS error_code, %s::text AS error_message
+         %s::text AS error_code, %s::text AS error_message, %s::jsonb AS report
 )
 UPDATE processing_jobs AS jobs
 SET state = requested.state,
@@ -372,6 +373,7 @@ SET state = requested.state,
     progress = requested.progress,
     error_code = requested.error_code,
     error_message = requested.error_message,
+    report = requested.report,
     completed_at = CASE
       WHEN requested.state IN ('completed', 'failed', 'cancelled') THEN now()
       ELSE jobs.completed_at
@@ -594,6 +596,7 @@ def _record_from_row(row: tuple[Any, ...]) -> JobRecord:
             frame_rate=row[23],
             duration_ms=row[24],
         ),
+        report=json.loads(row[25]) if isinstance(row[25], (str, bytes, bytearray)) else row[25],
     )
 
 

@@ -174,6 +174,7 @@ class ProcessingPipeline:
         output_metadata = self._render(inputs)
         self._log_render_progress(record, inputs)
         return {
+            "report": {"frames_processed": expected_frame_count(inputs.metadata)},
             "inputs": [
                 _processing_source_fields(inputs),
                 local_artifact_fields(scratch / _CROP_PATH, "crop_path"),
@@ -206,6 +207,7 @@ class ProcessingPipeline:
             ),
         )
         return {
+            "report": {"frames_processed": expected_frame_count(inputs.metadata)},
             "inputs": [
                 local_artifact_fields(inputs.output, "rendered_output", media=output_metadata)
             ],

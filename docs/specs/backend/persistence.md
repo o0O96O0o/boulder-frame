@@ -2,10 +2,11 @@
 
 ## PostgreSQL Ownership
 
-PostgreSQL is the durable source of truth for project metadata, asset references, immutable job configuration, job state/progress/errors, and artifact relationships. Video bytes and per-frame measurements do not belong in PostgreSQL.
+PostgreSQL is the durable source of truth for project metadata, asset references, immutable job configuration, job state/progress/errors, small processing reports, and artifact relationships. Video bytes and per-frame measurements do not belong in PostgreSQL.
 
 The migrations are `backend/migrations/001_init.sql`, `backend/migrations/002_worker_leases.sql`,
-`backend/migrations/003_phase_evaluation.sql`, and `backend/migrations/004_detector_only_review_roles.sql`.
+`backend/migrations/003_phase_evaluation.sql`, `backend/migrations/004_detector_only_review_roles.sql`,
+and `backend/migrations/005_job_report.sql`.
 
 ## Tables
 
@@ -39,8 +40,18 @@ Stores:
 - Optional `output_asset_id`
 - `created_at`, `started_at`, and `completed_at`
 - `lease_owner` and `lease_expires_at`
+- Nullable `report` JSONB, produced by the Python worker for the terminal attempt
 
 The unique constraint on `(project_id, configuration_hash)` prevents duplicate active/completed configurations. Migration `002_worker_leases.sql` adds lease ownership/expiry, expands the stage constraint for active processing, and adds an index for eligible worker claims. The worker must use atomic claims, lease renewal, and lease-guarded writes; a Redis Stream pending delivery does not itself authorize a state change.
+
+Migration `005_job_report.sql` idempotently adds `report jsonb` with no default,
+`NOT NULL`, or CHECK/schema constraint. Existing and in-progress jobs may have no report.
+The report is opaque, non-relational JSON: no fixed fields or schema version are required,
+and it is not normalized into another table or stored as an artifact. The worker stores
+it in the same lease-guarded update as job state/progress, not as live updates or retry
+aggregation. The Go repository reads it for both job creation/deduplication and status
+responses; an unset report is exposed as JSON `null` without validating report fields.
+Apply migration `005` before deploying the report-aware API or worker.
 
 ### `job_artifacts`
 

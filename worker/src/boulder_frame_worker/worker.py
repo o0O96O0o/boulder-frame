@@ -6,8 +6,10 @@ import shutil
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from threading import Event, Thread
+from typing import cast
 from uuid import uuid4
 
 from .config import WorkerConfig
@@ -22,10 +24,8 @@ StageHandler = Callable[[JobRecord, Path], Mapping[str, object] | None]
 
 
 @contextmanager
-def job_scratch(root: Path, job_id: str, retain: bool) -> Iterator[Path]:
-    path = root / job_id
-    # A reclaimed delivery must reconstruct prerequisites, not reuse crash leftovers.
-    shutil.rmtree(path, ignore_errors=True)
+def job_scratch(path: Path, retain: bool) -> Iterator[Path]:
+    # Never reuse or remove another attempt's files, even after its lease expires.
     path.mkdir(parents=True, exist_ok=False)
     try:
         yield path
@@ -60,8 +60,10 @@ class Worker:
             "task request",
             extra={"trace_id": trace_id, "request_body": request_body, "job_id": str(task.job_id)},
         )
+        attempt_id = str(uuid4())
+        scratch_path = self.config.scratch_root / f"{task.job_id}-{attempt_id}"
         record = self.repository.claim(
-            task.job_id, self.worker_id, self.config.lease_seconds, utc_now()
+            task.job_id, attempt_id, self.config.lease_seconds, utc_now()
         )
         if record is None:
             state = self.repository.current_state(task.job_id)
@@ -76,6 +78,17 @@ class Worker:
             if state is None or state in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}:
                 return DeliveryAction.ACK
             return False
+        attempt_started = time.monotonic_ns() // 1_000_000
+        stage_durations: dict[str, int] = {}
+        report: dict[str, object] = {
+            "attempt_id": attempt_id,
+            "stage_durations_ms": stage_durations,
+        }
+
+        def with_report(record: JobRecord) -> JobRecord:
+            report["elapsed_ms"] = time.monotonic_ns() // 1_000_000 - attempt_started
+            return replace(record, report=report)
+
         claimed_extra: dict[str, object] = {
             "trace_id": trace_id,
             "job_id": str(task.job_id),
@@ -97,7 +110,7 @@ class Worker:
                 ErrorCode.MODEL_UNAVAILABLE,
                 "This job requires a different model version than this worker provides.",
             )
-            self.repository.update(fail(record, error))
+            self.repository.update(with_report(fail(record, error)))
             self.logger.info(
                 "task response",
                 extra={
@@ -115,7 +128,7 @@ class Worker:
             while not heartbeat_stop.wait(self.config.heartbeat_seconds):
                 try:
                     if not self.repository.renew(
-                        task.job_id, self.worker_id, self.config.lease_seconds
+                        task.job_id, attempt_id, self.config.lease_seconds
                     ):
                         heartbeat_failure.append(RuntimeError("job lease was lost"))
                         return
@@ -134,9 +147,7 @@ class Worker:
                 )
 
         try:
-            with job_scratch(
-                self.config.scratch_root, str(task.job_id), self.config.retain_debug_artifacts
-            ) as scratch:
+            with job_scratch(scratch_path, self.config.retain_debug_artifacts) as scratch:
                 stages = (
                     (JobState.VALIDATING, 10, validating),
                     (JobState.ANALYZING, 45, analyzing),
@@ -178,9 +189,12 @@ class Worker:
                         ):
                             result = handler(record, scratch)
                         phase_io = None if result is None else dict(result)
+                        if phase_io is not None:
+                            report.update(cast(Mapping[str, object], phase_io.pop("report", {})))
                         ensure_lease()
                     except Exception as error:
                         duration_ms = (time.monotonic_ns() // 1_000_000) - started
+                        stage_durations[state.value] = duration_ms
                         error_code = (
                             error.code.value
                             if isinstance(error, WorkerError)
@@ -221,6 +235,7 @@ class Worker:
                         self._publish_debug(publish_debug, record, scratch, trace_id)
                         raise
                     duration_ms = (time.monotonic_ns() // 1_000_000) - started
+                    stage_durations[state.value] = duration_ms
                     self._stage_trace(
                         scratch,
                         "stage_end",
@@ -251,7 +266,7 @@ class Worker:
                     self.logger.info("stage response", extra=response_extra)
                 self._publish_debug(publish_debug, record, scratch, trace_id)
                 record = transition(record, JobState.COMPLETED, 100)
-                self.repository.update(record)
+                self.repository.update(with_report(record))
             self.logger.info(
                 "task response",
                 extra={
@@ -263,7 +278,7 @@ class Worker:
         except WorkerError as error:
             if error.transient:
                 try:
-                    self.repository.release(task.job_id, self.worker_id)
+                    self.repository.release(task.job_id, attempt_id)
                 except Exception:
                     # Preserve the retry classification; lease expiry remains a recovery fallback.
                     pass
@@ -276,12 +291,12 @@ class Worker:
                         "error_code": error.code.value,
                         "diagnostic": safe_diagnostic(
                             error.diagnostic,
-                            self.config.scratch_root / str(task.job_id),
+                            scratch_path,
                         ),
                     },
                 )
                 raise
-            self.repository.update(fail(record, error))
+            self.repository.update(with_report(fail(record, error)))
             self.logger.info(
                 "task response",
                 extra={
@@ -291,17 +306,22 @@ class Worker:
                     "error_code": error.code.value,
                     "diagnostic": safe_diagnostic(
                         error.diagnostic,
-                        self.config.scratch_root / str(task.job_id),
+                        scratch_path,
                     ),
                 },
             )
         except Exception:
             try:
                 self.repository.update(
-                    fail(record, terminal(ErrorCode.INTERNAL, "Processing could not be completed."))
+                    with_report(
+                        fail(
+                            record,
+                            terminal(ErrorCode.INTERNAL, "Processing could not be completed."),
+                        )
+                    )
                 )
             except Exception:
-                self.repository.release(task.job_id, self.worker_id)
+                self.repository.release(task.job_id, attempt_id)
                 raise
             self.logger.exception(
                 "task response",
@@ -310,7 +330,7 @@ class Worker:
                     "response_body": {"state": "failed"},
                     "job_id": str(task.job_id),
                     "error_code": ErrorCode.INTERNAL.value,
-                    "scratch_path": self.config.scratch_root / str(task.job_id),
+                    "scratch_path": scratch_path,
                 },
             )
         finally:

@@ -17,8 +17,9 @@ duration, dimensions, aggregate-byte, and child-process deadline limits.
 
 ```mermaid
 flowchart LR
-  Q[Redis delivery] --> L[PostgreSQL lease claim]
-  L --> S[source-original]
+  Q[Redis delivery] --> L[PostgreSQL lease claim with fresh attempt UUID]
+  L --> A[Isolated attempt scratch]
+  A --> S[source-original]
   S --> I[Strict ffprobe]
   I -->|CFR| D[ONNX person detection]
   I -->|Supported VFR only| N[Bounded local CFR normalization]
@@ -27,12 +28,20 @@ flowchart LR
   F --> R[Per-frame crop resize and fixed-frame FFmpeg encode]
   R --> O[Lease-finalize output]
   O --> V[Optional telemetry and review]
-  V --> T[Persist terminal state then XACK]
+  V --> T[Persist terminal state and JSON report then XACK]
 ```
 
 Stages are `validating`, `analyzing`, `rendering`, and `uploading`, surrounded by queued/terminal job
 states. The worker acknowledges Redis only after a terminal PostgreSQL state is durable. Pending stream
 deliveries can be reclaimed; an active PostgreSQL lease prevents duplicate processing.
+
+Each claim uses a fresh UUID as `lease_owner`; `WORKER_ID` remains the process identity, not the
+ownership token. Renewal, release, state updates, and artifact finalization use the claimed attempt's
+token, so an expired attempt cannot renew or release a replacement attempt's lease.
+Scratch lives at `{scratch_root}/{job_id}-{attempt_id}`. A retry reconstructs prerequisites in its
+own directory and cleanup removes only that attempt's directory, unless retention is enabled.
+Directories left by a crashed process are neither reused nor deleted by another attempt; remove
+orphaned scratch only after ensuring the owning process is stopped.
 
 `validating` downloads the immutable object as `source-original`, strictly inspects supported media,
 and normalizes only supported VFR input to job-local `source-cfr.mp4` under configured source-size and
@@ -68,6 +77,30 @@ The `w0.2.4` pipeline and immutable planner controller/threshold/motion-limit/sa
 same input and settings under the new controller. Old jobs must drain on old workers before the
 [version cutover](../../dev/development.md#start-modules), because claim-time compatibility checks
 cover model version, not pipeline version. Never carry old job scratch or crop paths into a new job.
+
+## Processing Report
+
+The worker stores a small `processing_jobs.report` JSONB object in the same lease-guarded update
+that records completion or terminal failure. It is independent of debug capture. The API returns
+the stored JSON unchanged; neither the database nor the API imposes a report schema or version.
+Apply migration `005_job_report.sql` before deploying the report-aware API or worker.
+
+The current producer includes:
+
+- `attempt_id`: the UUID of the attempt that persisted the terminal result.
+- `elapsed_ms`: monotonic wall-clock time from the successful claim to preparation of the terminal
+  update, including optional review publication but excluding queue time, prior attempts, the final
+  database write, and scratch cleanup.
+- `stage_durations_ms`: durations of the stage handlers executed in this attempt, including a failed
+  handler. On resume, prerequisite reconstruction is counted within the resumed handler.
+- `frames_processed`: the frame count of the validated output, available after rendering succeeds.
+  It is not the number of detector invocations or the sum of repeated decode/render passes.
+  Resuming directly at uploading still supplies this count after reconstructing and verifying output.
+
+Old jobs and active jobs normally have `report: null`. A transient failure does not publish a terminal
+report; the next attempt starts fresh rather than aggregating earlier work. A failure before a valid
+output exists omits `frames_processed`. Duplicate terminal deliveries leave the stored report intact.
+Only small summary values belong here; per-frame data remains in optional telemetry artifacts.
 
 ## Review Finalization
 

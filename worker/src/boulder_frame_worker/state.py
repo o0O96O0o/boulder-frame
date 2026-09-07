@@ -85,6 +85,7 @@ class JobRecord:
     source_asset: SourceAsset | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    report: dict[str, object] | None = None
 
 
 class JobRepository(Protocol):

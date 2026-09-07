@@ -18,7 +18,7 @@ The initial implementation uses the fixed development owner `development-owner`.
 | `POST` | `/api/v1/projects/{projectID}/assets/upload` | Create a pending source asset and return a signed upload URL. |
 | `POST` | `/api/v1/assets/{assetID}/complete` | Confirm the uploaded object exists and has the requested size. |
 | `POST` | `/api/v1/projects/{projectID}/jobs` | Validate and persist immutable job configuration, then enqueue processing. |
-| `GET` | `/api/v1/jobs/{jobID}` | Read job state, progress, configuration, timestamps, and safe error. |
+| `GET` | `/api/v1/jobs/{jobID}` | Read job state, progress, configuration, timestamps, safe error, and nullable processing report. |
 | `GET` | `/api/v1/jobs/{jobID}/artifacts` | List output/debug artifact metadata. |
 | `GET` | `/api/v1/jobs/{jobID}/download` | Return a short-lived signed URL for a completed output. |
 | `GET` | `/api/v1/jobs/{jobID}/evaluation` | Return an authorized terminal-job visual-review manifest and short-lived phase-media URLs when optional debug visual capture exists. |
@@ -109,6 +109,21 @@ The controller and all eight thresholds/motion limits also participate in the ha
 submission from reusing an older planner's cached job/output. Before deploying this cutover, drain old jobs with the old
 workers; the worker does not enforce pipeline-version compatibility at claim time. Never retry or
 republish an old job UUID to request the new behavior; submit a new job with the new configuration.
+
+### Processing Report
+
+Both job creation (including an idempotent response for an existing job) and
+`GET /api/v1/jobs/{jobID}` include a `report` property. It is `null` when no report has
+been stored, including old jobs and jobs still in progress. The Python worker produces
+the small terminal-attempt report; it is not a live progress feed or an aggregation of retries.
+
+The API passes the stored JSON through as an opaque value, preserving JSON types and
+numbers without interpreting fields. It applies no report schema or field validation
+and requires no schema version. Clients must not assume a fixed report shape. The report
+is not a job-creation request field and has no separate endpoint or artifact.
+
+See the worker's [Processing Report](../worker/runtime-and-pipeline.md#processing-report)
+for the currently emitted timing and frame-count metrics.
 
 ## Phase Evaluation Contract
 

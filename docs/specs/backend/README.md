@@ -4,8 +4,8 @@ The backend is a Go HTTP process. It owns request validation, PostgreSQL metadat
 
 ## Documents
 
-- [HTTP API](http-api.md): routes, request validation, response shapes, ownership checks, lifecycle behavior, and immutable `deterministic-v3` planner thresholds/motion limits, configurable detection sampling, and hash cutover.
-- [Persistence](persistence.md): PostgreSQL entities, constraints, immutable configuration, and repository responsibilities.
+- [HTTP API](http-api.md): routes, request validation, response shapes, ownership checks, lifecycle behavior, opaque nullable processing reports, and immutable `deterministic-v3` planner thresholds/motion limits, configurable detection sampling, and hash cutover.
+- [Persistence](persistence.md): PostgreSQL entities, constraints, immutable configuration, nullable JSONB processing reports, and repository responsibilities.
 - [Redis Streams Task Distribution](redis-streams-task-distribution.md): stream/group configuration, task payload, idempotency, pending recovery, lease authority, and worker handoff.
 
 ## Runtime Composition
@@ -34,6 +34,8 @@ go run . migrate up
 ```
 
 The migration command applies `backend/migrations/001_init.sql` through
-`backend/migrations/003_phase_evaluation.sql` in order and is idempotent. Before applying migration
-`003`, drain and stop older workers because it rejects their legacy `debug` finalization role; see
-[Persistence](persistence.md#phase-review-rollout).
+`backend/migrations/005_job_report.sql` in order and is idempotent. Before applying migration
+`003`, drain and stop older workers because it rejects their legacy `debug` finalization role;
+migration `004` also requires draining workers that finalize retired review roles. See
+[Persistence](persistence.md#phase-review-rollout). Apply migration `005` before deploying
+the report-aware API or worker; it leaves existing reports unset.

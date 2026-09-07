@@ -71,7 +71,7 @@ the PostgreSQL job row remains the source of truth if the stream and database te
 1. Read new entries with `XREADGROUP` and recover abandoned pending entries with `XAUTOCLAIM` after the configured idle interval. The worker retries Redis connection and timeout failures during polling rather than terminating, while startup readiness remains fail-fast.
 2. Parse a payload with exactly `job_id` and `trace_id` fields, and require `task_id == job_id`.
 3. Load the job and source asset from PostgreSQL.
-4. Atomically claim an eligible PostgreSQL job lease. A pending Stream entry alone never authorizes processing.
+4. Atomically claim an eligible PostgreSQL job lease using a fresh attempt UUID as `lease_owner`, independent of the process `WORKER_ID`. A pending Stream entry alone never authorizes processing.
 5. Compare immutable `configuration.model_version` with the worker's active runtime model version. A mismatch is a terminal `model_unavailable` failure before any stage handler or media/CV work runs.
 6. Heartbeat the active Stream delivery with `XCLAIM` and renew the PostgreSQL lease while processing.
 7. Persist monotonic progress and terminal state using lease-guarded writes.
@@ -95,6 +95,7 @@ retains its original version; submit a new job to use the new behavior.
 
 - Duplicate delivery must not process a terminal job again.
 - PostgreSQL lease owner and expiry fields, added by migration `002_worker_leases.sql`, must prevent two workers from processing the same active job concurrently. Lease-guarded writes and lease renewal are authoritative over Redis pending ownership.
+- Each claim, including a retry in the same process, has a distinct ownership token. Renewal and release use that token; an expired attempt cannot release a newer lease. Attempts also use separate scratch directories and never remove each other's files.
 - A worker retry resumes the failed stage, not the next stage.
 - Output and debug object keys must be deterministic per job.
 - Artifact inserts must be unique per `(job_id, kind)`.
