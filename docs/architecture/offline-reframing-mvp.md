@@ -26,6 +26,12 @@ passes, so no frame is associated before the user selection is resolved. A later
 within 1.5 times the last accepted detector-box diagonal of that actual box; rejected candidates
 and detector misses widen framing without changing that reference. No former target position is extrapolated.
 
+Detection runs at a configurable sampled rate (default 10 fps; `0` means every frame), always
+including the exact selected frame. The camera advances at full frame rate toward the last sampled
+box. Skipped inference is not a miss; an actual sampled miss clears that target and widens until
+reacquisition. No future boxes or predicted athlete positions fill gaps. Brief loss of containment
+between samples is accepted; decoding and output frame rate are unchanged.
+
 | Profile | Detected athlete height / crop height |
 | --- | --- |
 | `tight` | `.60` |
@@ -95,12 +101,12 @@ from the active verified worker fails terminally with `model_unavailable` before
 Existing W0.1 jobs are incompatible with W0.2 and fail this check; users must create a new W0.2 job,
 not retry the old job.
 
-The default pipeline is `w0.2.3`. Immutable `planner` configuration contains
+The default pipeline is `w0.2.4`. Immutable `planner` configuration contains
 `controller = deterministic-v3`, `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
 `center_enter_fraction = 0.01`, `center_exit_fraction = 0.004`, `zoom_max_speed = 0.5`,
-`zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, and `pan_max_acceleration = 0.5`.
-These fixed algorithm constants are not public job inputs. Pipeline version and planner
-configuration participate in the job hash,
+`zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, and `pan_max_acceleration = 0.5`,
+plus deployment-configurable `detection_sample_fps` (default `10`, `0` disables sampling).
+These settings are not public job inputs. Pipeline version and planner configuration participate in the job hash,
 so an identical submission cannot reuse an older controller's job or cached crop path. Deploy API
 and worker together using the [drained cutover procedure](../dev/development.md#start-modules);
 retrying an old job does not upgrade its immutable configuration.

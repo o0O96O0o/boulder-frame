@@ -54,6 +54,7 @@ services:
       <<: *application-environment
       API_BASE_URL: ${API_BASE_URL}
       WEB_BASE_URL: ${WEB_BASE_URL}
+      DETECTION_SAMPLE_FPS: ${DETECTION_SAMPLE_FPS:-10}
     volumes:
       - ./backend:/workspace/backend
     ports:

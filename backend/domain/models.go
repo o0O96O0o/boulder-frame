@@ -335,7 +335,7 @@ func ValidReviewStorageKey(key string, projectID, jobID, reviewID uuid.UUID, nam
 	return key == fmt.Sprintf("private/debug/%s/%s/%s/%s", projectID, jobID, reviewID, name)
 }
 
-func NewJobConfig(source uuid.UUID, selection TargetSelection, output OutputSettings, pipeline, model string) (JobConfig, error) {
+func NewJobConfig(source uuid.UUID, selection TargetSelection, output OutputSettings, pipeline, model string, detectionSampleFPS float64) (JobConfig, error) {
 	if selection.FrameTimeMS < 0 || selection.NormalizedX < 0 || selection.NormalizedX > 1 || selection.NormalizedY < 0 || selection.NormalizedY > 1 {
 		return JobConfig{}, errors.New("target selection is outside supported bounds")
 	}
@@ -345,11 +345,15 @@ func NewJobConfig(source uuid.UUID, selection TargetSelection, output OutputSett
 	if !map[string]bool{"tight": true, "balanced": true, "safe": true, "full_movement": true}[output.Profile] {
 		return JobConfig{}, errors.New("profile is unsupported")
 	}
+	if math.IsNaN(detectionSampleFPS) || math.IsInf(detectionSampleFPS, 0) || detectionSampleFPS < 0 || detectionSampleFPS > 1000 {
+		return JobConfig{}, errors.New("detection_sample_fps must be a finite number between 0 and 1000")
+	}
 	return JobConfig{
 		SourceAssetID: source, TargetSelection: selection, Output: output,
 		PipelineVersion: pipeline, ModelVersion: model,
 		Planner: map[string]any{
 			"controller":            "deterministic-v3",
+			"detection_sample_fps":  detectionSampleFPS,
 			"scale_enter_fraction":  0.05,
 			"scale_exit_fraction":   0.02,
 			"center_enter_fraction": 0.01,

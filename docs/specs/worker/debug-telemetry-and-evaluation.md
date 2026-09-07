@@ -30,16 +30,22 @@ records with source-display coordinates and these sections:
 | Section | Evidence |
 | --- | --- |
 | `detection` | Current person detection and tap/association evidence. |
-| `framing` | Current detector bounds, target-height crop decision, and final crop. |
+| `framing` | Sampled or held camera-target bounds, target-height crop decision, and final crop. |
 | `render` | Final crop, timestamp, and output-validation/mapping evidence. |
 
-Missing detection is `null`, not an invented position. Telemetry records only current detector and
-crop-decision values; it records detector association as deterministic evidence, not identity proof.
+Missing or skipped raw detection is `null`, not an invented position. `selection_outcome =
+detection_skipped` distinguishes skipped inference from an actual sampled miss. Framing inputs can
+retain a previous sampled box; this is a held camera target, not evidence of a fresh detection or
+athlete identity. Skips do not count as detector failures or sampled misses.
+Detection summaries report `sampled_frames`, `skipped_frames`, `detected_frames`, and actual
+`missed_frames`. Framing summaries use `unavailable_detection_frames` for all frames with no held
+camera target, including skipped frames following a sampled miss.
 
-For controller `deterministic-v3` (pipeline `w0.2.3`), the header's planner configuration includes
+For controller `deterministic-v3` (pipeline `w0.2.4`), the header's planner configuration includes
 the unchanged thresholds `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
 `center_enter_fraction = 0.01`, and `center_exit_fraction = 0.004`, plus `zoom_max_speed = 0.5`,
 `zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, and `pan_max_acceleration = 0.5`.
+The immutable `detection_sample_fps` records the job's configured sampling rate (default `10`).
 Zoom limits use log-height per second and per second²; pan limits use source dimension per second
 and per second² on each axis. Existing framing trace fields explain the independent gates and motion:
 

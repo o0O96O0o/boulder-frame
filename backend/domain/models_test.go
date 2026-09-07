@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -23,11 +24,38 @@ func TestNewJobConfigValidatesContract(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewJobConfig(uuid.New(), tc.selection, tc.output, "pipeline", "model")
+			_, err := NewJobConfig(uuid.New(), tc.selection, tc.output, "pipeline", "model", 10)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestNewJobConfigDetectionSampleRateBounds(t *testing.T) {
+	for _, rate := range []float64{-1, 1000.01, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if _, err := NewJobConfig(uuid.New(), TargetSelection{NormalizedX: .5, NormalizedY: .5}, OutputSettings{"16:9", "balanced"}, "w0.2.4", "m1", rate); err == nil {
+			t.Fatalf("accepted invalid detection sample rate %v", rate)
+		}
+	}
+}
+
+func TestJobConfigHashSeparatesDetectionSampleRates(t *testing.T) {
+	source := uuid.New()
+	hashes := make(map[string]float64)
+	for _, rate := range []float64{0, 10, 12.5, 1000} {
+		config, err := NewJobConfig(source, TargetSelection{NormalizedX: .5, NormalizedY: .5}, OutputSettings{"16:9", "balanced"}, "w0.2.4", "m1", rate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash, err := config.Hash()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if previous, exists := hashes[hash]; exists {
+			t.Fatalf("sample rates %v and %v produced the same job hash", previous, rate)
+		}
+		hashes[hash] = rate
 	}
 }
 
@@ -61,7 +89,7 @@ func TestSourceStorageKeyRetainsSupportedExtension(t *testing.T) {
 }
 
 func TestJobConfigHashIsStableAndChangesWithConfiguration(t *testing.T) {
-	c, err := NewJobConfig(uuid.New(), TargetSelection{NormalizedX: .5, NormalizedY: .5}, OutputSettings{"16:9", "balanced"}, "p1", "m1")
+	c, err := NewJobConfig(uuid.New(), TargetSelection{NormalizedX: .5, NormalizedY: .5}, OutputSettings{"16:9", "balanced"}, "p1", "m1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +115,7 @@ func TestJobConfigHashSeparatesPlannerVersionsAndMotionConstants(t *testing.T) {
 	source := uuid.New()
 	selection := TargetSelection{NormalizedX: .5, NormalizedY: .5}
 	output := OutputSettings{"16:9", "balanced"}
-	config, err := NewJobConfig(source, selection, output, "w0.2.3", "m1")
+	config, err := NewJobConfig(source, selection, output, "w0.2.4", "m1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +156,7 @@ func TestJobConfigHashSeparatesPlannerVersionsAndMotionConstants(t *testing.T) {
 			if config.Planner[key] != value {
 				t.Fatalf("immutable planner %s = %v, want %v", key, config.Planner[key], value)
 			}
-			changed, err := NewJobConfig(source, selection, output, "w0.2.3", "m1")
+			changed, err := NewJobConfig(source, selection, output, "w0.2.4", "m1", 10)
 			if err != nil {
 				t.Fatal(err)
 			}

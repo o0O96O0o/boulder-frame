@@ -60,8 +60,8 @@ func (f *fakeRepo) MarkAssetUploaded(context.Context, uuid.UUID, int64, string) 
 	f.asset.UploadState = domain.UploadUploaded
 	return f.asset, nil
 }
-func (f *fakeRepo) CreateOrGetJob(context.Context, domain.Job, string) (domain.Job, bool, error) {
-	f.job = domain.Job{ID: uuid.New(), State: domain.JobQueued, Stage: domain.JobQueued}
+func (f *fakeRepo) CreateOrGetJob(_ context.Context, job domain.Job, _ string) (domain.Job, bool, error) {
+	f.job = job
 	return f.job, false, nil
 }
 func (f *fakeRepo) GetJob(context.Context, uuid.UUID) (domain.Job, error) { return f.job, f.jobErr }
@@ -178,7 +178,7 @@ func TestJobValidationDoesNotPublishInvalidRequest(t *testing.T) {
 	id := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	repo := &fakeRepo{project: domain.Project{ID: id}, asset: domain.Asset{ID: uuid.New(), ProjectID: id, Kind: domain.AssetSource, UploadState: domain.UploadUploaded}}
 	q := &fakeQueue{}
-	h := &Handler{Repo: repo, Queue: q, Owner: domain.OwnerDevelopment, PipelineVersion: "p", ModelVersion: "m"}
+	h := &Handler{Repo: repo, Queue: q, Owner: domain.OwnerDevelopment, PipelineVersion: "p", ModelVersion: "m", DetectionSampleFPS: 10}
 	body := `{"source_asset_id":"` + repo.asset.ID.String() + `","target_selection":{"frame_time_ms":-1,"normalized_x":0.5,"normalized_y":0.5},"output":{"aspect_ratio":"16:9","profile":"balanced"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+id.String()+"/jobs", strings.NewReader(body))
 	rec := httptest.NewRecorder()

@@ -80,7 +80,7 @@ def test_claim_hydrates_immutable_configuration_and_source_asset() -> None:
             '{"source_asset_id": "'
             + str(source_id)
             + '", "target_selection": {}, "output": {}, "pipeline_version": "p", '
-            '"model_version": "m", "planner": {}}'
+            '"model_version": "m", "planner": {"detection_sample_fps": 0}}'
         ),
         None,
         None,
@@ -434,7 +434,7 @@ def _row(state: str, stage: str, owner: str) -> tuple[object, ...]:
             "output": {},
             "pipeline_version": "p",
             "model_version": "m",
-            "planner": {},
+            "planner": {"detection_sample_fps": 0},
         },
         None,
         None,

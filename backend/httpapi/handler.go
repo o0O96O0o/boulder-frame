@@ -22,16 +22,17 @@ import (
 const maxEvaluationManifestBytes int64 = 256 * 1024
 
 type Handler struct {
-	Repo            repository.Repository
-	Store           storage.Store
-	Queue           queue.Publisher
-	Owner           string
-	URLTTL          time.Duration
-	MaxUploadBytes  int64
-	PipelineVersion string
-	ModelVersion    string
-	WebBaseURL      string
-	Logger          *slog.Logger
+	Repo               repository.Repository
+	Store              storage.Store
+	Queue              queue.Publisher
+	Owner              string
+	URLTTL             time.Duration
+	MaxUploadBytes     int64
+	PipelineVersion    string
+	DetectionSampleFPS float64
+	ModelVersion       string
+	WebBaseURL         string
+	Logger             *slog.Logger
 }
 
 func (h *Handler) Router() http.Handler {
@@ -250,7 +251,7 @@ func (h *Handler) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "asset_not_ready", "source asset must be uploaded")
 		return
 	}
-	cfg, err := domain.NewJobConfig(asset.ID, req.TargetSelection, req.Output, h.PipelineVersion, h.ModelVersion)
+	cfg, err := domain.NewJobConfig(asset.ID, req.TargetSelection, req.Output, h.PipelineVersion, h.ModelVersion, h.DetectionSampleFPS)
 	if err != nil {
 		writeError(w, 400, "invalid_request", err.Error())
 		return

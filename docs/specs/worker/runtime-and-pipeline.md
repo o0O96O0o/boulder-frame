@@ -42,8 +42,13 @@ is normalized consistently for analysis and rendering.
 
 `analyzing` maps the immutable tap, detects persons, selects the target on that frame, then associates
 forward and backward from its detector box. Later candidates must pass the detector-box-relative spatial
-gate; a miss or rejected candidate does not update the reference. `framing` derives the profile-target
-crop, independently gates scale and center through `deterministic-v3` hysteresis, and advances
+gate; a miss or rejected candidate does not update the reference.
+Detection runs only on the immutable `planner.detection_sample_fps` time grid plus the exact selected
+frame. All source frames remain decoded and frame-aligned. Between samples, full-rate framing uses
+the last chronological sampled result; a real sampled miss clears the held box until reacquisition.
+Skipped frames are not detection failures. Missing or invalid sampling configuration is rejected,
+including before a cached crop path is reused.
+`framing` derives the profile-target crop, independently gates scale and center through `deterministic-v3` hysteresis, and advances
 speed/acceleration-limited log-height zoom and source-normalized pan using increasing frame
 timestamps. Retargeting preserves velocity; closed gates brake briefly before exact holds.
 Containment/source-aspect corrections override motion limits, containing the current box when
@@ -59,7 +64,7 @@ after the same strict media and exact decoded-frame-count validation, and only w
 matches the persisted crop-path digest, output aspect ratio, and `fixed-output-v1` renderer version.
 `uploading` heads and lease-finalizes the deterministic output object before completion.
 
-The `w0.2.3` pipeline and immutable planner controller/threshold/motion-limit hash create distinct jobs for the
+The `w0.2.4` pipeline and immutable planner controller/threshold/motion-limit/sampling-rate hash create distinct jobs for the
 same input and settings under the new controller. Old jobs must drain on old workers before the
 [version cutover](../../dev/development.md#start-modules), because claim-time compatibility checks
 cover model version, not pipeline version. Never carry old job scratch or crop paths into a new job.

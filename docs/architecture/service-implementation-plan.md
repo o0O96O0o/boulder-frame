@@ -25,9 +25,9 @@ flowchart LR
 ## Cross-Service Contract
 
 - Job configuration is immutable and includes source asset, target selection, output settings,
-  pipeline version, model version, and planner configuration. The current default is `w0.2.3` with
-  `deterministic-v3`, four unchanged scale/center hysteresis thresholds, and four timestamp-based
-  speed/acceleration limits included in the job hash.
+  pipeline version, model version, and planner configuration. The current default is `w0.2.4` with
+  `deterministic-v3`, four unchanged scale/center hysteresis thresholds, four timestamp-based
+  speed/acceleration limits, and configurable `detection_sample_fps` included in the job hash.
 - Profiles are `tight`, `balanced`, `safe`, `full_movement`, with target detected-athlete height
   fractions `.60`, `.50`, `.40`, `.33`; `balanced` is `.50`. Independent hysteresis holds idle crops
   at rest exactly. Log-height zoom and source-normalized pan brake and settle without resetting

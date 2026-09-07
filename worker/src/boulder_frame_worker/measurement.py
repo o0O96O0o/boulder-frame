@@ -53,6 +53,7 @@ class SelectionOutcome(StrEnum):
     ASSOCIATED_NEAREST_REFERENCE = "associated_nearest_reference"
     NO_DETECTIONS = "no_detections"
     NO_ACCEPTED_CANDIDATE = "no_accepted_candidate"
+    DETECTION_SKIPPED = "detection_skipped"
 
 
 class SelectionReferenceKind(StrEnum):
@@ -119,7 +120,7 @@ class AssociationEvidence:
 
 @dataclass(frozen=True, slots=True)
 class RawFrameObservation:
-    """The selected detector box, or an explicit later-frame detector miss."""
+    """A fresh selected detector box, sampled miss, or explicit unsampled frame."""
 
     frame_index: int
     timestamp_ms: int
@@ -130,6 +131,10 @@ class RawFrameObservation:
     def __post_init__(self) -> None:
         if self.frame_index < 0 or self.timestamp_ms < 0:
             raise ValueError("frame index and timestamp must not be negative")
+        if self.selection_outcome is SelectionOutcome.DETECTION_SKIPPED and (
+            self.detection is not None or self.association is not None
+        ):
+            raise ValueError("skipped detection cannot carry detector or association evidence")
         if self.association is not None:
             if self.selection_outcome is not self.association.outcome:
                 raise ValueError("observation selection outcome must match association evidence")

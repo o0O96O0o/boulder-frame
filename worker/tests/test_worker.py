@@ -62,7 +62,7 @@ def test_worker_logs_claimed_source_metadata_and_completed_phase_io(tmp_path: Pa
             {},
             "test",
             "unconfigured",
-            {},
+            {"detection_sample_fps": 0},
         ),
         source_asset=SourceAsset(
             source_id,
@@ -181,7 +181,7 @@ def test_worker_rejects_a_job_with_a_different_immutable_model_version(tmp_path:
             {},
             "test",
             "another-model",
-            {},
+            {"detection_sample_fps": 0},
         ),
     )
     repository = InMemoryJobRepository([record])

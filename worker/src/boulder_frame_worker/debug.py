@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import BinaryIO
 from uuid import UUID
 
-from .measurement import AssociationEvidence, Point, RawFrameObservation, Rect, SelectionOutcome
+from .measurement import AssociationEvidence, Point, RawFrameObservation, Rect
 from .planner import CropRect, FrameMeasurement, PlannerFrameTrace
 
 DEBUG_BUNDLE_SCHEMA_VERSION = 1
@@ -265,8 +265,7 @@ def serialize_raw_frame_observation(observation: RawFrameObservation) -> dict[st
             }
         ),
     }
-    if observation.selection_outcome is not None:
-        result["selection_outcome"] = observation.selection_outcome.value
+    result["selection_outcome"] = observation.selection_outcome.value
     if observation.association is not None:
         result["selection"] = serialize_association_evidence(observation.association)
     return result
@@ -274,7 +273,7 @@ def serialize_raw_frame_observation(observation: RawFrameObservation) -> dict[st
 
 def serialize_association_evidence(evidence: AssociationEvidence) -> dict[str, object]:
     return {
-        "selected": evidence.outcome is not SelectionOutcome.NO_DETECTIONS,
+        "selected": any(candidate.selected for candidate in evidence.candidates),
         "reference": serialize_point(evidence.reference),
         "reference_kind": evidence.reference_kind.value,
         "strategy": evidence.strategy.value,

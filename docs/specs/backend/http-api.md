@@ -70,9 +70,9 @@ The API rejects negative frame times, coordinates outside `[0, 1]`, unsupported 
 The stored configuration additionally contains:
 
 - `source_asset_id`
-- `pipeline_version = w0.2.3` by default
+- `pipeline_version = w0.2.4` by default
 - `model_version`
-- Fixed planner configuration:
+- Immutable planner configuration (sampling rate comes from deployment configuration):
 
 ```json
 {
@@ -85,7 +85,8 @@ The stored configuration additionally contains:
     "zoom_max_speed": 0.5,
     "zoom_max_acceleration": 1.0,
     "pan_max_speed": 0.25,
-    "pan_max_acceleration": 0.5
+    "pan_max_acceleration": 0.5,
+    "detection_sample_fps": 10
   }
 }
 ```
@@ -94,6 +95,10 @@ The planner constants implement unchanged independent scale/center hysteresis pl
 speed/acceleration limits for log-height zoom and source-normalized pan. They are not public request
 fields or user-tunable controls. Units, braking, and settling are specified in
 [Detection and Framing](../worker/measurements-and-planner.md#timestamp-based-motion).
+
+`detection_sample_fps` comes from backend `DETECTION_SAMPLE_FPS`, defaults to `10`, and accepts finite
+numbers in `[0, 1000]`; `0` disables sampling. It is not a public job request field. Its snapshot
+participates in the hash, so changing the configured rate creates a distinct job for identical input.
 
 The configuration is serialized and SHA-256 hashed. The hash is used with `(project_id, configuration_hash)` to make repeated submissions idempotent.
 

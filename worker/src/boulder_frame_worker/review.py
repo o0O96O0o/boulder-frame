@@ -538,7 +538,10 @@ def phase_annotations(record: Mapping[str, object], phase: str, index: int) -> t
     if phase == "detection":
         detection = _mapping(detection_record.get("detection"))
         selection = _mapping(detection_record.get("selection"))
-        lines.append(_measurement_annotation(selection, detection))
+        if detection_record.get("selection_outcome") == "detection_skipped":
+            lines.append("Detection skipped (sampling); no fresh detector result.")
+        else:
+            lines.append(_measurement_annotation(selection, detection))
     elif phase == "framing":
         decision = _mapping(framing.get("decision"))
         lines.append(
@@ -546,9 +549,9 @@ def phase_annotations(record: Mapping[str, object], phase: str, index: int) -> t
             f"action={decision.get('action', 'unavailable')}"
         )
         lines.append(
-            f"detection_missed={decision.get('detection_missed', False)} containment_override="
-            f"{decision.get('containment_override', False)} source_aspect_limited="
-            f"{decision.get('source_aspect_limited', False)}"
+            f"held_detection_unavailable={decision.get('detection_missed', False)} "
+            f"containment_override={decision.get('containment_override', False)} "
+            f"source_aspect_limited={decision.get('source_aspect_limited', False)}"
         )
     else:
         render = _mapping(record.get("render"))

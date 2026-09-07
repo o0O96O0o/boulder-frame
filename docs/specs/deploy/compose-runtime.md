@@ -60,13 +60,18 @@ behavior and changes the backend job-configuration hash. Because the worker curr
 version but not pipeline version when claiming work, do not use a rolling deployment across pipeline
 versions.
 
-For the `deterministic-v3` smooth-transition release, set `PIPELINE_VERSION=w0.2.3` explicitly in the
+For the configurable sampled-detection release, set `PIPELINE_VERSION=w0.2.4` explicitly in the
 deployment's private `.env`; the example file does not migrate it. Stop new submissions, let the old
 workers finish all queued and leased jobs, and confirm the Redis consumer group has no pending
 deliveries. Stop old workers, deploy backend and worker together with the new shared value, verify
 both startup summaries, then reopen submissions. Never replace workers before this drain.
 
-Pipeline version plus immutable planner controller, thresholds, and motion limits produce a new job hash.
+`DETECTION_SAMPLE_FPS` configures the backend's new-job sampling snapshot. It defaults to `10`;
+`0` runs inference on every frame. Finite fractional values from `0` through `1000` are accepted.
+The worker consumes `planner.detection_sample_fps` from the job, so changing deployment configuration
+never changes a retry. Old snapshots without this field are rejected; drain old jobs before upgrading.
+
+Pipeline version plus immutable planner controller, thresholds, motion limits, and detection sample rate produce a new job hash.
 Never rewrite a terminal job's configuration, republish its task UUID, or copy old scratch/crop paths
 into a new job; submit the same source and settings again to create a new versioned job instead.
 

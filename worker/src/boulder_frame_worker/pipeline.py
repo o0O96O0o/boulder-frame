@@ -5,6 +5,8 @@ import json
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from fractions import Fraction
+from math import isfinite
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -30,6 +32,7 @@ from .measurement import (
     Detection,
     PersonDetector,
     RawFrameObservation,
+    SelectionOutcome,
     SelectionReferenceKind,
     TargetFrameAnalyzer,
     UnavailableDetector,
@@ -91,6 +94,7 @@ class _Inputs:
     metadata: MediaMetadata
     selection: TargetSelection
     output_settings: OutputSettings
+    detection_sample_fps: int | float
     original_metadata: MediaMetadata | None = None
 
 
@@ -435,6 +439,7 @@ class ProcessingPipeline:
     def _inputs(self, record: JobRecord, scratch: Path) -> _Inputs:
         source_asset = self._source(record)
         configuration = self._configuration(record)
+        detection_sample_fps = _detection_sample_fps(configuration)
         if source_asset.upload_state != "uploaded":
             raise terminal(ErrorCode.INVALID_MEDIA, "The source video upload is not available.")
         if configuration.source_asset_id != source_asset.id:
@@ -475,6 +480,7 @@ class ProcessingPipeline:
             metadata,
             selection,
             output_settings,
+            detection_sample_fps,
             original_metadata,
         )
 
@@ -487,7 +493,11 @@ class ProcessingPipeline:
         selected_index = inputs.metadata.frame_for_time_ms(inputs.selection.frame_time_ms)
         tap_normalized_x = inputs.selection.normalized_x
         tap_normalized_y = inputs.selection.normalized_y
-        detections: list[tuple[Detection, ...]] = []
+        detections: list[tuple[Detection, ...] | None] = []
+        # Cross regular sampling ticks on the exact CFR clock, never rounded milliseconds.
+        # The selected frame is an extra sample and does not shift the regular grid.
+        sample_step = Fraction(str(inputs.detection_sample_fps)) / inputs.metadata.frame_rate
+        numerator, denominator = sample_step.numerator, sample_step.denominator
         frames = iter(self.frame_reader.read(inputs.source, inputs.metadata))
         try:
             for index, frame in enumerate(frames):
@@ -499,7 +509,16 @@ class ProcessingPipeline:
                     raise terminal(
                         ErrorCode.INVALID_MEDIA, "Video frames could not be analyzed consistently."
                     )
-                detections.append(tuple(self.analyzer.detector.detect(frame.pixels)))
+                sampled = (
+                    numerator == 0
+                    or numerator >= denominator
+                    or index == 0
+                    or index == selected_index
+                    or index * numerator // denominator > (index - 1) * numerator // denominator
+                )
+                detections.append(
+                    tuple(self.analyzer.detector.detect(frame.pixels)) if sampled else None
+                )
                 del frame
         finally:
             close = getattr(frames, "close", None)
@@ -509,9 +528,19 @@ class ProcessingPipeline:
             raise terminal(
                 ErrorCode.INVALID_MEDIA, "Video frames could not be analyzed consistently."
             )
-        observations: list[RawFrameObservation | None] = [None] * expected
+        observations = [
+            RawFrameObservation(
+                index,
+                inputs.metadata.timestamp_for_frame(index),
+                None,
+                SelectionOutcome.DETECTION_SKIPPED,
+            )
+            for index in range(expected)
+        ]
+        selected_detections = detections[selected_index]
+        assert selected_detections is not None
         observations[selected_index] = self.analyzer.select_selected(
-            detections[selected_index],
+            selected_detections,
             frame_index=selected_index,
             timestamp_ms=inputs.metadata.timestamp_for_frame(selected_index),
             normalized_x=tap_normalized_x,
@@ -522,27 +551,20 @@ class ProcessingPipeline:
         )
         self._associate_from_selected(observations, detections, selected_index, 1, inputs.metadata)
         self._associate_from_selected(observations, detections, selected_index, -1, inputs.metadata)
-        finalized_observations = [
-            observation for observation in observations if observation is not None
-        ]
-        if len(finalized_observations) != expected:
-            raise terminal(
-                ErrorCode.INVALID_MEDIA, "Video frames could not be analyzed consistently."
-            )
-        planner_measurements = _planner_measurements(finalized_observations)
+        planner_measurements = _planner_measurements(observations)
         plan = self.planner_factory(
             width, height, inputs.output_settings.aspect_ratio, inputs.output_settings.profile
         ).plan(planner_measurements)
         self._write_crop_path(
             crop_path,
-            finalized_observations,
+            observations,
             plan,
         )
         if self.debug_capture:
             try:
                 self._write_analysis_trace(
                     inputs.source.parent / _ANALYSIS_TRACE,
-                    finalized_observations,
+                    observations,
                     planner_measurements,
                     plan,
                     self.debug_max_frames,
@@ -555,8 +577,8 @@ class ProcessingPipeline:
 
     def _associate_from_selected(
         self,
-        observations: list[RawFrameObservation | None],
-        detections: Sequence[Sequence[Detection]],
+        observations: list[RawFrameObservation],
+        detections: Sequence[Sequence[Detection] | None],
         selected_index: int,
         direction: int,
         metadata: MediaMetadata,
@@ -566,8 +588,11 @@ class ProcessingPipeline:
         reference_bounds = selected.detector_bounds
         stop = len(detections) if direction > 0 else -1
         for index in range(selected_index + direction, stop, direction):
+            sampled_detections = detections[index]
+            if sampled_detections is None:
+                continue
             observation = self.analyzer.associate(
-                detections[index],
+                sampled_detections,
                 frame_index=index,
                 timestamp_ms=metadata.timestamp_for_frame(index),
                 reference=reference_bounds.center,
@@ -949,13 +974,33 @@ def _output_settings(configuration: JobConfiguration) -> OutputSettings:
         ) from error
 
 
+def _detection_sample_fps(configuration: JobConfiguration) -> int | float:
+    value = configuration.planner.get("detection_sample_fps")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not 0 <= value <= 1000
+        or not isfinite(value)
+    ):
+        raise terminal(ErrorCode.INTERNAL, "The job detection sampling configuration is invalid.")
+    return value
+
+
 def _planner_measurements(observations: Sequence[RawFrameObservation]) -> list[FrameMeasurement]:
-    return [
-        FrameMeasurement(
-            observation.detector_bounds, observation.timestamp_ms, observation.confidence
+    measurements: list[FrameMeasurement] = []
+    held: Detection | None = None
+    for observation in observations:
+        if observation.selection_outcome is not SelectionOutcome.DETECTION_SKIPPED:
+            # A sampled miss clears the held box until a later successful sample.
+            held = observation.detection
+        measurements.append(
+            FrameMeasurement(
+                None if held is None else held.bounds,
+                observation.timestamp_ms,
+                0 if held is None else held.confidence,
+            )
         )
-        for observation in observations
-    ]
+    return measurements
 
 
 def _render_mapping_samples(crops: Sequence[CropRect]) -> tuple[int, ...]:
@@ -1111,7 +1156,18 @@ def _review_summary(trace: Sequence[Mapping[str, object]], phase: str) -> dict[s
             _mapping(_mapping(record.get("detection")).get("detection")).get("bounds") is not None
             for record in trace
         )
-        return {"frames": len(trace), "detected_frames": detected}
+        skipped = sum(
+            _mapping(record.get("detection")).get("selection_outcome")
+            == SelectionOutcome.DETECTION_SKIPPED.value
+            for record in trace
+        )
+        return {
+            "frames": len(trace),
+            "sampled_frames": len(trace) - skipped,
+            "skipped_frames": skipped,
+            "detected_frames": detected,
+            "missed_frames": len(trace) - skipped - detected,
+        }
     if phase == "framing":
         risks = sum(
             bool(
@@ -1136,7 +1192,7 @@ def _review_summary(trace: Sequence[Mapping[str, object]], phase: str) -> dict[s
         return {
             "frames": len(trace),
             "containment_override_frames": risks,
-            "missed_frames": misses,
+            "unavailable_detection_frames": misses,
             "source_aspect_limited_frames": limited,
         }
     verified = sum(
@@ -1151,12 +1207,16 @@ def _review_warning_intervals(
 ) -> list[dict[str, object]]:
     def warning(record: Mapping[str, object]) -> tuple[str, str] | None:
         detection = _mapping(record.get("detection"))
-        if phase == "detection" and _mapping(detection.get("detection")).get("bounds") is None:
+        if (
+            phase == "detection"
+            and detection.get("selection_outcome") != SelectionOutcome.DETECTION_SKIPPED.value
+            and _mapping(detection.get("detection")).get("bounds") is None
+        ):
             return "Detection unavailable", "No detector bounds were recorded."
         if phase == "framing" and bool(
             _mapping(_mapping(record.get("framing")).get("decision")).get("detection_missed")
         ):
-            return "Detection missed", "Crop widened without extrapolating athlete position."
+            return "Held detection unavailable", "Crop widened until a successful detection sample."
         if phase == "framing" and bool(
             _mapping(_mapping(record.get("framing")).get("decision")).get("source_aspect_limited")
         ):

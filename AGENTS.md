@@ -39,6 +39,7 @@ Update the focused documentation and its index whenever an implementation decisi
 - Pan follows the detected person-box center with independent hysteresis: enter beyond 1% of crop dimensions and close the gate within 0.4%.
 - Zoom targets a fixed detected-athlete height fraction: `tight` .60, `balanced` .50, `safe` .40, and `full_movement` .33. Enter beyond 5% relative target error and close the gate within 2%.
 - Update motion using strictly increasing frame timestamps: speed/acceleration-limited log-height zoom and source-normalized pan brake near targets, preserve velocity on retargeting, and briefly settle after a gate closes. Idle crops at rest hold exactly.
+- Sample detection using immutable `planner.detection_sample_fps` (deployment default 10 fps; 0 detects every frame), always including the selected frame. Skips hold the last chronological sampled camera target; only a real sampled miss clears it and widens. Keep full-rate smooth planning/rendering, never predict athlete positions, and accept brief loss of containment between samples.
 - Containment and source/aspect bounds override deadbands and motion limits. On a missed detection, bypass/reset the gates and widen toward the full source frame; never extrapolate an athlete position for a close crop.
 - Keep the first deterministic crop planner behind an interface so a future whole-shot optimizer can replace it without changing API or storage contracts.
 

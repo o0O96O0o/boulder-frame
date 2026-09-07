@@ -19,6 +19,26 @@ detection and does not update the reference; no target position or identity is e
 is `OnnxSsdMobileNetV1Detector`; its local artifact, tensor contract, checksum, and license are in
 [Model Manifest](models.md).
 
+## Configurable Detection Sampling
+
+Pipeline `w0.2.4` snapshots `planner.detection_sample_fps` from the backend deployment setting
+`DETECTION_SAMPLE_FPS` (default `10`). Values are finite numbers from `0` through `1000`;
+`0` disables sampling. A rate at or above the source frame rate also detects every frame.
+The worker requires this immutable setting; it never reads a live sampling environment variable.
+
+Use a regular time grid based on the processing video's rational CFR timing, starting at frame zero.
+Detect the first frame at or after each grid time and always include the exact selected frame,
+without shifting the grid or detecting that frame twice. Associate only sampled detections forward
+and backward from the selected frame.
+
+Planning and rendering still run at the video's full frame rate. In chronological order, hold the
+latest sampled result as the camera target between samples. Do not use future boxes, interpolate
+athlete positions, or count skipped inference as a detection failure. A real sampled miss clears the
+held box and continues safe widening through skipped frames until a successful sample.
+The existing timestamp-based camera controller keeps moving smoothly toward held targets.
+Containment between samples applies only to the held box: the athlete may briefly leave the crop.
+All source frames are still decoded; this saves detector inference, not decoding or rendering.
+
 ## Detector-Box Planner
 
 `FrameMeasurement` contains `detector_bounds`, required integer `timestamp_ms`, and detector
@@ -118,14 +138,15 @@ and `widen_on_miss`; a safety action does not erase the gate diagnostics. See th
 [telemetry contract](debug-telemetry-and-evaluation.md#telemetry-contract) for serialization.
 
 All eight thresholds and motion limits are algorithm constants, not frontend controls or public job
-inputs. Pipeline `w0.2.3` and the immutable planner configuration separate this behavior from older
+inputs. Pipeline `w0.2.4` and the immutable planner configuration, including the sampling rate, separate this behavior from older
 cached paths.
 
 ```mermaid
 flowchart LR
   S[Selected-frame tap] --> A[Detector association]
-  D[Per-frame person detection] --> A
-  A -->|accepted box or no detection| F[Frame measurement]
+  D[Sampled person detection plus selected frame] --> A
+  A -->|sampled box or actual miss| H[Chronological held camera target]
+  H --> F[Full-rate frame measurement]
   F -->|detection| P[Profile crop and source clamp]
   P --> S1[Scale gate and timestamp motion]
   S1 --> S2[Independent center gate and timestamp motion]

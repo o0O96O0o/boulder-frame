@@ -113,6 +113,7 @@ class DebugFrame:
     rendered_timestamp_ms: int | None
     render_mapping_independently_verified: bool = False
     source_aspect_limited: bool = False
+    detection_sampled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,9 +311,7 @@ def evaluate(bundle: DebugBundle, annotations: AnnotationSet) -> EvaluationRepor
     frames: list[FrameMetrics] = []
     for debug in bundle.frames:
         annotation = annotation_by_index.get(debug.frame_index)
-        values = _frame_metrics(
-            debug, annotation, motion.get(debug.frame_index)
-        )
+        values = _frame_metrics(debug, annotation, motion.get(debug.frame_index))
         frames.append(values)
     recorded_indices = {frame.frame_index for frame in bundle.frames}
     for annotation in annotations.frames:
@@ -400,6 +399,7 @@ def _debug_frame(record: object) -> DebugFrame:
         else _boolean(
             decision.get("source_aspect_limited", False), "framing.source_aspect_limited"
         ),
+        detection_section.get("selection_outcome") != "detection_skipped",
     )
 
 
@@ -449,8 +449,12 @@ def _frame_metrics(
         return _empty_metrics(debug, motion, FailureClass.INSUFFICIENT_ANNOTATION)
     if not annotation.visible or annotation.bounds is None:
         return _empty_metrics(debug, motion, None)
-    detection_iou = None if debug.detection is None else _iou(debug.detection, annotation.bounds)
-    detection_available = debug.detection is not None
+    detection_iou = (
+        None
+        if not debug.detection_sampled or debug.detection is None
+        else _iou(debug.detection, annotation.bounds)
+    )
+    detection_available = (debug.detection is not None) if debug.detection_sampled else None
     selected = detection_available if debug.selected is None else debug.selected
     selection_correct = (
         None
@@ -520,12 +524,12 @@ def _empty_metrics(
 
 def _failure(
     annotation: AnnotationFrame,
-    detection_available: bool,
+    detection_available: bool | None,
     selection_correct: bool | None,
     contained: bool | None,
     debug: DebugFrame,
 ) -> FailureClass | None:
-    if not detection_available:
+    if detection_available is False:
         return FailureClass.DETECTION
     if selection_correct is False:
         return FailureClass.SELECTION
@@ -604,7 +608,12 @@ def _motion_metrics(
 
 def _aggregate(frames: Iterable[FrameMetrics]) -> dict[str, float | int | None]:
     values = tuple(frames)
-    visible = tuple(frame for frame in values if frame.detection_available is not None)
+    sampled = tuple(frame for frame in values if frame.detection_available is not None)
+    visible = tuple(
+        frame
+        for frame in values
+        if frame.detection_available is not None or frame.crop_contains_subject is not None
+    )
     selection_evaluated = tuple(frame for frame in visible if frame.selection_correct is not None)
     true_positives = sum(frame.selection_correct is True for frame in selection_evaluated)
     false_positives = sum(frame.selection_correct is False for frame in selection_evaluated)
@@ -612,9 +621,9 @@ def _aggregate(frames: Iterable[FrameMetrics]) -> dict[str, float | int | None]:
     return {
         "annotated_frames": len(visible),
         "detection_availability": _rate(
-            sum(frame.detection_available is True for frame in visible), len(visible)
+            sum(frame.detection_available is True for frame in sampled), len(sampled)
         ),
-        "mean_detection_iou": _mean(frame.detection_iou for frame in visible),
+        "mean_detection_iou": _mean(frame.detection_iou for frame in sampled),
         "selection_precision": _rate(true_positives, true_positives + false_positives),
         "selection_recall": _rate(true_positives, true_positives + false_negatives),
         "crop_containment": _rate(

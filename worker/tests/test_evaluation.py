@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -342,6 +343,51 @@ def test_detector_only_telemetry_reports_source_aspect_limited_framing() -> None
 
     assert value.frames[0].source_aspect_limited
     assert value.aggregate["source_aspect_limited_rate"] == 1
+
+
+def test_skipped_detection_does_not_count_as_miss_but_still_evaluates_framing(tmp_path) -> None:
+    path = tmp_path / "sampled-debug.jsonl.gz"
+    with DebugBundleWriter(
+        path,
+        debug_bundle_header(
+            job_id="sampled-job",
+            source_metadata=source_json(),
+            pipeline_version="pipeline-v1",
+            model_version="model-v1",
+            planner_config={"detection_sample_fps": 5},
+            model_manifest={},
+        ),
+    ) as writer:
+        writer.write("frame", frame_record(0, 0))
+        skipped = frame_record(1, 100)
+        skipped["detection"] = {"detection": None, "selection_outcome": "detection_skipped"}
+        skipped["framing"]["crop"] = {"x": 25, "y": 25, "width": 20, "height": 30}
+        writer.write("frame", skipped)
+        missed = frame_record(2, 200)
+        missed["detection"] = {"detection": None, "selection_outcome": "no_detections"}
+        writer.write("frame", missed)
+
+    bundle = load_debug_bundle(path, max_frames=3)
+    value = evaluate(
+        bundle,
+        AnnotationSet(
+            "sampled-case",
+            SOURCE,
+            "reviewer",
+            tuple(
+                replace(ANNOTATION, frame_index=index, timestamp_ms=index * 100)
+                for index in range(3)
+            ),
+        ),
+    )
+    assert value.frames[1].detection_available is None
+    assert value.frames[1].detection_iou is None
+    assert value.frames[1].selection_correct is None
+    assert value.frames[1].failure is FailureClass.FRAMING
+    assert value.frames[2].failure is FailureClass.DETECTION
+    assert value.aggregate["annotated_frames"] == 3
+    assert value.aggregate["detection_availability"] == 0.5
+    assert value.aggregate["crop_containment"] == pytest.approx(2 / 3)
 
 
 @pytest.mark.parametrize(

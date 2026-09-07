@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 from uuid import uuid4
@@ -9,7 +10,13 @@ from boulder_frame_worker.errors import ErrorCode, WorkerError, terminal
 from boulder_frame_worker.frame_reader import DecodedFrame
 from boulder_frame_worker.measurement import Detection, Rect
 from boulder_frame_worker.media import MediaMetadata, TemporalFrameProgress
-from boulder_frame_worker.pipeline import ProcessingPipeline, _Inputs, _render_mapping_samples
+from boulder_frame_worker.pipeline import (
+    ProcessingPipeline,
+    _Inputs,
+    _render_mapping_samples,
+    _review_summary,
+    _review_warning_intervals,
+)
 from boulder_frame_worker.planner import CropRect
 from boulder_frame_worker.protocol import (
     AspectRatio,
@@ -72,7 +79,7 @@ class Renderer:
         return Inspector().inspect(output)
 
 
-def record(frame_time_ms: int = 0) -> JobRecord:
+def record(frame_time_ms: int = 0, *, detection_sample_fps: int | float = 0) -> JobRecord:
     source_id = uuid4()
     return JobRecord(
         id=uuid4(),
@@ -83,12 +90,212 @@ def record(frame_time_ms: int = 0) -> JobRecord:
             {"aspect_ratio": "16:9", "profile": "balanced"},
             "pipeline",
             "model",
-            {},
+            {"detection_sample_fps": detection_sample_fps},
         ),
         source_asset=SourceAsset(
             source_id, uuid4(), "source", "uploaded", None, None, 1, None, None, None, None
         ),
     )
+
+
+def sampling_pipeline(
+    source_fps: Fraction,
+    frame_count: int,
+    *,
+    sample_fps: int | float = 10,
+    selected_time_ms: int = 0,
+    boxes: dict[int, Rect | None] | None = None,
+):
+    duration = Fraction(frame_count, 1) / source_fps
+    metadata = MediaMetadata(
+        1920, 1080, round(duration * 1000), source_fps, "h264", None, 0, False, duration
+    )
+    calls: list[int] = []
+
+    class SamplingInspector:
+        def inspect(self, path, *, allow_variable_frame_rate=False):
+            return metadata
+
+    class Frames:
+        def read(self, source, metadata):
+            for index in range(frame_count):
+                yield DecodedFrame(index, metadata.timestamp_for_frame(index), index)
+
+    class Detector:
+        def detect(self, index):
+            calls.append(index)
+            box = Rect(860, 340, 200, 400) if boxes is None else boxes[index]
+            return [] if box is None else [Detection(box, 0.9)]
+
+    return (
+        ProcessingPipeline(
+            Storage(),
+            Finalizer(),
+            inspector=SamplingInspector(),
+            renderer=Renderer(),
+            frame_reader=Frames(),
+            detector=Detector(),
+            debug_capture=True,
+        ),
+        record(selected_time_ms, detection_sample_fps=sample_fps),
+        calls,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_fps", "frame_count", "sample_fps", "selected_time_ms", "expected"),
+    [
+        (Fraction(30), 12, 10, 134, [0, 3, 4, 6, 9]),
+        (Fraction(30), 8, 0, 0, list(range(8))),
+        (Fraction(5), 6, 10, 0, list(range(6))),
+        (Fraction(24000, 1001), 13, 10, 0, [0, 3, 5, 8, 10, 12]),
+        (Fraction(30), 13, 12.5, 0, [0, 3, 5, 8, 10, 12]),
+        (Fraction(1, 2), 6, 0.2, 0, [0, 3, 5]),
+    ],
+)
+def test_sampling_detects_exact_grid_plus_selection_and_replays_all_cached_crops(
+    tmp_path, source_fps, frame_count, sample_fps, selected_time_ms, expected
+) -> None:
+    pipeline, job, calls = sampling_pipeline(
+        source_fps,
+        frame_count,
+        sample_fps=sample_fps,
+        selected_time_ms=selected_time_ms,
+    )
+    pipeline.analyzing(job, tmp_path)
+    crops = (tmp_path / "crop-path.jsonl").read_bytes()
+    rows = [json.loads(line) for line in crops.splitlines()]
+    assert calls == expected
+    assert [row["frame_index"] for row in rows] == list(range(frame_count))
+    assert [row["timestamp_ms"] for row in rows] == [
+        round(Fraction(index * 1000, 1) / source_fps) for index in range(frame_count)
+    ]
+    pipeline.analyzing(job, tmp_path)
+    assert calls == expected
+    assert (tmp_path / "crop-path.jsonl").read_bytes() == crops
+
+
+def test_skips_continue_camera_motion_but_sampled_miss_clears_hold_until_reacquisition(
+    tmp_path,
+) -> None:
+    moved = Rect(960, 390, 200, 300)
+    pipeline, job, calls = sampling_pipeline(
+        Fraction(30),
+        15,
+        boxes={0: Rect(860, 340, 200, 400), 3: moved, 6: None, 9: None, 12: moved},
+    )
+    pipeline.analyzing(job, tmp_path)
+    trace = [
+        json.loads(line) for line in (tmp_path / "analysis-trace.jsonl").read_text().splitlines()
+    ]
+    assert calls == [0, 3, 6, 9, 12]
+    for index in (4, 5):
+        assert trace[index]["detection"]["selection_outcome"] == "detection_skipped"
+        assert trace[index]["detection"]["detection"] is None
+        assert "selection" not in trace[index]["detection"]
+        assert trace[index]["framing"]["input"] == trace[3]["framing"]["input"]
+        previous = trace[index - 1]["framing"]["crop"]
+        current = trace[index]["framing"]["crop"]
+        assert current["height"] < previous["height"]
+        assert current["x"] + current["width"] / 2 > previous["x"] + previous["width"] / 2
+    for index in range(6, 12):
+        assert trace[index]["framing"]["input"]["detector_bounds"] is None
+        assert trace[index]["framing"]["decision"]["detection_missed"]
+        assert (
+            trace[index]["framing"]["crop"]["height"]
+            > trace[index - 1]["framing"]["crop"]["height"]
+        )
+    assert trace[9]["detection"]["selection"]["reference"] == {"x": 1060, "y": 540}
+    assert trace[12]["detection"]["detection"] is not None
+    assert not trace[12]["framing"]["decision"]["detection_missed"]
+    assert trace[13]["framing"]["input"] == trace[12]["framing"]["input"]
+    assert _review_summary(trace, "detection") == {
+        "frames": 15,
+        "sampled_frames": 5,
+        "skipped_frames": 10,
+        "detected_frames": 3,
+        "missed_frames": 2,
+    }
+    warnings = _review_warning_intervals(trace, "detection")
+    assert [(warning["start_ms"], warning["end_ms"]) for warning in warnings] == [
+        (200, 233),
+        (300, 333),
+    ]
+
+
+def test_off_grid_selected_sample_miss_is_terminal_even_with_neighbors_detected(tmp_path) -> None:
+    target = Rect(860, 340, 200, 400)
+    pipeline, job, calls = sampling_pipeline(
+        Fraction(30),
+        12,
+        selected_time_ms=134,
+        boxes={0: target, 3: target, 4: None, 6: target, 9: target},
+    )
+    with pytest.raises(WorkerError) as raised:
+        pipeline.analyzing(job, tmp_path)
+    assert raised.value.code is ErrorCode.NO_SELECTED_ATHLETE
+    assert calls == [0, 3, 4, 6, 9]
+    assert not (tmp_path / "crop-path.jsonl").exists()
+
+
+def test_late_selection_never_holds_future_boxes_into_earlier_frames(tmp_path) -> None:
+    pipeline, job, calls = sampling_pipeline(
+        Fraction(30),
+        12,
+        selected_time_ms=267,
+        boxes={
+            0: None,
+            3: None,
+            6: Rect(700, 340, 200, 400),
+            8: Rect(800, 340, 200, 400),
+            9: Rect(820, 340, 200, 400),
+        },
+    )
+    pipeline.analyzing(job, tmp_path)
+    trace = [
+        json.loads(line) for line in (tmp_path / "analysis-trace.jsonl").read_text().splitlines()
+    ]
+    assert calls == [0, 3, 6, 8, 9]
+    assert all(row["framing"]["input"]["detector_bounds"] is None for row in trace[:6])
+    assert all(
+        row["framing"]["crop"] == {"x": 0, "y": 0, "width": 1920, "height": 1080}
+        for row in trace[:6]
+    )
+    assert [row["framing"]["input"]["detector_bounds"]["x"] for row in trace[6:]] == [
+        700,
+        700,
+        800,
+        820,
+        820,
+        820,
+    ]
+    assert trace[3]["detection"]["selection"]["reference"] == {"x": 800, "y": 540}
+    assert trace[0]["detection"]["selection"]["reference"] == {"x": 800, "y": 540}
+
+
+@pytest.mark.parametrize(
+    "planner",
+    [
+        {},
+        {"detection_sample_fps": None},
+        {"detection_sample_fps": True},
+        {"detection_sample_fps": "10"},
+        {"detection_sample_fps": -1},
+        {"detection_sample_fps": 1001},
+        {"detection_sample_fps": float("nan")},
+        {"detection_sample_fps": float("inf")},
+    ],
+)
+def test_invalid_snapshot_sampling_is_rejected_before_cached_crop_replay(tmp_path, planner) -> None:
+    pipeline, job, calls = sampling_pipeline(Fraction(30), 6)
+    pipeline.analyzing(job, tmp_path)
+    cached = (tmp_path / "crop-path.jsonl").read_bytes()
+    invalid = replace(job, configuration=replace(job.configuration, planner=planner))
+    with pytest.raises(WorkerError) as raised:
+        pipeline.analyzing(invalid, tmp_path)
+    assert raised.value.code is ErrorCode.INTERNAL
+    assert calls == [0, 3]
+    assert (tmp_path / "crop-path.jsonl").read_bytes() == cached
 
 
 def test_validation_phase_reports_persisted_and_inspected_source_metadata(tmp_path) -> None:
@@ -286,6 +493,7 @@ def test_temporal_progress_compares_normalized_input_output_and_original_source(
         Inspector().inspect(tmp_path / "output.mp4"),
         TargetSelection(0, 0.5, 0.5),
         OutputSettings(AspectRatio.LANDSCAPE, FramingProfile.BALANCED),
+        0,
     )
     (tmp_path / "crop-path.jsonl").write_text(
         """{"crop":{"height":1080,"width":1920,"x":0,"y":0},"frame_index":0,"timestamp_ms":0}
@@ -329,6 +537,7 @@ def test_render_progress_is_skipped_without_debug_capture(tmp_path) -> None:
         Inspector().inspect(tmp_path / "output.mp4"),
         TargetSelection(0, 0.5, 0.5),
         OutputSettings(AspectRatio.LANDSCAPE, FramingProfile.BALANCED),
+        0,
     )
 
     pipeline._log_render_progress(record(), inputs)

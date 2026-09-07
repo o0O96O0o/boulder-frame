@@ -4,29 +4,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"time"
 )
 
 type Config struct {
-	SourcePath        string
-	HTTPAddr          string
-	DatabaseURL       string
-	RedisURL          string
-	S3Endpoint        string
-	S3PresignEndpoint string
-	S3Region          string
-	S3Bucket          string
-	S3AccessKey       string
-	S3SecretKey       string
-	S3UsePathStyle    bool
-	URLTTL            time.Duration
-	MaxUploadBytes    int64
-	PipelineVersion   string
-	ModelVersion      string
-	DevelopmentOwner  string
-	WebBaseURL        string
+	SourcePath         string
+	HTTPAddr           string
+	DatabaseURL        string
+	RedisURL           string
+	S3Endpoint         string
+	S3PresignEndpoint  string
+	S3Region           string
+	S3Bucket           string
+	S3AccessKey        string
+	S3SecretKey        string
+	S3UsePathStyle     bool
+	URLTTL             time.Duration
+	MaxUploadBytes     int64
+	PipelineVersion    string
+	DetectionSampleFPS float64
+	ModelVersion       string
+	DevelopmentOwner   string
+	WebBaseURL         string
 }
 
 const (
@@ -46,26 +48,42 @@ func Load(paths ...string) (Config, error) {
 		return Config{}, fmt.Errorf("read configuration %q: %w", path, err)
 	}
 	var raw struct {
-		HTTPAddr          string `json:"http_addr"`
-		DatabaseURL       string `json:"database_url"`
-		RedisURL          string `json:"redis_url"`
-		S3Endpoint        string `json:"s3_endpoint"`
-		S3PresignEndpoint string `json:"s3_presign_endpoint"`
-		S3Region          string `json:"s3_region"`
-		S3Bucket          string `json:"s3_bucket"`
-		S3AccessKey       string `json:"s3_access_key"`
-		S3SecretKey       string `json:"s3_secret_key"`
-		S3UsePathStyle    bool   `json:"s3_use_path_style"`
-		SignedURLTTL      string `json:"signed_url_ttl"`
-		MaxUploadBytes    int64  `json:"max_upload_bytes"`
-		PipelineVersion   string `json:"pipeline_version"`
-		ModelVersion      string `json:"model_version"`
-		DevelopmentOwner  string `json:"development_owner"`
-		WebBaseURL        string `json:"web_base_url"`
+		HTTPAddr           string       `json:"http_addr"`
+		DatabaseURL        string       `json:"database_url"`
+		RedisURL           string       `json:"redis_url"`
+		S3Endpoint         string       `json:"s3_endpoint"`
+		S3PresignEndpoint  string       `json:"s3_presign_endpoint"`
+		S3Region           string       `json:"s3_region"`
+		S3Bucket           string       `json:"s3_bucket"`
+		S3AccessKey        string       `json:"s3_access_key"`
+		S3SecretKey        string       `json:"s3_secret_key"`
+		S3UsePathStyle     bool         `json:"s3_use_path_style"`
+		SignedURLTTL       string       `json:"signed_url_ttl"`
+		MaxUploadBytes     int64        `json:"max_upload_bytes"`
+		PipelineVersion    string       `json:"pipeline_version"`
+		DetectionSampleFPS *json.Number `json:"detection_sample_fps"`
+		ModelVersion       string       `json:"model_version"`
+		DevelopmentOwner   string       `json:"development_owner"`
+		WebBaseURL         string       `json:"web_base_url"`
 	}
-	contents = []byte(os.Expand(string(contents), os.Getenv))
+	defaultDetectionSampleFPS := json.Number("10")
+	raw.DetectionSampleFPS = &defaultDetectionSampleFPS
+	contents = []byte(os.Expand(string(contents), func(name string) string {
+		value := os.Getenv(name)
+		if name == "DETECTION_SAMPLE_FPS" && value == "" {
+			return "10"
+		}
+		return value
+	}))
 	if err := json.Unmarshal(contents, &raw); err != nil {
 		return Config{}, fmt.Errorf("parse configuration %q: %w", path, err)
+	}
+	if raw.DetectionSampleFPS == nil {
+		return Config{}, errors.New("detection_sample_fps must be a finite number between 0 and 1000")
+	}
+	detectionSampleFPS, err := raw.DetectionSampleFPS.Float64()
+	if err != nil || math.IsNaN(detectionSampleFPS) || math.IsInf(detectionSampleFPS, 0) || detectionSampleFPS < 0 || detectionSampleFPS > 1000 {
+		return Config{}, errors.New("detection_sample_fps must be a finite number between 0 and 1000")
 	}
 	c := Config{
 		SourcePath: path,
@@ -74,7 +92,8 @@ func Load(paths ...string) (Config, error) {
 		S3Region: raw.S3Region, S3Bucket: raw.S3Bucket, S3AccessKey: raw.S3AccessKey,
 		S3SecretKey: raw.S3SecretKey, S3UsePathStyle: raw.S3UsePathStyle,
 		PipelineVersion: raw.PipelineVersion, ModelVersion: raw.ModelVersion,
-		DevelopmentOwner: raw.DevelopmentOwner, WebBaseURL: raw.WebBaseURL,
+		DetectionSampleFPS: detectionSampleFPS,
+		DevelopmentOwner:   raw.DevelopmentOwner, WebBaseURL: raw.WebBaseURL,
 	}
 	if c.ModelVersion == localEnvUnconfiguredModelVersion {
 		c.ModelVersion = unconfiguredModelVersion

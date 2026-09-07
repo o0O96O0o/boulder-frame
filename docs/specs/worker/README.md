@@ -8,7 +8,7 @@ job state and object storage owns video assets.
 
 - [Runtime and Pipeline](runtime-and-pipeline.md): configuration, task boundary, media validation, cache isolation across version cutovers, and durable processing.
 - [Model Manifest](models.md): W0.2 detector artifact, license, checksum, tensor contract, and provisioning.
-- [Detection and Framing](measurements-and-planner.md): selection association, coordinates, profile targets, hysteresis, timestamp-based speed/acceleration limits, braking/settling, and safety/miss behavior.
+- [Detection and Framing](measurements-and-planner.md): configurable sampled detection, held camera targets, selection association, coordinates, profile targets, hysteresis, timestamp-based speed/acceleration limits, braking/settling, and safety/miss behavior.
 - [Debug Telemetry and Evaluation](debug-telemetry-and-evaluation.md): bounded private telemetry, gate/settling evidence, immutable motion configuration, and detector-only visual-review contract.
 
 ## Current Contract
@@ -17,7 +17,7 @@ The worker consumes Redis Streams tasks under a PostgreSQL lease, downloads and 
 normalizes supported VFR input only in job scratch, detects the selected athlete, derives a
 `deterministic-v3` crop path with independent hysteresis and timestamp-based speed/acceleration
 limits, renders and validates 1080p H.264/AAC output, and finalizes it under the active lease.
-The default pipeline is `w0.2.3`.
+The default pipeline is `w0.2.4`, with detection sampled at 10 fps by default and full-rate planning/rendering.
 It uses model version
 `w0.2-ssd-mobilenetv1-12-onnx-detector-only-1`; a matching unconfigured runtime fails jobs safely
 with `model_unavailable`, while a configured W0.2 runtime with an unavailable decoder or invalid
