@@ -55,16 +55,24 @@ connection URLs or credentials.
 
 ## Pipeline Version Cutover
 
-Backend and worker must receive the same `PIPELINE_VERSION`. A new value denotes immutable processing
-behavior and changes the backend job-configuration hash. Because the worker currently enforces model
-version but not pipeline version when claiming work, do not use a rolling deployment across pipeline
-versions.
+Backend and worker must receive the same `PIPELINE_VERSION` and `MODEL_VERSION`. A new value denotes
+immutable processing behavior and changes the backend job-configuration hash. The worker enforces
+the model version but not the pipeline version when claiming work. Do not use a rolling deployment
+across versions.
 
-For the pan-only full-shot look-ahead release, set `PIPELINE_VERSION=w0.2.5` explicitly in the
-deployment's private `.env`; the example file does not migrate it. Stop new submissions, let the old
-workers finish all queued and leased jobs, and confirm the Redis consumer group has no pending
-deliveries. Stop old workers, deploy backend and worker together with the new shared value, verify
-both startup summaries, then reopen submissions. Never replace workers before this drain.
+For the YOLO26n detector release, provision the verified `yolo26n.onnx`, then explicitly set
+`PIPELINE_VERSION=w0.2.6` and `MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1` in the deployment's
+private `.env`; the example file does not migrate it. Stop new submissions, let the old workers finish
+all queued and leased jobs, and confirm the Redis consumer group has no pending deliveries. Stop old
+workers, deploy backend and worker together with the new shared values, verify both startup summaries,
+then reopen submissions. Never replace workers before this drain.
+
+The detector runs CPU-only ONNX Runtime with 2 intra-op threads and 1 inter-op thread. Keep
+`WORKER_CONCURRENCY=1` on a 2-vCPU host. Its fixed input is FP32 batch 1, RGB 640x640 letterboxed,
+and the approved end-to-end export explicitly uses `nms=False`; no runtime NMS is added. The
+AGPL-3.0 model license is accepted; retain the bundled license and satisfy applicable corresponding-source
+and network-use obligations. See [model provisioning](../worker/models.md) for pinned export and
+verified local-artifact installation. Never accept an export with a different hash.
 
 `DETECTION_SAMPLE_FPS` configures the backend's new-job sampling snapshot. It defaults to `10`;
 `0` runs inference on every frame. Finite fractional values from `0` through `1000` are accepted.

@@ -1,18 +1,43 @@
 {
   "schema_version": 1,
-  "model_version": "w0.2-ssd-mobilenetv1-12-onnx-detector-only-1",
+  "model_version": "w0.2-yolo26n-onnx-detector-only-1",
   "artifacts": [
     {
       "id": "person_detector",
-      "file_name": "ssd_mobilenet_v1_12.onnx",
+      "file_name": "yolo26n.onnx",
       "role": "COCO person detector",
-      "version": "SSD-MobilenetV1-12; ONNX 1.9.0; opset 12",
-      "source_url": "https://media.githubusercontent.com/media/onnx/models/4f43949841cb55a0b98dc8fcd045431ccafd9f96/validated/vision/object_detection_segmentation/ssd-mobilenetv1/model/ssd_mobilenet_v1_12.onnx",
-      "source_commit": "4f43949841cb55a0b98dc8fcd045431ccafd9f96",
-      "sha256": "b8fba5e404077d4048d27fcd1667e85e27e192eb9bf51e696c46a3acd7d21058",
-      "size_bytes": 29461455,
-      "license": "MIT",
-      "license_url": "https://github.com/onnx/models/blob/4f43949841cb55a0b98dc8fcd045431ccafd9f96/validated/vision/object_detection_segmentation/ssd-mobilenetv1/README.md#license"
+      "version": "YOLO26n; Ultralytics 8.4.143; ONNX opset 17; end-to-end FP32 640",
+      "sha256": "5337a01d635c068479e7e4ff41ebb8142a8e0152afc6d0cd9e60db3dba2d8597",
+      "size_bytes": 9892215,
+      "license": "AGPL-3.0",
+      "license_url": "https://github.com/ultralytics/ultralytics/blob/v8.4.143/LICENSE",
+      "source_checkpoint": {
+        "file_name": "yolo26n.pt",
+        "source_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt",
+        "sha256": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef",
+        "size_bytes": 5544453
+      },
+      "export": {
+        "python": "3.12",
+        "packages": {
+          "ultralytics": "8.4.143",
+          "torch": "2.6.0",
+          "torchvision": "0.21.0",
+          "onnx": "1.17.0",
+          "numpy": "1.26.4",
+          "opencv-python": "4.11.0.86"
+        },
+        "opset": 17,
+        "imgsz": 640,
+        "batch": 1,
+        "dynamic": false,
+        "half": false,
+        "simplify": false,
+        "nms": false,
+        "end2end": true,
+        "device": "cpu",
+        "metadata": "remove_all"
+      }
     }
   ]
 }

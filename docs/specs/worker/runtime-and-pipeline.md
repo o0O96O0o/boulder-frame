@@ -5,8 +5,8 @@
 `WorkerConfig` supplies PostgreSQL, Redis Streams, private S3-compatible storage, `WORKER_ID`, FFmpeg,
 FFprobe, scratch, lease, VFR-normalization, and debug limits. `MODEL_VERSION=unset-until-pinned`
 normalizes to `unconfigured`; the only configured runtime model is
-`w0.2-ssd-mobilenetv1-12-onnx-detector-only-1` with one verified
-`ssd_mobilenet_v1_12.onnx` artifact in `MODEL_DIR`.
+`w0.2-yolo26n-onnx-detector-only-1` with one verified
+`yolo26n.onnx` artifact in `MODEL_DIR`.
 
 Configured model verification or decoder composition failure prevents startup. A claimed job with a
 different immutable `configuration.model_version` fails with `model_unavailable` before a stage
@@ -87,8 +87,8 @@ after the same strict media and exact decoded-frame-count validation, and only w
 matches the persisted crop-path digest, output aspect ratio, and `fixed-output-v1` renderer version.
 `uploading` heads and lease-finalizes the deterministic output object before completion.
 
-The `w0.2.5` pipeline and entire immutable planner map hash create distinct jobs for the
-same input and settings under the new controller. Old jobs must drain on old workers before the
+The `w0.2.6` pipeline, YOLO26n model version, and entire immutable planner map hash create distinct jobs for the
+same input and settings under the new detector. Old jobs must drain on old workers before the
 [version cutover](../../dev/development.md#start-modules), because claim-time compatibility checks
 cover model version, not pipeline version. Never carry old job scratch or crop paths into a new job.
 

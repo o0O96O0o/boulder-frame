@@ -11,7 +11,7 @@ from .media import CFRNormalizer, FFmpegCFRNormalizer, FFmpegRenderer, FFprobeAd
 from .models import (
     MODEL_VERSION,
     ModelVerificationError,
-    OnnxSsdMobileNetV1Detector,
+    OnnxYolo26Detector,
 )
 from .pipeline import OutputFinalizer, PlannerFactory, ProcessingPipeline
 from .planner import LookaheadCropPlanner
@@ -125,7 +125,7 @@ def compose_runtime(
         raise RuntimeUnavailable(f"unsupported model_version: {config.model_version}")
     if detector is None and config.model_version == MODEL_VERSION:
         try:
-            loaded_detector = OnnxSsdMobileNetV1Detector(config.model_dir)
+            loaded_detector = OnnxYolo26Detector(config.model_dir)
             loaded_frame_reader = frame_reader or OpenCVFrameReader()
         except (FrameReaderUnavailable, ModelVerificationError) as error:
             raise RuntimeUnavailable(

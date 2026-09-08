@@ -1,79 +1,144 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env python3
+"""Provision the manifest-pinned ONNX artifact, never an unchecked runtime model."""
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-manifest="$root/worker/models/model-manifest.json"
-model_dir=${MODEL_DIR_HOST:-"$root/worker/models"}
+from __future__ import annotations
 
-manifest_string() {
-  sed -n "s/^[[:space:]]*\"$1\": \"\([^\"]*\)\",$/\1/p" "$manifest"
-}
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
-manifest_number() {
-  sed -n "s/^[[:space:]]*\"$1\": \([0-9][0-9]*\),$/\1/p" "$manifest"
-}
 
-sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-    return
-  fi
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-    return
-  fi
-  printf '%s\n' "prepare-model requires sha256sum or shasum" >&2
-  return 1
-}
+def verify(path: Path, pin: dict) -> None:
+    if not path.is_file() or path.stat().st_size != pin["size_bytes"]:
+        raise ValueError(f"model size verification failed: {path}")
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != pin["sha256"]:
+        raise ValueError(f"model SHA-256 verification failed: {path}")
 
-verify() {
-  file_size=$(wc -c < "$1" | tr -d '[:space:]')
-  [ "$file_size" = "$size_bytes" ] && [ "$(sha256_file "$1")" = "$sha256" ]
-}
 
-[ -f "$manifest" ] || {
-  printf '%s\n' "model manifest is missing: $manifest" >&2
-  exit 1
-}
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "artifact",
+        nargs="?",
+        type=Path,
+        help="install an already exported, manifest-matching ONNX file instead of exporting",
+    )
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[2]
+    manifest_path = root / "worker/models/model-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    artifact = manifest["artifacts"][0]
+    model_dir = Path(
+        os.environ.get("MODEL_DIR_HOST", str(root / "worker/models"))
+    ).resolve()
+    model_dir.mkdir(parents=True, exist_ok=True)
+    target = model_dir / artifact["file_name"]
+    if target.exists() and not target.is_file():
+        raise ValueError(f"model destination is not a regular file: {target}")
+    if target.is_file():
+        try:
+            verify(target, artifact)
+        except ValueError:
+            pass
+        else:
+            target.chmod(0o444)
+            print(f"Verified model: {target}")
+            print(
+                f"Set MODEL_VERSION={manifest['model_version']} before starting the worker."
+            )
+            return
 
-model_version=$(manifest_string model_version)
-file_name=$(manifest_string file_name)
-source_url=$(manifest_string source_url)
-sha256=$(manifest_string sha256)
-size_bytes=$(manifest_number size_bytes)
+    with tempfile.TemporaryDirectory(
+        prefix=".prepare-model-", dir=model_dir
+    ) as directory:
+        work = Path(directory)
+        staged = work / artifact["file_name"]
+        if args.artifact is not None:
+            source = args.artifact.resolve()
+            verify(source, artifact)
+            shutil.copyfile(source, staged)
+        else:
+            if shutil.which("uv") is None:
+                raise ValueError(
+                    "export requires uv; alternatively pass a verified exported ONNX file"
+                )
+            checkpoint_pin = artifact["source_checkpoint"]
+            checkpoint = work / checkpoint_pin["file_name"]
+            print("Downloading the manifest-pinned source checkpoint", flush=True)
+            subprocess.run(
+                [
+                    "curl",
+                    "--fail",
+                    "--location",
+                    "--retry",
+                    "3",
+                    "--output",
+                    str(checkpoint),
+                    checkpoint_pin["source_url"],
+                ],
+                check=True,
+            )
+            verify(checkpoint, checkpoint_pin)
+            export = artifact["export"]
+            command = [
+                "uv",
+                "run",
+                "--isolated",
+                "--no-project",
+                "--python",
+                export["python"],
+            ]
+            if sys.platform.startswith("linux"):
+                command.extend(
+                    [
+                        "--index",
+                        "https://download.pytorch.org/whl/cpu",
+                        "--index-strategy",
+                        "unsafe-best-match",
+                    ]
+                )
+            for package, version in export["packages"].items():
+                if sys.platform.startswith("linux") and package in {
+                    "torch",
+                    "torchvision",
+                }:
+                    version += "+cpu"
+                command.extend(["--with", f"{package}=={version}"])
+            command.extend(
+                [
+                    "python",
+                    str(root / "deploy/bin/export-model.py"),
+                    str(manifest_path),
+                    str(checkpoint),
+                    str(staged),
+                ]
+            )
+            subprocess.run(command, cwd=work, check=True)
+        try:
+            verify(staged, artifact)
+        except ValueError as error:
+            raise ValueError(
+                f"{error}; export bytes can differ by platform. Install the exact approved ONNX "
+                "file with `./deploy/bin/local prepare-model /path/to/yolo26n.onnx`; "
+                "do not change the manifest to accept an unreviewed export"
+            ) from error
+        staged.chmod(0o444)
+        os.replace(staged, target)
+    print(f"Prepared and verified model: {target}")
+    print(f"Set MODEL_VERSION={manifest['model_version']} before starting the worker.")
 
-[ -n "$model_version" ] && [ -n "$file_name" ] && [ -n "$source_url" ] && [ -n "$sha256" ] && [ -n "$size_bytes" ] || {
-  printf '%s\n' "model manifest is incomplete: $manifest" >&2
-  exit 1
-}
 
-mkdir -p "$model_dir"
-target="$model_dir/$file_name"
-
-if [ -f "$target" ] && verify "$target"; then
-  chmod 0444 "$target"
-  printf '%s\n' "Verified model: $target"
-  printf '%s\n' "Set MODEL_VERSION=$model_version before starting the worker."
-  exit 0
-fi
-
-if [ -e "$target" ] && [ ! -f "$target" ]; then
-  printf '%s\n' "model destination is not a regular file: $target" >&2
-  exit 1
-fi
-
-tmp=$(mktemp "$model_dir/.${file_name}.XXXXXX")
-trap 'rm -f "$tmp"' EXIT HUP INT TERM
-printf '%s\n' "Downloading manifest-pinned model to $target"
-curl --fail --location --retry 3 --output "$tmp" "$source_url"
-
-if ! verify "$tmp"; then
-  printf '%s\n' "downloaded model failed manifest size or SHA-256 verification" >&2
-  exit 1
-fi
-
-chmod 0444 "$tmp"
-mv -f "$tmp" "$target"
-trap - EXIT HUP INT TERM
-printf '%s\n' "Prepared and verified model: $target"
-printf '%s\n' "Set MODEL_VERSION=$model_version before starting the worker."
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        print(f"prepare-model: {error}", file=sys.stderr)
+        sys.exit(1)

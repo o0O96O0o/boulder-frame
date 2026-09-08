@@ -15,8 +15,8 @@ response includes bounded manifest metadata and short-lived URLs only for ready/
   "available": true,
   "review_id": "uuid",
   "state": "completed",
-  "pipeline_version": "w0.2.0",
-  "model_version": "w0.2-ssd-mobilenetv1-12-onnx-detector-only-1",
+  "pipeline_version": "pipeline-v1",
+  "model_version": "model-v1",
   "timing": {"frame_rate": 60, "duration_ms": 12000, "frame_count": 720},
   "phases": [
     {"id": "detection", "label": "Detection", "status": "ready", "video_url": "short-lived signed URL"},

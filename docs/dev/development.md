@@ -66,30 +66,37 @@ pending state is only delivery coordination.
 
 ## Prepare The Detector
 
-The committed manifest pins the approved W0.2 detector. Before enabling it, download and verify the
-artifact with:
+The committed manifest pins the approved YOLO26n detector and its AGPL-3.0 source checkpoint and
+export toolchain. AGPL-3.0 use is explicitly accepted. Before enabling it, provision and verify with:
 
 ```sh
 ./deploy/bin/local prepare-model
 ```
 
-This writes the ignored `worker/models/ssd_mobilenet_v1_12.onnx` file, checks its exact byte size and
-SHA-256 against `worker/models/model-manifest.json`, and makes it read-only. Then set this exact value
-in `.env` before starting the worker:
+This exports the ignored `worker/models/yolo26n.onnx` file using the pinned Python 3.12 build
+toolchain, checks its exact byte size and SHA-256 against `worker/models/model-manifest.json`, and
+makes it read-only. Provisioning needs Python 3.11+; export also needs `uv` and `curl`. Export is CPU,
+FP32, batch 1, fixed 640x640, explicitly `end2end=True`, `nms=False`, without graph simplification.
+Metadata is removed for deterministic serialization. If platform-dependent export bytes differ,
+verification fails closed: copy the approved artifact and run
+`./deploy/bin/local prepare-model /path/to/yolo26n.onnx` instead of changing the pin. Then set:
 
 ```dotenv
-MODEL_VERSION=w0.2-ssd-mobilenetv1-12-onnx-detector-only-1
+MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1
 ```
 
-`MODEL_VERSION=w0.1-ssd-mobilenetv1-12-onnx-mediapipe-pose-full-1` is unsupported and causes the
-worker to exit before it can process jobs. Existing W0.1 jobs cannot be retried against W0.2: create
-new jobs after the backend is configured with the W0.2 version.
+Previous model versions are unsupported by this worker. Existing jobs must drain on their original
+workers; they cannot be retried to upgrade their immutable detector configuration. Create new jobs
+after the backend and worker are configured with the new shared model and pipeline versions.
+Retain the bundled [AGPL-3.0 license](../../worker/models/LICENSE) with redistributed weights and
+satisfy applicable corresponding-source and network-use obligations; the license file alone is not
+compliance. See [detector provisioning and license details](../specs/worker/models.md).
 
-Set one shared immutable processing-behavior version for backend and worker. The pan-only full-shot
-`lookahead-v1` release, retaining `deterministic-v3` causal zoom and miss widening, uses:
+Set one shared immutable processing-behavior version for backend and worker. The YOLO26n release
+retains the existing selection, sampling, pan-only `lookahead-v1` planner, causal zoom and miss widening:
 
 ```dotenv
-PIPELINE_VERSION=w0.2.5
+PIPELINE_VERSION=w0.2.6
 DETECTION_SAMPLE_FPS=10
 ```
 
@@ -105,6 +112,10 @@ Only accepted sampled detections constrain look-ahead containment. Held targets 
 future observed boxes guide camera movement without athlete-position interpolation or prediction.
 SciPy `1.15.3` supplies sparse deterministic `highs-ds` optimization. A non-optimal/invalid solver
 result fails analyzing safely with `internal` and no causal fallback or committed analysis artifacts.
+
+YOLO26n inference uses `CPUExecutionProvider`, 2 intra-op threads, and 1 inter-op thread. Keep
+`WORKER_CONCURRENCY=1` on the 2-vCPU server. Export dependencies are not installed in the worker
+runtime; only the approved ONNX artifact is mounted read-only.
 
 For a non-default host artifact directory, set `MODEL_DIR_HOST` both when preparing the artifact and
 in `.env`; Compose mounts it read-only at the in-container `MODEL_DIR` path.
@@ -133,8 +144,9 @@ deployment target is x86_64; Docker/Podman must have x86_64 emulation available.
 
 For an existing environment, deploy as a drained cutover: pause submissions, let the **old workers**
 finish every queued and leased old-version job, confirm the Redis consumer-group pending count is
-zero, and stop old workers. Set `PIPELINE_VERSION=w0.2.5` in the deployment `.env`, start backend
-and worker together with the new code and shared version, verify both startup summaries, and only
+zero, and stop old workers. Provision the verified artifact, then set `PIPELINE_VERSION=w0.2.6`
+and `MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1` in the deployment `.env`. Start backend
+and worker together with the new code and shared versions, verify both startup summaries, and only
 then resume submissions. There is no generic claim-time pipeline-version compatibility check.
 The worker validates the exact immutable planner contract before cached replay and rejects old
 or malformed maps; this safety check does not replace the drained deployment protocol.

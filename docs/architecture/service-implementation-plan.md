@@ -25,7 +25,7 @@ flowchart LR
 ## Cross-Service Contract
 
 - Job configuration is immutable and includes source asset, target selection, output settings,
-  pipeline version, model version, and planner configuration. The current default is `w0.2.5` with
+  pipeline version, model version, and planner configuration. The current default is `w0.2.6` with
   `lookahead-v1`, `deterministic-v3` seed, `scipy-highs-ds`, full-shot scope, sampled-detection
   containment policy, tolerance `1e-8`, unchanged hysteresis/motion constants, and configurable
   `detection_sample_fps`. Every key participates in the job hash.
@@ -42,7 +42,7 @@ flowchart LR
 - Deploy backend and worker together through the [drained cutover](../dev/development.md#start-modules);
   never rewrite/retry old jobs or reuse old crop paths for new behavior. There is no generic
   claim-time pipeline-version check; exact planner parsing is not a rolling-deployment protocol.
-- The selected model is `w0.2-ssd-mobilenetv1-12-onnx-detector-only-1`; configuration contains no
+- The selected model is `w0.2-yolo26n-onnx-detector-only-1`; configuration contains no
   additional CV state beyond detector framing.
 - The worker review phases are ordered `detection`, `framing`, `render`. Phase roles are exactly
   `debug_detection`, `debug_framing`, and `debug_render`; telemetry and manifest remain

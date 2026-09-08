@@ -19,7 +19,7 @@ an H.264/AAC MP4.
 
 ## Framing Contract
 
-The W0.2 worker is detector-only. It runs the pinned ONNX SSD-MobilenetV1-12 person detector on the
+The W0.2 worker is detector-only. It runs the pinned YOLO26n CPU ONNX person detector on the
 selected frame and associates the tap with a containing or nearest person box. Each sampled frame
 uses its actual person detection. The selected box seeds separate forward and backward association
 passes, so no frame is associated before the user selection is resolved. A later candidate must remain
@@ -43,7 +43,7 @@ The default `lookahead-v1` planner optimizes pan over the full normalized shot. 
 `deterministic-v3` causal seed, preserving every crop width/height exactly: profile sizing,
 5%/2% scale hysteresis, timestamp-based log-height zoom (speed `0.5`, acceleration `1.0`), miss
 widening, and source/aspect-limited dimensions are unchanged. Seed center hysteresis (1%/0.4%)
-remains only as an objective reference, not final pan gates. Zoom is not optimized in `w0.2.5`.
+remains only as an objective reference, not final pan gates. Zoom is not optimized.
 
 Only accepted sampled detector boxes, including the selected frame, impose hard containment
 constraints. Source bounds are always hard; source/aspect-impossible boxes are recorded as
@@ -98,12 +98,12 @@ stores all source, output, telemetry, manifest, and review media bytes.
 
 The API accepts normalized source-frame selection coordinates and output settings. It snapshots
 pipeline/model versions before queueing. W0.2 model version is exactly
-`w0.2-ssd-mobilenetv1-12-onnx-detector-only-1`; a claimed job whose immutable model version differs
+`w0.2-yolo26n-onnx-detector-only-1`; a claimed job whose immutable model version differs
 from the active verified worker fails terminally with `model_unavailable` before media or inference.
-Existing W0.1 jobs are incompatible with W0.2 and fail this check; users must create a new W0.2 job,
-not retry the old job.
+Jobs created for previous model versions remain immutable: drain them on their original workers,
+then create new jobs for YOLO26n, never retry or rewrite old jobs as a migration.
 
-The default pipeline is `w0.2.5`. Immutable `planner` configuration contains
+The default pipeline is `w0.2.6`. Immutable `planner` configuration remains unchanged and contains
 `controller = lookahead-v1`, `seed_controller = deterministic-v3`, `optimizer = scipy-highs-ds`,
 `lookahead_scope = full_shot`, `containment_policy = sampled_detections`,
 `solver_feasibility_tolerance = 1e-8`, `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,

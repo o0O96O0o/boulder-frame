@@ -16,12 +16,12 @@ competing person without motion prediction or identity proof. A miss or rejected
 detection and does not update the reference; no target position or identity is extrapolated.
 
 `PersonDetector.detect(frame)` returns person rectangles with confidences. The selected W0.2 adapter
-is `OnnxSsdMobileNetV1Detector`; its local artifact, tensor contract, checksum, and license are in
+is `OnnxYolo26Detector`; its local artifact, tensor contract, checksum, and AGPL-3.0 license are in
 [Model Manifest](models.md).
 
 ## Configurable Detection Sampling
 
-Pipeline `w0.2.5` snapshots `planner.detection_sample_fps` from the backend deployment setting
+Pipeline `w0.2.6` snapshots `planner.detection_sample_fps` from the backend deployment setting
 `DETECTION_SAMPLE_FPS` (default `10`). Values are finite numbers from `0` through `1000`;
 `0` disables sampling. A rate at or above the source frame rate also detects every frame.
 The worker requires this immutable setting; it never reads a live sampling environment variable.
@@ -48,7 +48,7 @@ true; skipped frames set it false, with held bounds or `None` after a miss.
 
 `LookaheadCropPlanner` is the default behind the unchanged `CropPlanner.plan` interface.
 It invokes `DeterministicCropPlanner` as its causal seed and preserves every seed width/height
-exactly, replacing only centers. `w0.2.5` is deliberately pan-only optimization: zoom hysteresis,
+exactly, replacing only centers. Optimization remains deliberately pan-only: zoom hysteresis,
 timestamp-based zoom, miss widening, and source/aspect-limited sizing remain causal.
 The seed uses a fixed target height fraction of the detected person box:
 
@@ -199,7 +199,7 @@ See [telemetry](debug-telemetry-and-evaluation.md#telemetry-contract) and
 [processing reports](runtime-and-pipeline.md#processing-report).
 
 All settings except the deployment sampling rate are immutable algorithm constants, not frontend
-controls. Pipeline `w0.2.5` and the entire planner map participate in the job hash.
+controls. Pipeline `w0.2.6` and the entire planner map participate in the job hash.
 Deploy through a [drained cutover](../../dev/development.md#start-modules), not old-job retries.
 
 ```mermaid

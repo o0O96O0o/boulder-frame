@@ -17,14 +17,14 @@ The worker consumes Redis Streams tasks under a PostgreSQL lease, downloads and 
 normalizes supported VFR input only in job scratch, detects the selected athlete, derives a
 `lookahead-v1` crop path with full-shot per-axis pan optimization and unchanged `deterministic-v3`
 causal seed dimensions, renders and validates 1080p H.264/AAC output, and finalizes under the lease.
-The default pipeline is `w0.2.5`, with detection sampled at 10 fps by default and full-rate planning/rendering.
+The default pipeline is `w0.2.6`, with YOLO26n CPU ONNX detection sampled at 10 fps by default and full-rate planning/rendering.
 Only fresh accepted samples constrain containment. Held targets may leave the crop; future observed
 boxes guide the camera without athlete trajectory interpolation. Invalid optimizer output fails
 analyzing safely with `internal`, no causal fallback, and no committed analysis artifacts.
 The exact immutable planner map is validated before cached replay. Deploy backend/worker together
 through a [drained cutover](../../dev/development.md#start-modules); never upgrade old jobs by retry.
 It uses model version
-`w0.2-ssd-mobilenetv1-12-onnx-detector-only-1`; a matching unconfigured runtime fails jobs safely
+`w0.2-yolo26n-onnx-detector-only-1`; a matching unconfigured runtime fails jobs safely
 with `model_unavailable`, while a configured W0.2 runtime with an unavailable decoder or invalid
 artifact fails startup.
 

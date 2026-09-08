@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .measurement import Detection, Rect
 
-MODEL_VERSION = "w0.2-ssd-mobilenetv1-12-onnx-detector-only-1"
+MODEL_VERSION = "w0.2-yolo26n-onnx-detector-only-1"
 
 
 class ModelVerificationError(RuntimeError):
@@ -32,15 +32,15 @@ class ModelArtifact:
         return path
 
 
-SSD_MOBILENET_V1_12 = ModelArtifact(
-    "ssd_mobilenet_v1_12.onnx",
-    "b8fba5e404077d4048d27fcd1667e85e27e192eb9bf51e696c46a3acd7d21058",
-    29461455,
+YOLO26N = ModelArtifact(
+    "yolo26n.onnx",
+    "5337a01d635c068479e7e4ff41ebb8142a8e0152afc6d0cd9e60db3dba2d8597",
+    9892215,
 )
 
 
-class OnnxSsdMobileNetV1Detector:
-    """COCO-person adapter for the checked-in SSD-MobilenetV1-12 contract."""
+class OnnxYolo26Detector:
+    """COCO-person adapter for the fixed FP32 YOLO26n end-to-end ONNX export."""
 
     def __init__(self, model_dir: Path, *, score_threshold: float = 0.2) -> None:
         if not 0 <= score_threshold <= 1:
@@ -51,21 +51,22 @@ class OnnxSsdMobileNetV1Detector:
             raise ModelVerificationError(
                 "onnxruntime==1.22.0 is required for the person detector"
             ) from error
-        model_path = SSD_MOBILENET_V1_12.verify(model_dir)
-        self._session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        model_path = YOLO26N.verify(model_dir)
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 2
+        options.inter_op_num_threads = 1
+        self._session = ort.InferenceSession(
+            str(model_path), sess_options=options, providers=["CPUExecutionProvider"]
+        )
         inputs = self._session.get_inputs()
         outputs = self._session.get_outputs()
         if (
             len(inputs) != 1
-            or inputs[0].name != "inputs"
-            or inputs[0].type != "tensor(uint8)"
-            or [output.name for output in outputs]
-            != [
-                "detection_boxes",
-                "detection_classes",
-                "detection_scores",
-                "num_detections",
-            ]
+            or inputs[0].type != "tensor(float)"
+            or inputs[0].shape != [1, 3, 640, 640]
+            or len(outputs) != 1
+            or outputs[0].type != "tensor(float)"
+            or outputs[0].shape != [1, 300, 6]
         ):
             raise ModelVerificationError(
                 "person detector input/output contract does not match the manifest"
@@ -81,27 +82,46 @@ class OnnxSsdMobileNetV1Detector:
             raise ModelVerificationError(
                 "numpy==1.26.4 is required for the person detector"
             ) from error
+        try:
+            import cv2
+        except ImportError as error:
+            raise ModelVerificationError(
+                "opencv-python-headless==4.10.0.84 is required for the person detector"
+            ) from error
         if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3:
             raise ValueError("person detector requires an HWC three-channel frame")
         height, width = frame.shape[:2]
         if height <= 0 or width <= 0:
             raise ValueError("person detector requires non-empty frame dimensions")
-        # OpenCV decoding is BGR; the published SSD preprocessing requires RGB uint8 NHWC.
-        image = np.ascontiguousarray(frame[:, :, ::-1][None, ...].astype(np.uint8, copy=False))
-        boxes, classes, scores, count = self._session.run(
-            self._output_names, {self._input_name: image}
+        scale = min(640 / width, 640 / height)
+        resized_width = max(1, round(width * scale))
+        resized_height = max(1, round(height * scale))
+        left_pad = (640 - resized_width) // 2
+        top_pad = (640 - resized_height) // 2
+        resized = cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
+        # OpenCV frames are BGR; the export expects normalized RGB NCHW.
+        image = np.full((1, 3, 640, 640), 114, dtype=np.float32)
+        image[0, :, top_pad : top_pad + resized_height, left_pad : left_pad + resized_width] = (
+            resized[:, :, ::-1].transpose(2, 0, 1)
+        )
+        image *= np.float32(1 / 255)
+        (predictions,) = self._session.run(self._output_names, {self._input_name: image})
+        if predictions.shape != (1, 300, 6):
+            raise ModelVerificationError("person detector returned an unexpected output shape")
+        rows = predictions[0]
+        accepted = (
+            np.isfinite(rows).all(axis=1)
+            & (rows[:, 5] == 0)
+            & (rows[:, 4] >= self._score_threshold)
+            & (rows[:, 4] <= 1)
         )
         detections: list[Detection] = []
-        for index in range(int(count[0])):
-            if int(classes[0][index]) != 1 or float(scores[0][index]) < self._score_threshold:
-                continue
-            top, left, bottom, right = (float(value) for value in boxes[0][index])
-            x = max(0.0, min(left * width, float(width)))
-            y = max(0.0, min(top * height, float(height)))
-            right = max(x, min(right * width, float(width)))
-            bottom = max(y, min(bottom * height, float(height)))
+        # The end-to-end head already selects detections; do not apply external NMS.
+        for left, top, right, bottom, score, _ in rows[accepted]:
+            x = max(0.0, min((float(left) - left_pad) / scale, float(width)))
+            y = max(0.0, min((float(top) - top_pad) / scale, float(height)))
+            right = max(0.0, min((float(right) - left_pad) / scale, float(width)))
+            bottom = max(0.0, min((float(bottom) - top_pad) / scale, float(height)))
             if right > x and bottom > y:
-                detections.append(
-                    Detection(Rect(x, y, right - x, bottom - y), float(scores[0][index]))
-                )
+                detections.append(Detection(Rect(x, y, right - x, bottom - y), float(score)))
         return detections

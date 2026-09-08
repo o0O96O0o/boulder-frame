@@ -13,12 +13,27 @@ cp .env.example .env
 docker compose up --build
 ```
 
-`prepare-model` downloads the detector selected by `worker/models/model-manifest.json` into
-`worker/models`, verifies its byte size and SHA-256, and marks it read-only. Set
-`MODEL_VERSION=w0.2-ssd-mobilenetv1-12-onnx-detector-only-1` in `.env` before starting the
-worker. To place the host-side artifact elsewhere, run
-`MODEL_DIR_HOST=/srv/boulder-frame-models ./deploy/bin/local prepare-model` and mount that
-directory at the container's `MODEL_DIR`.
+`prepare-model` exports the detector pinned by `worker/models/model-manifest.json` into
+`worker/models/yolo26n.onnx`, verifies its byte size and SHA-256, and marks it read-only.
+It needs Python 3.11+, `uv`, and `curl`; export runs in the pinned Python 3.12 toolchain with
+CPU-only FP32, batch 1, fixed 640x640, explicit `end2end=True` and `nms=False`.
+To install an already exported approved artifact without the export toolchain, use
+`./deploy/bin/local prepare-model /path/to/yolo26n.onnx`; it performs the same integrity checks.
+Platform-dependent export differences fail closed: copy the approved artifact, never loosen its pin.
+Set `MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1` and `PIPELINE_VERSION=w0.2.6` in `.env`
+before starting the backend and worker. For a different artifact location, set
+`MODEL_DIR_HOST=/srv/boulder-frame-models` when provisioning and in `.env`; Compose mounts it
+read-only at `MODEL_DIR`.
+
+The AGPL-3.0 model license is explicitly accepted. Retain [the bundled license](../worker/models/LICENSE)
+and meet applicable corresponding-source and network-use obligations; see the
+[model contract](../docs/specs/worker/models.md). The worker uses only CPU ONNX Runtime, with
+2 intra-op threads and 1 inter-op thread. Keep `WORKER_CONCURRENCY=1` on a 2-vCPU host.
+
+For existing environments, pause submissions and drain all queued/leased old jobs on old workers,
+confirm no Redis consumer-group pending deliveries, then stop them and deploy backend and worker
+together with the new shared versions. Never rewrite/retry old jobs, republish old UUIDs, or reuse
+their scratch/crop paths for the new detector; submit new versioned jobs after the cutover.
 
 Useful commands:
 

@@ -70,7 +70,7 @@ The API rejects negative frame times, coordinates outside `[0, 1]`, unsupported 
 The stored configuration additionally contains:
 
 - `source_asset_id`
-- `pipeline_version = w0.2.5` by default
+- `pipeline_version = w0.2.6` by default
 - `model_version`
 - Immutable planner configuration (sampling rate comes from deployment configuration):
 
@@ -120,7 +120,7 @@ it changes the configuration hash and creates a distinct job for the same source
 retains the original job configuration and never upgrades that job to a newer pipeline behavior.
 The entire planner map also participates in the hash, preventing a new submission from reusing an
 older planner's cached job/output. Pause submissions and drain old jobs on old workers, stop them,
-then deploy backend and worker together with `w0.2.5` before submitting new jobs. Claim-time checks
+then deploy backend and worker together with `w0.2.6` and the pinned YOLO26n model version before submitting new jobs. Claim-time checks
 do not enforce generic pipeline-version compatibility. Never retry, rewrite, or republish an old
 job UUID for the new behavior, or reuse its scratch/crop paths.
 
