@@ -175,6 +175,56 @@ def test_sampling_detects_exact_grid_plus_selection_and_replays_all_cached_crops
     assert (tmp_path / "crop-path.jsonl").read_bytes() == crops
 
 
+def test_report_distinguishes_sample_misses_from_held_gaps_and_survives_resume(tmp_path) -> None:
+    pipeline, job, calls = sampling_pipeline(
+        Fraction(30),
+        18,
+        boxes={
+            0: Rect(860, 340, 200, 400),
+            3: None,
+            6: Rect(0, 0, 20, 40),
+            9: Rect(860, 340, 200, 400),
+            12: None,
+            15: None,
+        },
+    )
+    pipeline.debug_capture = False
+    report = pipeline.analyzing(job, tmp_path)["report"]
+    detection = report["detection"]
+    assert detection["sampled_frames"] == 6
+    assert detection["skipped_frames"] == 12
+    assert detection["detected_frames"] == 2
+    assert detection["missed_frames"] == 4
+    assert detection["outcome_counts"]["no_detections"] == 3
+    assert detection["outcome_counts"]["no_accepted_candidate"] == 1
+    assert report["framing"]["unavailable_target_frames"] == 12
+    assert report["framing"]["detection_gap_count"] == 2
+    assert report["framing"]["longest_detection_gap_ms"] == 200
+    assert not (tmp_path / "analysis-trace.jsonl").exists()
+    assert pipeline.analyzing(job, tmp_path)["report"] == report
+    assert pipeline.uploading(job, tmp_path)["report"]["detection"] == detection
+    assert calls == [0, 3, 6, 9, 12, 15]
+
+
+def test_report_measures_safety_jump_after_detection_gap(tmp_path) -> None:
+    pipeline, job, _ = sampling_pipeline(
+        Fraction(30),
+        9,
+        boxes={0: Rect(1400, 300, 200, 700), 3: None, 6: Rect(700, 300, 200, 700)},
+    )
+    job = replace(
+        job,
+        configuration=replace(
+            job.configuration, output={"aspect_ratio": "9:16", "profile": "full_movement"}
+        ),
+    )
+    report = pipeline.analyzing(job, tmp_path)["report"]
+    assert report["framing"]["containment_override_frames"] >= 1
+    assert report["framing"]["max_center_step_source_px"] > 300
+    assert report["framing"]["max_center_step_timestamp_ms"] == 200
+    assert report["framing"]["max_height_step_fraction"] == 0
+
+
 def test_skips_continue_camera_motion_but_sampled_miss_clears_hold_until_reacquisition(
     tmp_path,
 ) -> None:

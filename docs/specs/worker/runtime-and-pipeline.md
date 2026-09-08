@@ -96,6 +96,34 @@ The current producer includes:
 - `frames_processed`: the frame count of the validated output, available after rendering succeeds.
   It is not the number of detector invocations or the sum of repeated decode/render passes.
   Resuming directly at uploading still supplies this count after reconstructing and verifying output.
+- `detection`: `frames`, `sampled_frames`, `skipped_frames`, `detected_frames`, `missed_frames`,
+  and `outcome_counts` keyed by every detector selection outcome (including zero counts).
+  Detected means an accepted selected-athlete box, not any person candidate. Misses count sampled
+  frames only and distinguish `no_detections` from `no_accepted_candidate`; skips are not misses.
+- `framing`: `unavailable_target_frames` counts full-rate frames without a held target, including
+  skips after a sampled miss. `detection_gap_count` counts contiguous unavailable-target runs;
+  `longest_detection_gap_ms` measures from the first missing frame to reacquisition or the exclusive
+  CFR frame-grid end. `max_center_step_source_px` is the largest Euclidean center displacement
+  between adjacent final crops; `max_center_step_timestamp_ms` identifies its destination frame
+  (first on ties, `null` if stationary). `max_height_step_fraction` is the largest absolute
+  adjacent crop-height ratio minus one. Steps include safety overrides, not just smooth motion.
+  Planner traces additionally supply `action_counts`, `containment_override_frames`, and
+  `source_aspect_limited_frames`; these are absent for planners without traces.
+
+Analysis summaries are computed without debug capture and atomically cached in job-local
+`analysis-report.json` before committing the crop path. Analysis, rendering, and upload handlers
+return the cached summary through the existing terminal-report merge, including resumed jobs.
+Legacy crop caches without a summary omit these metrics rather than inventing zero counts.
+Failures before analysis finishes do not supply a partial detection summary. Completed jobs are not
+backfilled, and these metrics do not change detection, planning, rendering, or the pipeline version.
+
+```mermaid
+flowchart LR
+    A[Sample outcomes and full-rate crop plan] --> S[Compact analysis summary]
+    S --> C[Job-local summary cache]
+    C --> R[Stage report merge]
+    R --> P[Lease-guarded terminal report JSONB]
+```
 
 Old jobs and active jobs normally have `report: null`. A transient failure does not publish a terminal
 report; the next attempt starts fresh rather than aggregating earlier work. A failure before a valid

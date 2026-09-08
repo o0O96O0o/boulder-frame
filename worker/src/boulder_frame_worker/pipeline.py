@@ -83,6 +83,7 @@ class UnavailableFrameReader:
 PlannerFactory = Callable[[int, int, AspectRatio, FramingProfile], CropPlanner]
 _ANALYSIS_TRACE = "analysis-trace.jsonl"
 _CROP_PATH = "crop-path.jsonl"
+_ANALYSIS_REPORT = "analysis-report.json"
 _RENDER_CACHE = "render-cache.json"
 _STAGE_TRACE = "debug-stages.jsonl"
 
@@ -160,11 +161,13 @@ class ProcessingPipeline:
             local_artifact_fields(scratch / _CROP_PATH, "crop_path", record_count=len(crops))
         ]
         analysis_trace = scratch / _ANALYSIS_TRACE
+        report = _load_analysis_report(scratch)
         if analysis_trace.is_file():
             outputs.append(
                 local_artifact_fields(analysis_trace, "analysis_trace", record_count=len(crops))
             )
         return {
+            "report": report,
             "inputs": [_processing_source_fields(inputs)],
             "outputs": outputs,
         }
@@ -174,7 +177,10 @@ class ProcessingPipeline:
         output_metadata = self._render(inputs)
         self._log_render_progress(record, inputs)
         return {
-            "report": {"frames_processed": expected_frame_count(inputs.metadata)},
+            "report": {
+                **_load_analysis_report(scratch),
+                "frames_processed": expected_frame_count(inputs.metadata),
+            },
             "inputs": [
                 _processing_source_fields(inputs),
                 local_artifact_fields(scratch / _CROP_PATH, "crop_path"),
@@ -207,7 +213,10 @@ class ProcessingPipeline:
             ),
         )
         return {
-            "report": {"frames_processed": expected_frame_count(inputs.metadata)},
+            "report": {
+                **_load_analysis_report(scratch),
+                "frames_processed": expected_frame_count(inputs.metadata),
+            },
             "inputs": [
                 local_artifact_fields(inputs.output, "rendered_output", media=output_metadata)
             ],
@@ -557,6 +566,13 @@ class ProcessingPipeline:
         plan = self.planner_factory(
             width, height, inputs.output_settings.aspect_ratio, inputs.output_settings.profile
         ).plan(planner_measurements)
+        report_path = inputs.source.parent / _ANALYSIS_REPORT
+        temporary_report = report_path.with_suffix(".tmp")
+        temporary_report.write_text(
+            json.dumps(_analysis_report(observations, planner_measurements, plan, inputs.metadata)),
+            encoding="ascii",
+        )
+        temporary_report.replace(report_path)
         self._write_crop_path(
             crop_path,
             observations,
@@ -1082,6 +1098,83 @@ def _load_analysis_records(path: Path, metadata: MediaMetadata) -> list[dict[str
     if len(records) != expected_frame_count(metadata):
         raise terminal(ErrorCode.INVALID_MEDIA, "Video analysis trace is incomplete.")
     return records
+
+
+def _load_analysis_report(scratch: Path) -> dict[str, object]:
+    path = scratch / _ANALYSIS_REPORT
+    if not path.is_file():
+        return {}
+    report: dict[str, object] = json.loads(path.read_text(encoding="ascii"))
+    return report
+
+
+def _analysis_report(
+    observations: Sequence[RawFrameObservation],
+    measurements: Sequence[FrameMeasurement],
+    plan: CropPlan | Sequence[CropRect],
+    metadata: MediaMetadata,
+) -> dict[str, object]:
+    outcomes = dict.fromkeys((outcome.value for outcome in SelectionOutcome), 0)
+    detected = unavailable = gap_count = longest_gap_ms = 0
+    gap_start: int | None = None
+    for observation, measurement in zip(observations, measurements, strict=True):
+        outcomes[observation.selection_outcome.value] += 1
+        detected += observation.detection is not None
+        if measurement.detector_bounds is None:
+            unavailable += 1
+            if gap_start is None:
+                gap_start = observation.timestamp_ms
+                gap_count += 1
+        elif gap_start is not None:
+            longest_gap_ms = max(longest_gap_ms, observation.timestamp_ms - gap_start)
+            gap_start = None
+    if gap_start is not None:
+        longest_gap_ms = max(
+            longest_gap_ms, metadata.timestamp_for_frame(len(observations)) - gap_start
+        )
+    skipped = outcomes[SelectionOutcome.DETECTION_SKIPPED.value]
+    sampled = len(observations) - skipped
+    max_pan_step = max_zoom_step = 0.0
+    max_pan_timestamp: int | None = None
+    previous: CropRect | None = None
+    for observation, crop in zip(observations, plan, strict=True):
+        if previous is not None:
+            pan_step = (
+                (crop.center.x - previous.center.x) ** 2 + (crop.center.y - previous.center.y) ** 2
+            ) ** 0.5
+            if pan_step > max_pan_step:
+                max_pan_step = pan_step
+                max_pan_timestamp = observation.timestamp_ms
+            max_zoom_step = max(max_zoom_step, abs(crop.height / previous.height - 1))
+        previous = crop
+    framing: dict[str, object] = {
+        "unavailable_target_frames": unavailable,
+        "detection_gap_count": gap_count,
+        "longest_detection_gap_ms": longest_gap_ms,
+        "max_center_step_source_px": max_pan_step,
+        "max_center_step_timestamp_ms": max_pan_timestamp,
+        "max_height_step_fraction": max_zoom_step,
+    }
+    if isinstance(plan, CropPlan):
+        actions: dict[str, int] = {}
+        for trace in plan.trace:
+            actions[trace.action] = actions.get(trace.action, 0) + 1
+        framing.update(
+            action_counts=actions,
+            containment_override_frames=sum(trace.containment_override for trace in plan.trace),
+            source_aspect_limited_frames=sum(trace.source_aspect_limited for trace in plan.trace),
+        )
+    return {
+        "detection": {
+            "frames": len(observations),
+            "sampled_frames": sampled,
+            "skipped_frames": skipped,
+            "detected_frames": detected,
+            "missed_frames": sampled - detected,
+            "outcome_counts": outcomes,
+        },
+        "framing": framing,
+    }
 
 
 def _load_crop_path(path: Path, metadata: MediaMetadata) -> list[CropRect]:

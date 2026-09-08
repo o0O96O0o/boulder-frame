@@ -15,7 +15,7 @@ The product boundary and algorithm contract remain authoritative in [../architec
 ## Component Specifications
 
 - [Backend](backend/README.md): Go process, API resources, immutable planner version/threshold hashing, PostgreSQL persistence, S3 URLs, and Redis Streams task distribution.
-- [Worker](worker/README.md): Python runtime, job state machine, media validation, independent crop hysteresis, and debug telemetry/evaluation contract.
+- [Worker](worker/README.md): Python runtime, job state machine, media validation, independent crop hysteresis, [detection and framing report metrics](worker/runtime-and-pipeline.md#processing-report), and debug telemetry/evaluation contract.
 - [Frontend](frontend/README.md): Browser workflow, direct upload, target selection, polling, and download.
 - [Compose](deploy/README.md): module container startup and external dependency configuration.
 
@@ -31,7 +31,7 @@ flowchart LR
     API -->|XADD job.process| R[(Redis Stream: boulder-frame:jobs)]
     R -->|consumer group: boulder-frame:job-processors| W[Python worker]
     W -->|read source and write output| S3
-    W -->|state, progress, artifacts| PG
+    W -->|state, progress, report, artifacts| PG
     B -->|poll job| API
     API -->|signed download URL| B
 ```
