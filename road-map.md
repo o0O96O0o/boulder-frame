@@ -8,7 +8,7 @@ Turn one wide, static-camera sports recording into a smooth 1080p close-up of on
 
 - Model worker baseline is set up.
 - [Person detection](docs/specs/worker/measurements-and-planner.md): Associate the selected athlete across sampled detections, always including the selected frame.
-- [Smooth framing](docs/specs/worker/measurements-and-planner.md): Stabilize pan and zoom with hysteresis and motion limits, enforce crop safety, and widen on detection loss.
+- [Smooth framing](docs/specs/worker/measurements-and-planner.md): Optimize pan offline across the full shot with future accepted sampled detections, hard sampled-only containment, and minimum reported motion-limit excess when unavoidable. Held targets may leave the crop; zoom/hysteresis and miss widening remain causal in `w0.2.5`. Invalid solver output fails safely without fallback.
 - [Media processing](docs/specs/worker/runtime-and-pipeline.md): Validate supported sources, normalize VFR when needed, and render verified 1080p H.264 MP4 with retained optional AAC audio.
 - [Worker recovery](docs/specs/backend/redis-streams-task-distribution.md): Handle duplicate and abandoned deliveries with PostgreSQL leases, heartbeats, retries, and idempotent output finalization.
 - [Offline evaluation](docs/specs/worker/debug-telemetry-and-evaluation.md): Measure framing quality from sanitized telemetry and human-reviewed annotations.
@@ -45,10 +45,11 @@ The current frontend is a Vite/React web app, not a React Native implementation.
 ### Implemented
 
 - [Local deployment](docs/specs/deploy/compose-runtime.md): Run the web frontend, API, and worker in Docker Compose against external services with integrity-verified detector provisioning.
+- [Versioned cutover](docs/specs/deploy/compose-runtime.md): Deploy backend and worker `w0.2.5` together after draining old jobs; immutable planner validation rejects incompatible cached paths.
 
 ## Not Planned
 
 - Real-time processing or native capture: Keep the MVP focused on offline uploaded recordings.
 - Multi-athlete tracking or equipment/ball detection: Follow one user-selected person only.
-- Landmark inference or athlete-position prediction: Keep reframing detector-only without extrapolating movement.
+- Landmark inference or athlete-position prediction: Keep reframing detector-only without interpolating or extrapolating athlete movement. Full-shot camera optimization uses future observed boxes as constraints, not a predicted athlete trajectory.
 - Super-resolution or lens correction: Exclude image enhancement and optical correction from the MVP.

@@ -36,44 +36,59 @@ records with source-display coordinates and these sections:
 Missing or skipped raw detection is `null`, not an invented position. `selection_outcome =
 detection_skipped` distinguishes skipped inference from an actual sampled miss. Framing inputs can
 retain a previous sampled box; this is a held camera target, not evidence of a fresh detection or
-athlete identity. Skips do not count as detector failures or sampled misses.
+athlete identity. Serialized measurements expose `detection_sampled`: true for actual accepted or
+missed samples, false for skips. Skips do not count as detector failures or sampled misses.
 Detection summaries report `sampled_frames`, `skipped_frames`, `detected_frames`, and actual
 `missed_frames`. Framing summaries use `unavailable_detection_frames` for all frames with no held
 camera target, including skipped frames following a sampled miss.
 
-For controller `deterministic-v3` (pipeline `w0.2.4`), the header's planner configuration includes
-the unchanged thresholds `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
-`center_enter_fraction = 0.01`, and `center_exit_fraction = 0.004`, plus `zoom_max_speed = 0.5`,
-`zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, and `pan_max_acceleration = 0.5`.
-The immutable `detection_sample_fps` records the job's configured sampling rate (default `10`).
-Zoom limits use log-height per second and per second²; pan limits use source dimension per second
-and per second² on each axis. Existing framing trace fields explain the independent gates and motion:
+For pipeline `w0.2.5`, headers are built from the validated immutable planner map:
+`controller = lookahead-v1`, `seed_controller = deterministic-v3`, `optimizer = scipy-highs-ds`,
+`lookahead_scope = full_shot`, `containment_policy = sampled_detections`,
+`solver_feasibility_tolerance = 1e-8`, the eight unchanged hysteresis/motion constants, and
+deployment-snapshotted `detection_sample_fps` (default `10`). See the
+[exact map](../backend/http-api.md). Zoom limits use log-height per second/per second²; pan limits
+use source dimension per second/per second² independently on each axis.
+
+`LookaheadPlannerFrameTrace` retains common framing fields (`target_height_fraction`,
+`desired_crop`, `detection_missed`, `smoothing_applied`, `containment_override`,
+`source_aspect_limited`, `action`) and the causal scale fields below, but omits all causal
+center-error and center-gate fields. Zoom dimensions, scale hysteresis, and miss widening remain
+the exact causal seed output; full-shot optimization changes centers only.
 
 | Field | Meaning |
 | --- | --- |
-| `observed_height_fraction` | Current detector height divided by previous final crop height. |
-| `scale_relative_error` | Observed height fraction divided by profile target fraction, minus one. |
-| `center_error_x_fraction` | Source-clamped desired-center x displacement divided by previous crop width. |
-| `center_error_y_fraction` | Source-clamped desired-center y displacement divided by previous crop height. |
-| `scale_deadband_applied` | Scale gate is idle; residual zoom velocity may still be braking. |
-| `scale_adjusting` | Scale gate remains in adjustment after this frame's gate decision. |
-| `center_deadband_applied` | Center gate is idle; residual pan velocity may still be braking. |
-| `center_adjusting` | Center gate remains in adjustment after this frame's gate decision. |
-| `smoothing_applied` | Crop motion includes active transitions or braking/settling after a gate closes. |
+| `observed_height_fraction` | Detector height divided by previous seed crop height; finite or `null`. |
+| `scale_relative_error` | Observed height fraction / profile target fraction minus one; finite or `null`. |
+| `scale_deadband_applied` | Causal scale gate is idle; residual zoom may still brake. |
+| `scale_adjusting` | Causal scale gate is adjusting. |
+| `lookahead_center_adjusted` | Final center differs from the causal seed center. |
+| `sampled_detection_constraint` | Fresh accepted sampled box supplies this frame's hard constraint. |
+| `sampled_detection_contained` | Containment on a fresh accepted sample; otherwise `null`. False is valid only for source/aspect-impossible boxes. |
+| `held_target_contained` | Containment of a skipped frame's held box; otherwise `null`. False is permitted by sampling policy. |
+| `pan_velocity_x_source_per_second`, `pan_velocity_y_source_per_second` | Recomputed final interval velocity, `null` on the first frame. |
+| `pan_acceleration_x_source_per_second2`, `pan_acceleration_y_source_per_second2` | Recomputed change in interval velocity, `null` until two intervals exist. |
+| `pan_speed_limit_exceeded`, `pan_acceleration_limit_exceeded` | Validated final motion needs excess beyond configured limits, including rest-boundary acceleration constraints. |
+| `smoothing_applied` | Final crop actually changed from the preceding frame. |
+| `containment_override` | Always false for look-ahead: containment is an optimizer constraint, not a snap. |
 
-The four numeric fields are bounded finite numbers or `null`; missing detection or a missing previous
-crop reference yields `null`, never invented zero error. The four state/decision fields are booleans.
-Misses bypass both gates; all four booleans are false on a miss or the first frame without a previous
-crop. Reacquisition uses the widened previous crop as its reference. A gate hold is evidence of the
-pre-safety gate decision, not a guarantee that settling, containment, or source clamping left the
-final crop unchanged. No new trace fields are required for velocity or animation state.
+Actions are `initial`, `lookahead_hold`, `lookahead_pan`, `widen_on_miss`, and
+`source_aspect_limited`. Future accepted sampled boxes can require early pan, but only actual samples
+constrain containment. Held targets may leave the crop; no athlete position is interpolated,
+extrapolated, or claimed inside a detector gap. Motion-limit conflicts retain sampled containment
+and report minimum required speed then acceleration excess.
 
-Actions distinguish `deadband_hold`, `smoothed`, `containment_override`, `source_aspect_limited`,
-and `widen_on_miss`. Containment and source/aspect diagnostics remain separate from gate decisions:
-required expansion or shifting wins over motion limits and jitter suppression. Misses cancel pan
-and inward zoom velocity without extrapolating a subject position. See
-[Detection and Framing](measurements-and-planner.md#independent-hysteresis-gates) for threshold
-boundaries, timestamp-based braking and retargeting, and causal decision order.
+Causal `PlannerFrameTrace` remains serializable for explicitly injected `DeterministicCropPlanner`
+and historical fixtures. Its `center_error_x_fraction`, `center_error_y_fraction`,
+`center_deadband_applied`, `center_adjusting`, and causal hold/smoothing/override actions keep their
+original seed meanings; never fabricate those fields for look-ahead output.
+All numeric fields pass finite-value sanitization; non-finite diagnostics become `null`.
+See [Detection and Framing](measurements-and-planner.md#full-shot-look-ahead-pan).
+
+Invalid/non-optimal solver output fails analyzing terminally with `internal`,
+`"Video framing could not be planned."`; no causal fallback or analysis report/crop-path/debug
+analysis trace is committed. Backend and worker require the
+[drained `w0.2.5` cutover](../../dev/development.md#start-modules), not replay of old configurations.
 
 The sanitizer removes URLs, object keys, credentials, endpoints, command diagnostics, bytes, pixels,
 and media payloads. Human-reviewed annotations remain separate. Evaluation reports detector
@@ -106,7 +121,7 @@ The three review phases are ordered and interpreted as follows:
 | Phase | Reviewer can judge | Required overlay |
 | --- | --- | --- |
 | `detection` | Did the detector associate the selected person? | Candidate/selected person boxes, confidence, and tap/reference marker. |
-| `framing` | Does the current detector box drive a bounded crop? | Detector box, desired crop, final crop, target fraction, miss/widen action, and source/aspect-limit warning. |
+| `framing` | Does sampled-only look-ahead produce a bounded crop? | Fresh/held box provenance and containment, desired/final crop, target fraction, look-ahead action, and motion/source-aspect warnings. |
 | `render` | Does the output correspond to the final crop? | Annotated normalized source beside actual output. |
 
 The renderer reuses the same bounded semantic trace, never reruns inference or replans crops. Review
@@ -121,6 +136,12 @@ status, and exactly ordered `detection`, `framing`, `render` entries. Each phase
 summary, warning intervals, and an unavailable detail when needed. It contains no signed URLs, object
 keys, source identifiers, source bytes, or credentials. Its values must match immutable configuration
 and validated source metadata before the backend projects them.
+
+Framing summaries may include the bounded sampled constraint/uncontained, held-target-outside,
+and pan speed/acceleration excess counts described in the
+[processing report](runtime-and-pipeline.md#processing-report). Warning intervals mark unavoidable
+motion-limit excess and stale held targets outside the crop separately. The latter warns about
+sampling policy, not failed fresh detection containment.
 
 ```mermaid
 flowchart LR

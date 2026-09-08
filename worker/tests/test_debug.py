@@ -69,6 +69,7 @@ def test_detector_and_framing_serializers_contain_no_pose_or_tracking_data() -> 
         "detector_bounds": {"x": 10, "y": 20, "width": 30, "height": 40},
         "confidence": 0.9,
         "detection_missed": False,
+        "detection_sampled": True,
     }
     assert serialize_planner_trace(trace)["target_height_fraction"] == 0.5
 
@@ -103,3 +104,54 @@ def test_planner_diagnostics_serialize_missing_and_nonfinite_values_as_null(valu
         "center_error_y_fraction",
     ):
         assert decoded[field] is None
+
+
+def test_lookahead_trace_distinguishes_sample_constraints_from_held_targets() -> None:
+    from boulder_frame_worker.planner import LookaheadCropPlanner
+    from boulder_frame_worker.protocol import AspectRatio, FramingProfile
+
+    bounds = Rect(700, 200, 200, 400)
+    measurements = [
+        FrameMeasurement(bounds, 0),
+        FrameMeasurement(bounds, 100, detection_sampled=False),
+        FrameMeasurement(None, 200),
+    ]
+    plan = LookaheadCropPlanner(1920, 1080, AspectRatio.LANDSCAPE, FramingProfile.BALANCED).plan(
+        measurements
+    )
+    first, held, missed = [serialize_planner_trace(trace) for trace in plan.trace]
+    assert first["sampled_detection_constraint"] is True
+    assert first["sampled_detection_contained"] is True
+    assert first["held_target_contained"] is None
+    assert first["pan_velocity_x_source_per_second"] is None
+    assert first["pan_acceleration_x_source_per_second2"] is None
+    assert held["sampled_detection_constraint"] is False
+    assert held["sampled_detection_contained"] is None
+    assert held["held_target_contained"] is True
+    assert missed["sampled_detection_constraint"] is False
+    assert missed["held_target_contained"] is None
+    assert serialize_frame_measurement(measurements[1])["detection_sampled"] is False
+    encoded = json.dumps([first, held, missed], allow_nan=False)
+    for forbidden in ("center_adjusting", "center_error", "pose", "tracking", "predicted"):
+        assert forbidden not in encoded
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf"), -float("inf")])
+def test_lookahead_kinematics_are_json_safe(value) -> None:
+    from boulder_frame_worker.planner import LookaheadCropPlanner
+    from boulder_frame_worker.protocol import AspectRatio, FramingProfile
+
+    trace = (
+        LookaheadCropPlanner(1920, 1080, AspectRatio.LANDSCAPE, FramingProfile.BALANCED)
+        .plan([FrameMeasurement(Rect(700, 200, 200, 400), 0)])
+        .trace[0]
+    )
+    fields = (
+        "pan_velocity_x_source_per_second",
+        "pan_velocity_y_source_per_second",
+        "pan_acceleration_x_source_per_second2",
+        "pan_acceleration_y_source_per_second2",
+    )
+    serialized = serialize_planner_trace(replace(trace, **dict.fromkeys(fields, value)))
+    decoded = json.loads(json.dumps(serialized, allow_nan=False))
+    assert all(decoded[field] is None for field in fields)

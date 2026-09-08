@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import copysign, exp, isclose, log, sqrt
+from itertools import pairwise
+from math import copysign, exp, inf, isclose, isfinite, log, nextafter, sqrt
 from typing import Protocol, overload
+
+import numpy as np
+from numpy.typing import NDArray
+from scipy.optimize import linprog  # type: ignore[import-untyped]
+from scipy.sparse import coo_matrix, vstack  # type: ignore[import-untyped]
 
 from .measurement import Point, Rect
 from .protocol import AspectRatio, FramingProfile
@@ -42,6 +48,7 @@ class FrameMeasurement:
     detector_bounds: Rect | None
     timestamp_ms: int
     confidence: float = 0
+    detection_sampled: bool = True
 
     @property
     def missed(self) -> bool:
@@ -68,9 +75,38 @@ class PlannerFrameTrace:
 
 
 @dataclass(frozen=True, slots=True)
+class LookaheadPlannerFrameTrace:
+    target_height_fraction: float
+    desired_crop: CropRect
+    detection_missed: bool
+    smoothing_applied: bool
+    containment_override: bool
+    source_aspect_limited: bool
+    action: str
+    observed_height_fraction: float | None
+    scale_relative_error: float | None
+    scale_deadband_applied: bool
+    scale_adjusting: bool
+    lookahead_center_adjusted: bool
+    sampled_detection_constraint: bool
+    sampled_detection_contained: bool | None
+    held_target_contained: bool | None
+    pan_velocity_x_source_per_second: float | None
+    pan_velocity_y_source_per_second: float | None
+    pan_acceleration_x_source_per_second2: float | None
+    pan_acceleration_y_source_per_second2: float | None
+    pan_speed_limit_exceeded: bool
+    pan_acceleration_limit_exceeded: bool
+
+
+class PlannerError(RuntimeError):
+    """The optimizer did not produce a validated framing optimum."""
+
+
+@dataclass(frozen=True, slots=True)
 class CropPlan(Sequence[CropRect]):
     crops: tuple[CropRect, ...]
-    trace: tuple[PlannerFrameTrace, ...]
+    trace: tuple[PlannerFrameTrace | LookaheadPlannerFrameTrace, ...]
 
     def __post_init__(self) -> None:
         if len(self.crops) != len(self.trace):
@@ -445,3 +481,456 @@ class DeterministicCropPlanner:
             clamp_crop(CropRect(x, y, width, height), self.source_width, self.source_height),
             False,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _AxisInterval:
+    """Pixel origins and normalized centers for an unchanged crop extent."""
+
+    origin_lower: float
+    origin_upper: float
+    center_lower: float
+    center_upper: float
+
+
+class LookaheadCropPlanner:
+    """Optimize camera centers, never athlete positions, over the complete shot."""
+
+    pan_max_speed = 0.25
+    pan_max_acceleration = 0.5
+    solver_feasibility_tolerance = 1e-8
+
+    def __init__(
+        self,
+        source_width: int,
+        source_height: int,
+        aspect_ratio: AspectRatio,
+        profile: FramingProfile,
+    ) -> None:
+        self.seed_planner = DeterministicCropPlanner(
+            source_width, source_height, aspect_ratio, profile
+        )
+        self.source_width = source_width
+        self.source_height = source_height
+        self.aspect_ratio = aspect_ratio
+
+    def plan(self, measurements: Sequence[FrameMeasurement]) -> CropPlan:
+        seed = self.seed_planner.plan(measurements)
+        if not seed:
+            return seed
+        self._validate_geometry(seed.crops)
+        for measurement in measurements:
+            box = measurement.detector_bounds
+            if box is not None and (
+                not all(isfinite(value) for value in (box.x, box.y, box.width, box.height))
+                or box.width <= 0
+                or box.height <= 0
+            ):
+                raise PlannerError("Non-finite or non-positive detector geometry.")
+        feasible = tuple(
+            measurement.detection_sampled
+            and measurement.detector_bounds is not None
+            and measurement.detector_bounds.width <= crop.width
+            and measurement.detector_bounds.height <= crop.height
+            for measurement, crop in zip(measurements, seed.crops, strict=True)
+        )
+        for measurement, possible, trace in zip(measurements, feasible, seed.trace, strict=True):
+            if (
+                measurement.detection_sampled
+                and measurement.detector_bounds is not None
+                and not possible
+                and not trace.source_aspect_limited
+            ):
+                raise PlannerError("Sampled detector cannot fit a non-limited seed crop.")
+        intervals = tuple(
+            (right.timestamp_ms - left.timestamp_ms) / 1000
+            for left, right in pairwise(measurements)
+        )
+        # Each axis owns and releases its sparse matrices and LP results independently.
+        origins_x = self._solve_axis(seed.crops, measurements, feasible, intervals, horizontal=True)
+        origins_y = self._solve_axis(
+            seed.crops, measurements, feasible, intervals, horizontal=False
+        )
+        crops = tuple(
+            CropRect(x, y, crop.width, crop.height)
+            for x, y, crop in zip(origins_x, origins_y, seed.crops, strict=True)
+        )
+        self._validate_geometry(crops)
+        for crop, measurement, possible in zip(crops, measurements, feasible, strict=True):
+            if possible and measurement.detector_bounds is not None:
+                if not crop.contains(measurement.detector_bounds):
+                    raise PlannerError("Validated crop does not contain its sampled detector.")
+        return CropPlan(crops, self._traces(crops, seed, measurements, intervals))
+
+    def _axis_intervals(
+        self,
+        crops: tuple[CropRect, ...],
+        measurements: Sequence[FrameMeasurement],
+        feasible: tuple[bool, ...],
+        *,
+        horizontal: bool,
+    ) -> tuple[_AxisInterval, ...]:
+        source = self.source_width if horizontal else self.source_height
+        result: list[_AxisInterval] = []
+        for crop, measurement, possible in zip(crops, measurements, feasible, strict=True):
+            extent = crop.width if horizontal else crop.height
+            lower, upper = 0.0, source - extent
+            # Choose representable pixel bounds that also survive crop.right/bottom addition.
+            if upper + extent > source:
+                upper = nextafter(upper, -inf)
+            box = measurement.detector_bounds
+            if possible and box is not None:
+                near, far = (box.x, box.right) if horizontal else (box.y, box.bottom)
+                lower = max(lower, far - extent)
+                upper = min(upper, near)
+                if lower + extent < far:
+                    lower = nextafter(lower, inf)
+            if not isfinite(lower) or not isfinite(upper) or lower > upper:
+                raise PlannerError("Sampled detector has an empty legal center interval.")
+            result.append(
+                _AxisInterval(
+                    lower,
+                    upper,
+                    (lower + extent / 2) / source,
+                    (upper + extent / 2) / source,
+                )
+            )
+        return tuple(result)
+
+    def _canonical_origins(
+        self,
+        centers: NDArray[np.float64],
+        crops: tuple[CropRect, ...],
+        legal: tuple[_AxisInterval, ...],
+        *,
+        horizontal: bool,
+    ) -> tuple[float, ...]:
+        source = self.source_width if horizontal else self.source_height
+        tolerance = self.solver_feasibility_tolerance
+        result: list[float] = []
+        for index, (crop, bounds) in enumerate(zip(crops, legal, strict=True)):
+            center = float(centers[index])
+            if (
+                not isfinite(center)
+                or center < bounds.center_lower - tolerance
+                or center > bounds.center_upper + tolerance
+            ):
+                raise PlannerError("Optimizer center is outside its legal interval.")
+            extent = crop.width if horizontal else crop.height
+            origin = center * source - extent / 2
+            origin = min(max(origin, bounds.origin_lower), bounds.origin_upper)
+            result.append(origin)
+            # Validate motion using the actual reconstructed crop center, not solver metadata.
+            centers[index] = (origin + extent / 2) / source
+        return tuple(result)
+
+    @staticmethod
+    def _transitions(
+        intervals: tuple[float, ...],
+    ) -> tuple[tuple[tuple[tuple[int, float], ...], float], ...]:
+        """Velocity changes with their time spans, including both shot/rest boundaries."""
+        first = intervals[0]
+        result: list[tuple[tuple[tuple[int, float], ...], float]] = [
+            (((0, -1 / first), (1, 1 / first)), first / 2)
+        ]
+        for index in range(2, len(intervals) + 1):
+            previous, current = intervals[index - 2], intervals[index - 1]
+            result.append(
+                (
+                    (
+                        (index - 2, 1 / previous),
+                        (index - 1, -1 / previous - 1 / current),
+                        (index, 1 / current),
+                    ),
+                    (previous + current) / 2,
+                )
+            )
+        last = intervals[-1]
+        result.append((((len(intervals) - 1, 1 / last), (len(intervals), -1 / last)), last / 2))
+        return tuple(result)
+
+    def _solve_axis(
+        self,
+        crops: tuple[CropRect, ...],
+        measurements: Sequence[FrameMeasurement],
+        feasible: tuple[bool, ...],
+        intervals: tuple[float, ...],
+        *,
+        horizontal: bool,
+    ) -> tuple[float, ...]:
+        count = len(crops)
+        source = self.source_width if horizontal else self.source_height
+        legal = self._axis_intervals(crops, measurements, feasible, horizontal=horizontal)
+        seed_centers = np.array(
+            [(crop.center.x if horizontal else crop.center.y) / source for crop in crops],
+            dtype=np.float64,
+        )
+        if count == 1:
+            # Preserve the legal seed byte-for-byte rather than round-tripping its origin.
+            origin = crops[0].x if horizontal else crops[0].y
+            if not legal[0].origin_lower <= origin <= legal[0].origin_upper:
+                return self._canonical_origins(seed_centers, crops, legal, horizontal=horizontal)
+            return (origin,)
+
+        speed_index, acceleration_index = count, count + 1
+        deviation_start, variation_start = count + 2, 2 * count + 2
+        variable_count = 3 * count + 2
+        bounds: list[tuple[float, float | None]] = [
+            (item.center_lower, item.center_upper) for item in legal
+        ] + [(0.0, None)] * (variable_count - count)
+        rows: list[int] = []
+        columns: list[int] = []
+        values: list[float] = []
+        limits: list[float] = []
+
+        def add_row(coefficients: tuple[tuple[int, float], ...], limit: float) -> None:
+            row = len(limits)
+            for column, value in coefficients:
+                rows.append(row)
+                columns.append(column)
+                values.append(value)
+            limits.append(limit)
+
+        for index, dt in enumerate(intervals, 1):
+            for sign in (1.0, -1.0):
+                add_row(
+                    (
+                        (index - 1, -sign / dt),
+                        (index, sign / dt),
+                        (speed_index, -1.0),
+                    ),
+                    self.pan_max_speed,
+                )
+        transitions = self._transitions(intervals)
+        for index, (coefficients, duration) in enumerate(transitions):
+            for sign in (1.0, -1.0):
+                # Express acceleration in source/second² so feasibility tolerance has
+                # the same meaning at short, long, and irregular frame intervals.
+                add_row(
+                    tuple((column, sign * value / duration) for column, value in coefficients)
+                    + ((acceleration_index, -1.0),),
+                    self.pan_max_acceleration,
+                )
+                add_row(
+                    tuple((column, sign * value) for column, value in coefficients)
+                    + ((variation_start + index, -1.0),),
+                    0.0,
+                )
+        for index, center in enumerate(seed_centers):
+            add_row(((index, 1.0), (deviation_start + index, -1.0)), float(center))
+            add_row(((index, -1.0), (deviation_start + index, -1.0)), -float(center))
+        matrix = coo_matrix(
+            (values, (rows, columns)), shape=(len(limits), variable_count), dtype=np.float64
+        ).tocsr()
+        rhs = np.asarray(limits, dtype=np.float64)
+        rows.clear()
+        columns.clear()
+        values.clear()
+        limits.clear()
+        weights = np.empty(count, dtype=np.float64)
+        weights[0], weights[-1] = intervals[0] / 2, intervals[-1] / 2
+        for index in range(1, count - 1):
+            weights[index] = (intervals[index - 1] + intervals[index]) / 2
+        tolerance = self.solver_feasibility_tolerance
+        origins: tuple[float, ...] = ()
+        for pass_index in range(4):
+            objective = np.zeros(variable_count, dtype=np.float64)
+            if pass_index == 0:
+                objective[speed_index] = 1
+            elif pass_index == 1:
+                objective[acceleration_index] = 1
+            elif pass_index == 2:
+                objective[deviation_start:variation_start] = weights
+            else:
+                objective[variation_start:] = 1
+            try:
+                result = linprog(
+                    objective,
+                    A_ub=matrix,
+                    b_ub=rhs,
+                    bounds=bounds,
+                    method="highs-ds",
+                    options={
+                        "primal_feasibility_tolerance": tolerance / 100,
+                        "dual_feasibility_tolerance": tolerance / 100,
+                    },
+                )
+            except (ValueError, RuntimeError) as error:
+                raise PlannerError(
+                    f"Optimizer invocation failed ({type(error).__name__})."
+                ) from error
+            if not result.success or result.status != 0:
+                # Never expose arbitrary optimizer strings as user-facing text.
+                message = " ".join(str(result.message).split())
+                message = "".join(character for character in message if character.isprintable())
+                raise PlannerError(f"Optimizer status {result.status}: {message[:240]}")
+            solution = np.asarray(result.x, dtype=np.float64)
+            optimum = float(result.fun)
+            if (
+                solution.shape != (variable_count,)
+                or not np.all(np.isfinite(solution))
+                or not isfinite(optimum)
+                or abs(float(objective @ solution) - optimum) > tolerance
+            ):
+                raise PlannerError("Optimizer returned non-finite or inconsistent variables.")
+            origins = self._canonical_origins(solution[:count], crops, legal, horizontal=horizontal)
+            if np.any(matrix @ solution - rhs > tolerance):
+                raise PlannerError("Canonical optimizer output violates linear constraints.")
+            for value, (lower, upper) in zip(solution, bounds, strict=True):
+                if value < lower - tolerance or (upper is not None and value > upper + tolerance):
+                    raise PlannerError("Optimizer output violates variable bounds.")
+            speed_excess = max(0.0, float(solution[speed_index]))
+            acceleration_excess = max(0.0, float(solution[acceleration_index]))
+            self._validate_axis_motion(
+                solution[:count], intervals, speed_excess, acceleration_excess
+            )
+            if pass_index == 0:
+                bounds[speed_index] = (0.0, max(0.0, optimum) + tolerance)
+            elif pass_index == 1:
+                bounds[acceleration_index] = (0.0, max(0.0, optimum) + tolerance)
+            elif pass_index == 2:
+                deviation_row = coo_matrix(
+                    (
+                        weights,
+                        (
+                            np.zeros(count, dtype=np.int32),
+                            np.arange(deviation_start, variation_start),
+                        ),
+                    ),
+                    shape=(1, variable_count),
+                ).tocsr()
+                matrix = vstack((matrix, deviation_row), format="csr")
+                rhs = np.append(rhs, max(0.0, optimum) + tolerance)
+                del deviation_row
+            del result, solution, objective
+        return origins
+
+    def _validate_axis_motion(
+        self,
+        centers: NDArray[np.float64],
+        intervals: tuple[float, ...],
+        speed_excess: float,
+        acceleration_excess: float,
+    ) -> None:
+        velocities = np.diff(centers) / np.asarray(intervals)
+        tolerance = self.solver_feasibility_tolerance
+        if np.any(np.abs(velocities) > self.pan_max_speed + speed_excess + tolerance):
+            raise PlannerError("Canonical crop path exceeds the optimized speed envelope.")
+        accelerations = [
+            2 * float(velocities[0]) / intervals[0],
+            -2 * float(velocities[-1]) / intervals[-1],
+        ]
+        accelerations.extend(
+            2
+            * float(velocities[index] - velocities[index - 1])
+            / (intervals[index] + intervals[index - 1])
+            for index in range(1, len(intervals))
+        )
+        if any(
+            abs(value) > self.pan_max_acceleration + acceleration_excess + tolerance
+            for value in accelerations
+        ):
+            raise PlannerError("Canonical crop path exceeds the optimized acceleration envelope.")
+
+    def _validate_geometry(self, crops: tuple[CropRect, ...]) -> None:
+        for crop in crops:
+            if (
+                not all(isfinite(value) for value in (crop.x, crop.y, crop.width, crop.height))
+                or crop.width <= 0
+                or crop.height <= 0
+                or not 0 <= crop.x < crop.right <= self.source_width
+                or not 0 <= crop.y < crop.bottom <= self.source_height
+                or not isclose(
+                    crop.width / crop.height,
+                    self.aspect_ratio.value_float,
+                    rel_tol=self.solver_feasibility_tolerance,
+                )
+            ):
+                raise PlannerError("Crop path has invalid source/aspect geometry.")
+
+    def _limit_exceeded(self, value: float, limit: float) -> bool:
+        boundary = limit + self.solver_feasibility_tolerance
+        return value > boundary and not isclose(value, boundary, rel_tol=0, abs_tol=1e-12)
+
+    def _traces(
+        self,
+        crops: tuple[CropRect, ...],
+        seed: CropPlan,
+        measurements: Sequence[FrameMeasurement],
+        intervals: tuple[float, ...],
+    ) -> tuple[LookaheadPlannerFrameTrace, ...]:
+        velocities = tuple(
+            (
+                (current.center.x - previous.center.x) / self.source_width / dt,
+                (current.center.y - previous.center.y) / self.source_height / dt,
+            )
+            for (previous, current), dt in zip(pairwise(crops), intervals, strict=True)
+        )
+        traces: list[LookaheadPlannerFrameTrace] = []
+        for index, (crop, measurement, causal) in enumerate(
+            zip(crops, measurements, seed.trace, strict=True)
+        ):
+            velocity = velocities[index - 1] if index else (None, None)
+            acceleration: tuple[float | None, float | None] = (None, None)
+            boundary_acceleration = 0.0
+            if index >= 2:
+                dt = (intervals[index - 2] + intervals[index - 1]) / 2
+                acceleration = (
+                    (velocities[index - 1][0] - velocities[index - 2][0]) / dt,
+                    (velocities[index - 1][1] - velocities[index - 2][1]) / dt,
+                )
+            if velocities and index == 0:
+                boundary_acceleration = (
+                    max(abs(value) for value in velocities[0]) * 2 / intervals[0]
+                )
+            if velocities and index == len(crops) - 1:
+                boundary_acceleration = max(
+                    boundary_acceleration,
+                    max(abs(value) for value in velocities[-1]) * 2 / intervals[-1],
+                )
+            speed = max((abs(value) for value in velocity if value is not None), default=0.0)
+            acceleration_magnitude = max(
+                boundary_acceleration,
+                max((abs(value) for value in acceleration if value is not None), default=0.0),
+            )
+            box = measurement.detector_bounds
+            sampled = measurement.detection_sampled and box is not None
+            moved = index > 0 and crop.center != crops[index - 1].center
+            if causal.source_aspect_limited:
+                action = "source_aspect_limited"
+            elif index == 0:
+                action = "initial"
+            elif causal.detection_missed:
+                action = "widen_on_miss"
+            else:
+                action = "lookahead_pan" if moved else "lookahead_hold"
+            traces.append(
+                LookaheadPlannerFrameTrace(
+                    target_height_fraction=causal.target_height_fraction,
+                    desired_crop=causal.desired_crop,
+                    detection_missed=causal.detection_missed,
+                    smoothing_applied=index > 0 and crop != crops[index - 1],
+                    containment_override=False,
+                    source_aspect_limited=causal.source_aspect_limited,
+                    action=action,
+                    observed_height_fraction=causal.observed_height_fraction,
+                    scale_relative_error=causal.scale_relative_error,
+                    scale_deadband_applied=causal.scale_deadband_applied,
+                    scale_adjusting=causal.scale_adjusting,
+                    lookahead_center_adjusted=crop.center != seed.crops[index].center,
+                    sampled_detection_constraint=sampled,
+                    sampled_detection_contained=crop.contains(box) if sampled and box else None,
+                    held_target_contained=(
+                        crop.contains(box) if not measurement.detection_sampled and box else None
+                    ),
+                    pan_velocity_x_source_per_second=velocity[0],
+                    pan_velocity_y_source_per_second=velocity[1],
+                    pan_acceleration_x_source_per_second2=acceleration[0],
+                    pan_acceleration_y_source_per_second2=acceleration[1],
+                    pan_speed_limit_exceeded=self._limit_exceeded(speed, self.pan_max_speed),
+                    pan_acceleration_limit_exceeded=self._limit_exceeded(
+                        acceleration_magnitude, self.pan_max_acceleration
+                    ),
+                )
+            )
+        return tuple(traces)

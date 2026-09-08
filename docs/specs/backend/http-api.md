@@ -70,14 +70,19 @@ The API rejects negative frame times, coordinates outside `[0, 1]`, unsupported 
 The stored configuration additionally contains:
 
 - `source_asset_id`
-- `pipeline_version = w0.2.4` by default
+- `pipeline_version = w0.2.5` by default
 - `model_version`
 - Immutable planner configuration (sampling rate comes from deployment configuration):
 
 ```json
 {
   "planner": {
-    "controller": "deterministic-v3",
+    "controller": "lookahead-v1",
+    "seed_controller": "deterministic-v3",
+    "optimizer": "scipy-highs-ds",
+    "lookahead_scope": "full_shot",
+    "containment_policy": "sampled_detections",
+    "solver_feasibility_tolerance": 1e-8,
     "scale_enter_fraction": 0.05,
     "scale_exit_fraction": 0.02,
     "center_enter_fraction": 0.01,
@@ -91,10 +96,18 @@ The stored configuration additionally contains:
 }
 ```
 
-The planner constants implement unchanged independent scale/center hysteresis plus timestamp-based
-speed/acceleration limits for log-height zoom and source-normalized pan. They are not public request
-fields or user-tunable controls. Units, braking, and settling are specified in
-[Detection and Framing](../worker/measurements-and-planner.md#timestamp-based-motion).
+The pan-only full-shot optimizer preserves causal seed dimensions, zoom hysteresis, and miss
+widening. Only accepted sampled boxes are hard containment constraints; held targets may leave
+the crop. Future observed boxes guide the camera without athlete trajectory interpolation.
+Sampled containment stays authoritative when motion limits conflict, with minimum required
+speed/acceleration excess reported. These constants are not public controls; see
+[Detection and Framing](../worker/measurements-and-planner.md#full-shot-look-ahead-pan).
+
+The worker validates this exact key set, types, finite values, strings, and constants before cached
+crop replay. A mismatch fails terminally with `internal` and a user-safe configuration message.
+Non-optimal or invalid solver output fails analyzing with `"Video framing could not be planned."`,
+without causal fallback or committed analysis artifacts. No API endpoint, database migration, or
+object-storage contract change is needed.
 
 `detection_sample_fps` comes from backend `DETECTION_SAMPLE_FPS`, defaults to `10`, and accepts finite
 numbers in `[0, 1000]`; `0` disables sampling. It is not a public job request field. Its snapshot
@@ -105,10 +118,11 @@ The configuration is serialized and SHA-256 hashed. The hash is used with `(proj
 `pipeline_version` identifies immutable processing behavior, not a mutable deployment label. Changing
 it changes the configuration hash and creates a distinct job for the same source and settings. A retry
 retains the original job configuration and never upgrades that job to a newer pipeline behavior.
-The controller and all eight thresholds/motion limits also participate in the hash, preventing a new
-submission from reusing an older planner's cached job/output. Before deploying this cutover, drain old jobs with the old
-workers; the worker does not enforce pipeline-version compatibility at claim time. Never retry or
-republish an old job UUID to request the new behavior; submit a new job with the new configuration.
+The entire planner map also participates in the hash, preventing a new submission from reusing an
+older planner's cached job/output. Pause submissions and drain old jobs on old workers, stop them,
+then deploy backend and worker together with `w0.2.5` before submitting new jobs. Claim-time checks
+do not enforce generic pipeline-version compatibility. Never retry, rewrite, or republish an old
+job UUID for the new behavior, or reuse its scratch/crop paths.
 
 ### Processing Report
 

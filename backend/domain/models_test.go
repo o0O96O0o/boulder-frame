@@ -34,7 +34,7 @@ func TestNewJobConfigValidatesContract(t *testing.T) {
 
 func TestNewJobConfigDetectionSampleRateBounds(t *testing.T) {
 	for _, rate := range []float64{-1, 1000.01, math.NaN(), math.Inf(1), math.Inf(-1)} {
-		if _, err := NewJobConfig(uuid.New(), TargetSelection{NormalizedX: .5, NormalizedY: .5}, OutputSettings{"16:9", "balanced"}, "w0.2.4", "m1", rate); err == nil {
+		if _, err := NewJobConfig(uuid.New(), TargetSelection{NormalizedX: .5, NormalizedY: .5}, OutputSettings{"16:9", "balanced"}, "w0.2.5", "m1", rate); err == nil {
 			t.Fatalf("accepted invalid detection sample rate %v", rate)
 		}
 	}
@@ -44,7 +44,7 @@ func TestJobConfigHashSeparatesDetectionSampleRates(t *testing.T) {
 	source := uuid.New()
 	hashes := make(map[string]float64)
 	for _, rate := range []float64{0, 10, 12.5, 1000} {
-		config, err := NewJobConfig(source, TargetSelection{NormalizedX: .5, NormalizedY: .5}, OutputSettings{"16:9", "balanced"}, "w0.2.4", "m1", rate)
+		config, err := NewJobConfig(source, TargetSelection{NormalizedX: .5, NormalizedY: .5}, OutputSettings{"16:9", "balanced"}, "w0.2.5", "m1", rate)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +115,7 @@ func TestJobConfigHashSeparatesPlannerVersionsAndMotionConstants(t *testing.T) {
 	source := uuid.New()
 	selection := TargetSelection{NormalizedX: .5, NormalizedY: .5}
 	output := OutputSettings{"16:9", "balanced"}
-	config, err := NewJobConfig(source, selection, output, "w0.2.4", "m1", 10)
+	config, err := NewJobConfig(source, selection, output, "w0.2.5", "m1", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,13 +124,18 @@ func TestJobConfigHashSeparatesPlannerVersionsAndMotionConstants(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy := config
-	legacy.PipelineVersion = "w0.2.2"
+	legacy.PipelineVersion = "w0.2.4"
 	legacy.Planner = map[string]any{
-		"controller":            "deterministic-v2",
+		"controller":            "deterministic-v3",
+		"detection_sample_fps":  float64(10),
 		"scale_enter_fraction":  0.05,
 		"scale_exit_fraction":   0.02,
 		"center_enter_fraction": 0.01,
 		"center_exit_fraction":  0.004,
+		"zoom_max_speed":        0.5,
+		"zoom_max_acceleration": 1.0,
+		"pan_max_speed":         0.25,
+		"pan_max_acceleration":  0.5,
 	}
 	legacyHash, err := legacy.Hash()
 	if err != nil {
@@ -141,29 +146,41 @@ func TestJobConfigHashSeparatesPlannerVersionsAndMotionConstants(t *testing.T) {
 	}
 
 	expected := map[string]any{
-		"controller":            "deterministic-v3",
-		"scale_enter_fraction":  0.05,
-		"scale_exit_fraction":   0.02,
-		"center_enter_fraction": 0.01,
-		"center_exit_fraction":  0.004,
-		"zoom_max_speed":        0.5,
-		"zoom_max_acceleration": 1.0,
-		"pan_max_speed":         0.25,
-		"pan_max_acceleration":  0.5,
+		"controller":                   "lookahead-v1",
+		"seed_controller":              "deterministic-v3",
+		"optimizer":                    "scipy-highs-ds",
+		"lookahead_scope":              "full_shot",
+		"containment_policy":           "sampled_detections",
+		"solver_feasibility_tolerance": 1e-8,
+		"detection_sample_fps":         float64(10),
+		"scale_enter_fraction":         0.05,
+		"scale_exit_fraction":          0.02,
+		"center_enter_fraction":        0.01,
+		"center_exit_fraction":         0.004,
+		"zoom_max_speed":               0.5,
+		"zoom_max_acceleration":        1.0,
+		"pan_max_speed":                0.25,
+		"pan_max_acceleration":         0.5,
+	}
+	if len(config.Planner) != len(expected) {
+		t.Fatalf("immutable planner has %d keys, want exactly %d", len(config.Planner), len(expected))
 	}
 	for key, value := range expected {
 		t.Run(key, func(t *testing.T) {
 			if config.Planner[key] != value {
 				t.Fatalf("immutable planner %s = %v, want %v", key, config.Planner[key], value)
 			}
-			changed, err := NewJobConfig(source, selection, output, "w0.2.4", "m1", 10)
+			changed, err := NewJobConfig(source, selection, output, "w0.2.5", "m1", 10)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if key == "controller" {
-				changed.Planner[key] = "deterministic-v2"
-			} else {
-				changed.Planner[key] = value.(float64) * 2
+			switch value := value.(type) {
+			case string:
+				changed.Planner[key] = value + "-changed"
+			case float64:
+				changed.Planner[key] = value * 2
+			default:
+				t.Fatalf("unsupported planner constant type %T", value)
 			}
 			changedHash, err := changed.Hash()
 			if err != nil {

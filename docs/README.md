@@ -2,14 +2,14 @@
 
 ## Architecture
 
-- [Offline Reframing MVP](architecture/offline-reframing-mvp.md): approved product boundary, crop hysteresis with timestamp-based smooth transitions, safety precedence, immutable version cutover, and service contracts.
+- [Offline Reframing MVP](architecture/offline-reframing-mvp.md): pan-only full-shot look-ahead, sampled-only containment, causal zoom, safe solver failure, and immutable service contracts.
 - [Service Implementation Plan](architecture/service-implementation-plan.md): service-by-service implementation tasks, dependencies, interfaces, and verification gates.
-- [Worker Debug Telemetry and Evaluation](specs/worker/debug-telemetry-and-evaluation.md): private debug-bundle contract, crop-gate and settling diagnostics, redaction, evaluation inputs/metrics, and visual phase-review integration.
+- [Worker Debug Telemetry and Evaluation](specs/worker/debug-telemetry-and-evaluation.md): sampled/held provenance, look-ahead kinematics and excess warnings, redaction, evaluation inputs, and visual phase review.
 - [Phase Evaluation Review](specs/frontend/phase-evaluation.md): private, terminal-job visual diagnostics for detection through rendering.
 
 ## Development
 
-- [Development](dev/development.md): shared environment configuration, Docker Compose startup, external dependencies, configurable detection sampling, and drained `w0.2.4` deployment cutover.
+- [Development](dev/development.md): shared environment configuration, Docker Compose startup, external dependencies, detection sampling, and drained `w0.2.5` cutover with old-job/cache isolation.
 
 ## References
 

@@ -21,7 +21,7 @@ is `OnnxSsdMobileNetV1Detector`; its local artifact, tensor contract, checksum, 
 
 ## Configurable Detection Sampling
 
-Pipeline `w0.2.4` snapshots `planner.detection_sample_fps` from the backend deployment setting
+Pipeline `w0.2.5` snapshots `planner.detection_sample_fps` from the backend deployment setting
 `DETECTION_SAMPLE_FPS` (default `10`). Values are finite numbers from `0` through `1000`;
 `0` disables sampling. A rate at or above the source frame rate also detects every frame.
 The worker requires this immutable setting; it never reads a live sampling environment variable.
@@ -32,18 +32,25 @@ without shifting the grid or detecting that frame twice. Associate only sampled 
 and backward from the selected frame.
 
 Planning and rendering still run at the video's full frame rate. In chronological order, hold the
-latest sampled result as the camera target between samples. Do not use future boxes, interpolate
-athlete positions, or count skipped inference as a detection failure. A real sampled miss clears the
-held box and continues safe widening through skipped frames until a successful sample.
-The existing timestamp-based camera controller keeps moving smoothly toward held targets.
-Containment between samples applies only to the held box: the athlete may briefly leave the crop.
+latest sampled result as camera guidance between samples. A real sampled miss clears that held box
+and continues causal zoom widening through skipped frames until a successful sample.
+Only accepted sampled boxes, including the selected frame, are hard containment constraints.
+Skipped frames are not misses; a stale held box may leave the crop. Future observed boxes constrain
+full-shot camera movement but never fill gaps with interpolated or predicted athlete positions.
 All source frames are still decoded; this saves detector inference, not decoding or rendering.
 
 ## Detector-Box Planner
 
-`FrameMeasurement` contains `detector_bounds`, required integer `timestamp_ms`, and detector
-`confidence` (default `0`). Timestamps must strictly increase, including on misses.
-The `DeterministicCropPlanner` uses a fixed target height fraction of the detected person box:
+`FrameMeasurement` contains `detector_bounds`, required integer `timestamp_ms`, detector
+`confidence` (default `0`), and `detection_sampled: bool = True`. Timestamps must be non-negative
+and strictly increase, including on misses. Accepted samples and actual sampled misses set freshness
+true; skipped frames set it false, with held bounds or `None` after a miss.
+
+`LookaheadCropPlanner` is the default behind the unchanged `CropPlanner.plan` interface.
+It invokes `DeterministicCropPlanner` as its causal seed and preserves every seed width/height
+exactly, replacing only centers. `w0.2.5` is deliberately pan-only optimization: zoom hysteresis,
+timestamp-based zoom, miss widening, and source/aspect-limited sizing remain causal.
+The seed uses a fixed target height fraction of the detected person box:
 
 | Profile | Detected athlete height / crop height |
 | --- | --- |
@@ -52,16 +59,16 @@ The `DeterministicCropPlanner` uses a fixed target height fraction of the detect
 | `safe` | `.40` |
 | `full_movement` | `.33` |
 
-The `deterministic-v3` controller uses the profile fraction as its centerline, not a per-frame mandate
+The `deterministic-v3` seed uses the profile fraction as its centerline, not a per-frame mandate
 to resize. It first derives the desired crop height as `detection.height / target_height_fraction`,
 centers the aspect-ratio crop on the detector box, and clamps it to source/aspect bounds.
 The first frame with a detection and no previous crop uses that desired crop directly.
 
 ### Independent Hysteresis Gates
 
-Both gates compare against the previous **final crop**, including any earlier safety override or
-miss widening, rather than against the previous detector box. Their state is causal and independent:
-zoom adjustment does not force a pan, and center jitter does not force a resize.
+The following gates describe the **causal seed**, not look-ahead pan decisions. Both compare against
+the previous final seed crop, including earlier safety overrides or miss widening. Their state is
+causal and independent. Center hysteresis provides the look-ahead objective reference only.
 
 ```text
 observed_height_fraction = detection.height / previous_crop.height
@@ -71,7 +78,7 @@ center_error_y_fraction = (desired_center.y - previous_center.y) / previous_crop
 ```
 
 The desired center in these formulas is source-clamped. The unchanged hysteresis thresholds are
-flat immutable `planner` keys alongside `controller = deterministic-v3`:
+flat immutable `planner` keys alongside `seed_controller = deterministic-v3`:
 
 | Gate | Enter adjustment from idle | Close adjustment gate |
 | --- | --- | --- |
@@ -99,7 +106,7 @@ source dimensions, while the center gate above deliberately retains crop-dimensi
 | `pan_max_speed` | `0.25` | source dimension / second, per axis |
 | `pan_max_acceleration` | `0.5` | source dimension / second², per axis |
 
-Each active component accelerates, cruises within its speed cap, and brakes based on stopping
+In the causal seed, each active component accelerates, cruises within its speed cap, and brakes based on stopping
 distance as it approaches the target. Updates integrate those motion phases over actual elapsed
 time, rather than applying per-frame exponential coefficients. Retargeting preserves velocity:
 new detector boxes do not restart an animation. A target that suddenly moves inside the current
@@ -108,7 +115,7 @@ unless a safety override intervenes. Scale and center settle independently after
 
 ### Safety Precedence And Misses
 
-For detected frames, the order is: derive and clamp the desired crop; apply scale and center
+For detected seed frames, the order is: derive and clamp the desired crop; apply scale and center
 hysteresis; advance active motion or idle braking; build and clamp the candidate; then contain the
 current detector box. Containment may immediately expand or shift a crop. This safety override takes
 precedence over deadband holds, settling, and motion limits. Source/aspect corrections and containment
@@ -118,48 +125,98 @@ and mark `source_aspect_limited` instead of claiming containment.
 
 A missed detection bypasses both gates and resets their adjustment states to idle. It immediately
 cancels pan velocity and any inward zoom velocity; outward zoom velocity is retained while targeting
-the full valid source-aspect height with the same timestamp-based zoom limits. The previous center is
+the full valid source-aspect height with the same timestamp-based zoom limits. The seed's previous center is
 held except for source/aspect clamping required as the crop widens. A first-frame miss uses the full
 crop immediately. Reacquisition compares the detection with that widened final crop, so a material
 error resumes adjustment naturally. The planner never extrapolates an athlete position for a close
 crop and performs no additional subject-state or future-motion inference.
 
+### Full-Shot Look-Ahead Pan
+
+The immutable controller is `lookahead-v1`, seed controller `deterministic-v3`, optimizer
+`scipy-highs-ds` (pinned `scipy==1.15.3`, `linprog(method="highs-ds")`), scope `full_shot`,
+containment policy `sampled_detections`, and feasibility tolerance `1e-8`. These fields plus the
+eight constants above and `detection_sample_fps` form the exact planner key set; see the
+[complete JSON contract](../backend/http-api.md). The worker rejects missing/extra keys, wrong types,
+non-finite values, and mismatched constants before cached crop replay with terminal `internal`.
+
+Solve one independently source-normalized axis at a time, using sparse matrices only and fixed
+variable/constraint ordering. A seed crop extent `e_i` gives legal source bounds
+`e_i/2 <= c_i <= source_extent-e_i/2`. On a fresh accepted sampled box, intersect these with
+`box_far_edge-e_i/2 <= c_i <= box_near_edge+e_i/2`. Held boxes never narrow the interval.
+If source/aspect geometry makes the fresh box impossible to fit, retain source bounds and record
+`source_aspect_limited` and uncontained sampled status; any other empty interval is a planning error.
+
+For normalized center `c_i` and seconds `dt_i`, use the interval velocity
+`v_i = (c_i-c_(i-1))/dt_i`. Nonnegative global excess variables `s` and `a` keep sampled
+containment authoritative when motion limits conflict:
+
+```text
+abs(v_i) <= 0.25 + s
+abs(v_1) <= (0.5 + a) * dt_1 / 2
+abs(v_i-v_(i-1)) <= (0.5 + a) * (dt_i+dt_(i-1)) / 2
+abs(v_last) <= (0.5 + a) * dt_last / 2
+```
+
+Start/end constraints model rest immediately before/after the shot. Four lexicographic LP passes
+minimize (1) speed excess, (2) acceleration excess while fixing speed to its optimum plus tolerance,
+(3) duration-weighted L1 seed-center deviation with trapezoidal timestamp weights while fixing both
+excess optima plus tolerance, then (4) total absolute velocity change, including rest transitions,
+while fixing seed deviation to its optimum plus tolerance. Explicit L1 auxiliaries and deterministic
+`highs-ds` ordering avoid random tie-breaking. Release pass-local matrices/results before the next
+axis. Empty input returns the empty seed plan; one frame returns its legal seed crop without SciPy.
+
+Require every solve to return a finite optimal result. Canonicalize centers outside an interval by
+at most tolerance onto its boundary; never repair a materially invalid solution with a snap.
+Reconstruct crops using unchanged seed dimensions and validate frame count, timestamps, positive
+finite/aspect-correct geometry, source bounds, feasible sampled containment, and recomputed
+speed/acceleration against optimized excess plus tolerance. Derive diagnostics from this validated
+path, not untrusted solver metadata. `PlannerError` maps to terminal analyzing `internal`,
+`"Video framing could not be planned."`; solver diagnostics remain sanitized internal details.
+There is no causal fallback and no committed analysis report, crop path, or debug analysis trace
+on optimizer failure.
+
 ### Diagnostics
 
-Each `CropPlan` contains final crops and frame-aligned traces with the target fraction, desired crop,
-miss flag, smoothing status, containment override, source/aspect limitation, and action. The four
-numeric errors/fractions above are finite floats or `null` when there is no detection or previous
-crop reference. `scale_deadband_applied` and `center_deadband_applied` indicate idle gates, not an
-instantaneously stationary crop; `scale_adjusting` and `center_adjusting` describe active gates.
-`smoothing_applied` includes braking/settling after a gate closes. These decisions remain independent
-of the final safety result.
-Actions distinguish `deadband_hold`, `smoothed`, `containment_override`, `source_aspect_limited`,
-and `widen_on_miss`; a safety action does not erase the gate diagnostics. See the
-[telemetry contract](debug-telemetry-and-evaluation.md#telemetry-contract) for serialization.
+`CropPlan.trace` accepts causal `PlannerFrameTrace` or `LookaheadPlannerFrameTrace`.
+The look-ahead trace retains `target_height_fraction`, `desired_crop`, `detection_missed`,
+`smoothing_applied`, `containment_override`, `source_aspect_limited`, `action`, and causal scale
+fields (`observed_height_fraction`, `scale_relative_error`, `scale_deadband_applied`,
+`scale_adjusting`). It omits causal center-error/gate fields rather than inventing their meanings.
+`containment_override` is always false: hard constraints replace after-the-fact center snaps.
+`smoothing_applied` means an actual final crop change from the preceding frame.
 
-All eight thresholds and motion limits are algorithm constants, not frontend controls or public job
-inputs. Pipeline `w0.2.4` and the immutable planner configuration, including the sampling rate, separate this behavior from older
-cached paths.
+Additional fields are `lookahead_center_adjusted`, `sampled_detection_constraint`,
+`sampled_detection_contained` (nullable outside fresh accepted samples), `held_target_contained`
+(nullable outside skipped frames with a held box), per-axis
+`pan_velocity_{x,y}_source_per_second` (null on the first frame), and
+`pan_acceleration_{x,y}_source_per_second2` (null until two intervals exist), plus
+`pan_speed_limit_exceeded` and `pan_acceleration_limit_exceeded`. Actions are `initial`,
+`lookahead_hold`, `lookahead_pan`, `widen_on_miss`, or `source_aspect_limited`.
+Reports retain existing metrics and add sampled/held containment and motion-limit counts/excess;
+warnings distinguish stale-target sampling policy from genuine sampled containment failure.
+See [telemetry](debug-telemetry-and-evaluation.md#telemetry-contract) and
+[processing reports](runtime-and-pipeline.md#processing-report).
+
+All settings except the deployment sampling rate are immutable algorithm constants, not frontend
+controls. Pipeline `w0.2.5` and the entire planner map participate in the job hash.
+Deploy through a [drained cutover](../../dev/development.md#start-modules), not old-job retries.
 
 ```mermaid
 flowchart LR
-  S[Selected-frame tap] --> A[Detector association]
-  D[Sampled person detection plus selected frame] --> A
-  A -->|sampled box or actual miss| H[Chronological held camera target]
-  H --> F[Full-rate frame measurement]
-  F -->|detection| P[Profile crop and source clamp]
-  P --> S1[Scale gate and timestamp motion]
-  S1 --> S2[Independent center gate and timestamp motion]
-  S2 --> B[Build and clamp candidate]
-  B --> C[Contain box or mark source aspect limit]
-  C --> R[Final source crop]
-  F -->|miss| W[Widen and reset both gates]
-  W --> R
-  R -.->|previous crop, gates, velocity and timestamp| S1
-  R -.->|previous crop, gates, velocity and timestamp| S2
+  S[Selected-frame tap] --> A[Sampled detector association]
+  D[Time-grid detections plus selected frame] --> A
+  A --> H[Full-rate measurements with fresh or held provenance]
+  H --> C[Causal seed dimensions and center reference]
+  H --> B[Hard bounds from accepted sampled boxes only]
+  C --> L[Full-shot sparse per-axis lexicographic LP]
+  B --> L
+  L --> V[Validate optimum geometry and motion]
+  V -->|valid| R[Final centers with unchanged seed dimensions]
+  V -->|invalid| E[Terminal internal with no analysis artifacts]
 ```
 
 `CropRect` exposes right/bottom bounds, center, and containment; `full_frame_crop` derives the
 widest crop for the requested output aspect ratio and `clamp_crop` keeps all crops inside source
-bounds. The planner remains behind its `CropPlanner` interface so a later replacement can retain the
-same rendering and storage contracts.
+bounds. `LookaheadCropPlanner` retains the same `CropPlanner` rendering and storage contracts;
+full-shot camera optimization is not athlete trajectory interpolation.

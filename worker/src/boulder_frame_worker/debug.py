@@ -14,7 +14,7 @@ from typing import BinaryIO
 from uuid import UUID
 
 from .measurement import AssociationEvidence, Point, RawFrameObservation, Rect
-from .planner import CropRect, FrameMeasurement, PlannerFrameTrace
+from .planner import CropRect, FrameMeasurement, LookaheadPlannerFrameTrace, PlannerFrameTrace
 
 DEBUG_BUNDLE_SCHEMA_VERSION = 1
 DEFAULT_DEBUG_MAX_FRAMES = 10_000
@@ -299,11 +299,14 @@ def serialize_frame_measurement(measurement: FrameMeasurement) -> dict[str, obje
         "detector_bounds": serialize_rect(measurement.detector_bounds),
         "confidence": _finite(measurement.confidence),
         "detection_missed": measurement.missed,
+        "detection_sampled": measurement.detection_sampled,
     }
 
 
-def serialize_planner_trace(trace: PlannerFrameTrace) -> dict[str, object]:
-    return {
+def serialize_planner_trace(
+    trace: PlannerFrameTrace | LookaheadPlannerFrameTrace,
+) -> dict[str, object]:
+    result: dict[str, object] = {
         "target_height_fraction": _finite(trace.target_height_fraction),
         "desired_crop": serialize_crop_rect(trace.desired_crop),
         "detection_missed": trace.detection_missed,
@@ -314,12 +317,33 @@ def serialize_planner_trace(trace: PlannerFrameTrace) -> dict[str, object]:
         "scale_relative_error": _finite(trace.scale_relative_error),
         "scale_deadband_applied": trace.scale_deadband_applied,
         "scale_adjusting": trace.scale_adjusting,
-        "center_error_x_fraction": _finite(trace.center_error_x_fraction),
-        "center_error_y_fraction": _finite(trace.center_error_y_fraction),
-        "center_deadband_applied": trace.center_deadband_applied,
-        "center_adjusting": trace.center_adjusting,
         "action": trace.action,
     }
+    if isinstance(trace, LookaheadPlannerFrameTrace):
+        result.update(
+            lookahead_center_adjusted=trace.lookahead_center_adjusted,
+            sampled_detection_constraint=trace.sampled_detection_constraint,
+            sampled_detection_contained=trace.sampled_detection_contained,
+            held_target_contained=trace.held_target_contained,
+            pan_velocity_x_source_per_second=_finite(trace.pan_velocity_x_source_per_second),
+            pan_velocity_y_source_per_second=_finite(trace.pan_velocity_y_source_per_second),
+            pan_acceleration_x_source_per_second2=_finite(
+                trace.pan_acceleration_x_source_per_second2
+            ),
+            pan_acceleration_y_source_per_second2=_finite(
+                trace.pan_acceleration_y_source_per_second2
+            ),
+            pan_speed_limit_exceeded=trace.pan_speed_limit_exceeded,
+            pan_acceleration_limit_exceeded=trace.pan_acceleration_limit_exceeded,
+        )
+    else:
+        result.update(
+            center_error_x_fraction=_finite(trace.center_error_x_fraction),
+            center_error_y_fraction=_finite(trace.center_error_y_fraction),
+            center_deadband_applied=trace.center_deadband_applied,
+            center_adjusting=trace.center_adjusting,
+        )
+    return result
 
 
 def _unsafe_field(key: str) -> bool:

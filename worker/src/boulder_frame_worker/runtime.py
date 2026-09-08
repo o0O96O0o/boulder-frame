@@ -14,7 +14,7 @@ from .models import (
     OnnxSsdMobileNetV1Detector,
 )
 from .pipeline import OutputFinalizer, PlannerFactory, ProcessingPipeline
-from .planner import DeterministicCropPlanner
+from .planner import LookaheadCropPlanner
 from .queue_adapter import (
     QueueConsumerAdapter,
     QueueTransport,
@@ -145,7 +145,7 @@ def compose_runtime(
         ),
         frame_reader=frame_reader,
         detector=detector,
-        planner_factory=planner_factory or DeterministicCropPlanner,
+        planner_factory=planner_factory or LookaheadCropPlanner,
         debug_capture=config.debug_capture,
         debug_max_frames=config.debug_max_frames,
         debug_max_bytes=config.debug_max_bytes,

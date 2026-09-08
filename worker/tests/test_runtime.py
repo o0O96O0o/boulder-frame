@@ -67,3 +67,33 @@ def test_runtime_missing_detector_artifact_prevents_configured_startup(tmp_path)
             Transport(),
             S3Storage(StorageClient(), "boulder-frame"),
         )
+
+
+@pytest.mark.parametrize("injected", [False, True])
+def test_runtime_selects_lookahead_unless_factory_is_injected(
+    tmp_path, monkeypatch, injected
+) -> None:
+    from boulder_frame_worker import runtime
+    from boulder_frame_worker.pipeline import ProcessingPipeline
+    from boulder_frame_worker.planner import DeterministicCropPlanner, LookaheadCropPlanner
+
+    pipelines = []
+
+    def capture_pipeline(*args, **kwargs):
+        pipeline = ProcessingPipeline(*args, **kwargs)
+        pipelines.append(pipeline)
+        return pipeline
+
+    monkeypatch.setattr(runtime, "ProcessingPipeline", capture_pipeline)
+    composed = compose_runtime(
+        WorkerConfig(**config_values(tmp_path)),
+        InMemoryJobRepository([]),
+        Transport(),
+        S3Storage(StorageClient(), "boulder-frame"),
+        detector=Detector(),
+        planner_factory=DeterministicCropPlanner if injected else None,
+    )
+    assert pipelines[0].planner_factory is (
+        DeterministicCropPlanner if injected else LookaheadCropPlanner
+    )
+    composed.close()

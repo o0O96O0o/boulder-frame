@@ -4,7 +4,7 @@ The backend is a Go HTTP process. It owns request validation, PostgreSQL metadat
 
 ## Documents
 
-- [HTTP API](http-api.md): routes, request validation, response shapes, ownership checks, lifecycle behavior, opaque nullable processing reports, and immutable `deterministic-v3` planner thresholds/motion limits, configurable detection sampling, and hash cutover.
+- [HTTP API](http-api.md): routes, validation, ownership, lifecycle, opaque processing reports, exact immutable `lookahead-v1` planner map, configurable sampling, full-map hash separation, and drained `w0.2.5` cutover.
 - [Persistence](persistence.md): PostgreSQL entities, constraints, immutable configuration, nullable JSONB processing reports, and repository responsibilities.
 - [Redis Streams Task Distribution](redis-streams-task-distribution.md): stream/group configuration, task payload, idempotency, pending recovery, lease authority, and worker handoff.
 
@@ -39,3 +39,9 @@ The migration command applies `backend/migrations/001_init.sql` through
 migration `004` also requires draining workers that finalize retired review roles. See
 [Persistence](persistence.md#phase-review-rollout). Apply migration `005` before deploying
 the report-aware API or worker; it leaves existing reports unset.
+
+Pipeline `w0.2.5` needs no database migration or new public controls. Its worker optimizes full-shot
+pan with sampled-only hard containment, permits stale held targets outside the crop, and retains
+causal zoom. Future boxes constrain camera movement, not athlete trajectory interpolation.
+Invalid configuration/solver output fails safely without causal fallback. Deploy backend and worker
+together after draining old jobs; do not rewrite/retry them or reuse old crop paths for this behavior.

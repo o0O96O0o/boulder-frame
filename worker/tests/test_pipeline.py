@@ -2,6 +2,7 @@ import json
 from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -17,7 +18,7 @@ from boulder_frame_worker.pipeline import (
     _review_summary,
     _review_warning_intervals,
 )
-from boulder_frame_worker.planner import CropRect
+from boulder_frame_worker.planner import CropRect, PlannerError
 from boulder_frame_worker.protocol import (
     AspectRatio,
     FramingProfile,
@@ -79,6 +80,25 @@ class Renderer:
         return Inspector().inspect(output)
 
 
+PLANNER_SETTINGS = {
+    "controller": "lookahead-v1",
+    "seed_controller": "deterministic-v3",
+    "optimizer": "scipy-highs-ds",
+    "lookahead_scope": "full_shot",
+    "containment_policy": "sampled_detections",
+    "solver_feasibility_tolerance": 1e-8,
+    "detection_sample_fps": 10,
+    "scale_enter_fraction": 0.05,
+    "scale_exit_fraction": 0.02,
+    "center_enter_fraction": 0.01,
+    "center_exit_fraction": 0.004,
+    "zoom_max_speed": 0.5,
+    "zoom_max_acceleration": 1.0,
+    "pan_max_speed": 0.25,
+    "pan_max_acceleration": 0.5,
+}
+
+
 def record(frame_time_ms: int = 0, *, detection_sample_fps: int | float = 0) -> JobRecord:
     source_id = uuid4()
     return JobRecord(
@@ -88,9 +108,9 @@ def record(frame_time_ms: int = 0, *, detection_sample_fps: int | float = 0) -> 
             source_id,
             {"frame_time_ms": frame_time_ms, "normalized_x": 0.5, "normalized_y": 0.5},
             {"aspect_ratio": "16:9", "profile": "balanced"},
-            "pipeline",
+            "w0.2.5",
             "model",
-            {"detection_sample_fps": detection_sample_fps},
+            {**PLANNER_SETTINGS, "detection_sample_fps": detection_sample_fps},
         ),
         source_asset=SourceAsset(
             source_id, uuid4(), "source", "uploaded", None, None, 1, None, None, None, None
@@ -206,7 +226,7 @@ def test_report_distinguishes_sample_misses_from_held_gaps_and_survives_resume(t
     assert calls == [0, 3, 6, 9, 12, 15]
 
 
-def test_report_measures_safety_jump_after_detection_gap(tmp_path) -> None:
+def test_report_measures_unavoidable_motion_excess_without_containment_snap(tmp_path) -> None:
     pipeline, job, _ = sampling_pipeline(
         Fraction(30),
         9,
@@ -218,11 +238,32 @@ def test_report_measures_safety_jump_after_detection_gap(tmp_path) -> None:
             job.configuration, output={"aspect_ratio": "9:16", "profile": "full_movement"}
         ),
     )
-    report = pipeline.analyzing(job, tmp_path)["report"]
-    assert report["framing"]["containment_override_frames"] >= 1
-    assert report["framing"]["max_center_step_source_px"] > 300
-    assert report["framing"]["max_center_step_timestamp_ms"] == 200
-    assert report["framing"]["max_height_step_fraction"] == 0
+    framing = pipeline.analyzing(job, tmp_path)["report"]["framing"]
+    rows = [
+        json.loads(line) for line in (tmp_path / "analysis-trace.jsonl").read_text().splitlines()
+    ]
+    assert framing["containment_override_frames"] == 0
+    assert framing["sampled_detection_constraint_frames"] == 2
+    assert framing["sampled_detection_uncontained_frames"] == 0
+    assert framing["max_center_step_source_px"] < 300
+    assert rows[1]["framing"]["crop"]["x"] < rows[0]["framing"]["crop"]["x"]
+    assert framing["max_height_step_fraction"] == 0
+    assert framing["pan_speed_limit_excess_source_fraction_per_second"] > 0
+    assert framing["pan_acceleration_limit_excess_source_fraction_per_second2"] > 0
+    assert framing["pan_speed_limit_exceeded_frames"] > 0
+    assert framing["pan_acceleration_limit_exceeded_frames"] > 0
+    summary = _review_summary(rows, "framing")
+    for key in (
+        "sampled_detection_constraint_frames",
+        "sampled_detection_uncontained_frames",
+        "held_target_outside_crop_frames",
+        "pan_speed_limit_exceeded_frames",
+        "pan_acceleration_limit_exceeded_frames",
+    ):
+        assert summary[key] == framing[key]
+    warnings = _review_warning_intervals(rows, "framing")
+    assert any("speed" in warning["label"].lower() for warning in warnings)
+    assert any("acceleration" in warning["label"].lower() for warning in warnings)
 
 
 def test_skips_continue_camera_motion_but_sampled_miss_clears_hold_until_reacquisition(
@@ -243,12 +284,16 @@ def test_skips_continue_camera_motion_but_sampled_miss_clears_hold_until_reacqui
         assert trace[index]["detection"]["selection_outcome"] == "detection_skipped"
         assert trace[index]["detection"]["detection"] is None
         assert "selection" not in trace[index]["detection"]
-        assert trace[index]["framing"]["input"] == trace[3]["framing"]["input"]
+        assert (
+            trace[index]["framing"]["input"]["detector_bounds"]
+            == (trace[3]["framing"]["input"]["detector_bounds"])
+        )
+        assert not trace[index]["framing"]["input"]["detection_sampled"]
         previous = trace[index - 1]["framing"]["crop"]
         current = trace[index]["framing"]["crop"]
         assert current["height"] < previous["height"]
-        assert current["x"] + current["width"] / 2 > previous["x"] + previous["width"] / 2
     for index in range(6, 12):
+        assert trace[index]["framing"]["input"]["detection_sampled"] == (index in (6, 9))
         assert trace[index]["framing"]["input"]["detector_bounds"] is None
         assert trace[index]["framing"]["decision"]["detection_missed"]
         assert (
@@ -258,7 +303,16 @@ def test_skips_continue_camera_motion_but_sampled_miss_clears_hold_until_reacqui
     assert trace[9]["detection"]["selection"]["reference"] == {"x": 1060, "y": 540}
     assert trace[12]["detection"]["detection"] is not None
     assert not trace[12]["framing"]["decision"]["detection_missed"]
-    assert trace[13]["framing"]["input"] == trace[12]["framing"]["input"]
+    assert (
+        trace[13]["framing"]["input"]["detector_bounds"]
+        == (trace[12]["framing"]["input"]["detector_bounds"])
+    )
+    assert [row["framing"]["input"]["detection_sampled"] for row in trace] == [
+        index in (0, 3, 6, 9, 12) for index in range(15)
+    ]
+    assert [row["framing"]["decision"]["sampled_detection_constraint"] for row in trace] == [
+        index in (0, 3, 12) for index in range(15)
+    ]
     assert _review_summary(trace, "detection") == {
         "frames": 15,
         "sampled_frames": 5,
@@ -323,17 +377,165 @@ def test_late_selection_never_holds_future_boxes_into_earlier_frames(tmp_path) -
     assert trace[0]["detection"]["selection"]["reference"] == {"x": 800, "y": 540}
 
 
+def test_default_lookahead_moves_early_and_reports_stale_held_targets(tmp_path) -> None:
+    first = Rect(1400, 300, 200, 700)
+    later = Rect(700, 300, 200, 700)
+    pipeline, job, _ = sampling_pipeline(
+        Fraction(30),
+        91,
+        sample_fps=1,
+        boxes={0: first, 30: first, 60: later, 90: later},
+    )
+    job = replace(
+        job,
+        configuration=replace(
+            job.configuration, output={"aspect_ratio": "9:16", "profile": "full_movement"}
+        ),
+    )
+    framing = pipeline.analyzing(job, tmp_path)["report"]["framing"]
+    rows = [
+        json.loads(line) for line in (tmp_path / "analysis-trace.jsonl").read_text().splitlines()
+    ]
+    crops = [row["framing"]["crop"] for row in rows]
+    assert crops[59]["x"] < crops[30]["x"]
+    for index, box in ((0, first), (30, first), (60, later), (90, later)):
+        crop = crops[index]
+        assert crop["x"] <= box.x + 1e-5
+        assert crop["x"] + crop["width"] >= box.x + box.width - 1e-5
+        assert crop["y"] <= box.y + 1e-5
+        assert crop["y"] + crop["height"] >= box.y + box.height - 1e-5
+    assert framing["planner_controller"] == "lookahead-v1"
+    assert framing["optimizer"] == "scipy-highs-ds"
+    assert framing["lookahead_scope"] == "full_shot"
+    assert framing["containment_policy"] == "sampled_detections"
+    assert framing["sampled_detection_constraint_frames"] == 4
+    assert framing["sampled_detection_uncontained_frames"] == 0
+    assert framing["held_target_outside_crop_frames"] > 0
+    assert framing["pan_speed_limit_exceeded_frames"] == 0
+    assert framing["pan_acceleration_limit_exceeded_frames"] == 0
+    assert framing["pan_speed_limit_excess_source_fraction_per_second"] == 0
+    assert framing["pan_acceleration_limit_excess_source_fraction_per_second2"] == 0
+    assert framing["max_pan_axis_speed_source_fraction_per_second"] <= 0.25 + 1e-8 + 1e-12
+    assert framing["max_pan_axis_acceleration_source_fraction_per_second2"] <= 0.5 + 1e-8 + 1e-12
+    assert framing["max_center_step_source_px"] <= 1920 * 0.25 * 0.034 + 1e-5
+    manifest_path = pipeline._write_review_manifest(
+        tmp_path / "review",
+        uuid4(),
+        rows,
+        {},
+        "w0.2.5",
+        "model",
+        pipeline._inputs(job, tmp_path).metadata,
+    )
+    manifest = json.loads(manifest_path.read_text())
+    phase = next(phase for phase in manifest["phases"] if phase["id"] == "framing")
+    assert (
+        phase["summary"]["held_target_outside_crop_frames"]
+        == (framing["held_target_outside_crop_frames"])
+    )
+    assert any("Held target" in warning["label"] for warning in phase["warning_intervals"])
+    assert all(
+        row["framing"]["input"]["detection_sampled"] is False
+        for row in rows
+        if row["framing"]["decision"]["held_target_contained"] is False
+    )
+
+
+def test_report_counts_source_aspect_impossible_samples_not_held_targets(tmp_path) -> None:
+    box = Rect(460, 190, 1000, 700)
+    pipeline, job, _ = sampling_pipeline(Fraction(30), 6, boxes={0: box, 3: box})
+    job = replace(
+        job,
+        configuration=replace(
+            job.configuration, output={"aspect_ratio": "9:16", "profile": "full_movement"}
+        ),
+    )
+    framing = pipeline.analyzing(job, tmp_path)["report"]["framing"]
+    assert framing["sampled_detection_constraint_frames"] == 2
+    assert framing["sampled_detection_uncontained_frames"] == 2
+    assert framing["held_target_outside_crop_frames"] == 4
+    assert framing["source_aspect_limited_frames"] == 6
+    assert framing["containment_override_frames"] == 0
+
+
+def test_planning_failure_is_terminal_without_analysis_artifacts(tmp_path, monkeypatch) -> None:
+    pipeline, job, _ = sampling_pipeline(Fraction(30), 6)
+    monkeypatch.setattr(
+        "boulder_frame_worker.planner.linprog",
+        lambda *args, **kwargs: SimpleNamespace(
+            success=False, status=4, message="numerical optimizer failure"
+        ),
+    )
+    with pytest.raises(WorkerError) as raised:
+        pipeline.analyzing(job, tmp_path)
+    assert raised.value.code is ErrorCode.INTERNAL
+    assert not raised.value.transient
+    assert isinstance(raised.value.__cause__, PlannerError)
+    for name in ("crop-path.jsonl", "analysis-report.json", "analysis-trace.jsonl"):
+        assert not (tmp_path / name).exists()
+        assert not (tmp_path / name).with_suffix(".tmp").exists()
+
+
+def test_review_keeps_overlapping_sampling_and_motion_warnings() -> None:
+    def frame(timestamp, *, held=False, speed=False, acceleration=False):
+        return {
+            "timestamp_ms": timestamp,
+            "framing": {
+                "decision": {
+                    "held_target_contained": False if held else None,
+                    "pan_speed_limit_exceeded": speed,
+                    "pan_acceleration_limit_exceeded": acceleration,
+                }
+            },
+        }
+
+    warnings = _review_warning_intervals(
+        [
+            frame(0, held=True, speed=True),
+            frame(100, held=True, speed=True, acceleration=True),
+            frame(200, acceleration=True),
+            frame(300),
+        ],
+        "framing",
+    )
+    by_kind = {
+        "held"
+        if "Held target" in item["label"]
+        else ("acceleration" if "acceleration" in item["label"] else "speed"): (
+            item["start_ms"],
+            item["end_ms"],
+        )
+        for item in warnings
+    }
+    assert by_kind == {"held": (0, 200), "speed": (0, 200), "acceleration": (100, 300)}
+
+
 @pytest.mark.parametrize(
     "planner",
     [
         {},
-        {"detection_sample_fps": None},
-        {"detection_sample_fps": True},
-        {"detection_sample_fps": "10"},
-        {"detection_sample_fps": -1},
-        {"detection_sample_fps": 1001},
-        {"detection_sample_fps": float("nan")},
-        {"detection_sample_fps": float("inf")},
+        {**PLANNER_SETTINGS, "unexpected": 1},
+        *[
+            {key: value for key, value in PLANNER_SETTINGS.items() if key != missing}
+            for missing in PLANNER_SETTINGS
+        ],
+        *[
+            {**PLANNER_SETTINGS, key: invalid}
+            for key, value in PLANNER_SETTINGS.items()
+            for invalid in (
+                (None, True, 123, "wrong")
+                if isinstance(value, str)
+                else (None, True, "10", float("nan"), float("inf"), 10**1000)
+            )
+        ],
+        *[
+            {**PLANNER_SETTINGS, key: value + 0.01}
+            for key, value in PLANNER_SETTINGS.items()
+            if not isinstance(value, str) and key != "detection_sample_fps"
+        ],
+        {**PLANNER_SETTINGS, "controller": "deterministic-v3"},
+        {**PLANNER_SETTINGS, "detection_sample_fps": -1},
+        {**PLANNER_SETTINGS, "detection_sample_fps": 1001},
     ],
 )
 def test_invalid_snapshot_sampling_is_rejected_before_cached_crop_replay(tmp_path, planner) -> None:
@@ -490,13 +692,6 @@ def test_detector_jitter_persists_identical_frame_aligned_crops(tmp_path) -> Non
     persisted = pipeline._crop_path(pipeline._inputs(job, tmp_path))
     assert len(persisted) == 4
     assert all(crop == persisted[0] for crop in persisted[1:])
-    for row in trace[1:]:
-        decision = row["framing"]["decision"]
-        assert decision["action"] == "deadband_hold"
-        assert decision["scale_deadband_applied"]
-        assert decision["center_deadband_applied"]
-        assert not decision["scale_adjusting"]
-        assert not decision["center_adjusting"]
 
 
 def test_temporal_progress_compares_normalized_input_output_and_original_source(tmp_path) -> None:

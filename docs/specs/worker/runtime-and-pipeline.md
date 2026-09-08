@@ -13,6 +13,9 @@ different immutable `configuration.model_version` fails with `model_unavailable`
 handler runs. `debug_capture` is default-off. `debug_visual_capture` requires it and uses independent
 duration, dimensions, aggregate-byte, and child-process deadline limits.
 
+`compose_runtime` and `ProcessingPipeline` default to `LookaheadCropPlanner`; explicit planner-factory
+injection remains supported. SciPy is pinned to `1.15.3` for sparse deterministic `highs-ds` solves.
+
 ## Durable Pipeline
 
 ```mermaid
@@ -24,8 +27,10 @@ flowchart LR
   I -->|CFR| D[ONNX person detection]
   I -->|Supported VFR only| N[Bounded local CFR normalization]
   N --> D
-  D --> F[Detector-box framing]
-  F --> R[Per-frame crop resize and fixed-frame FFmpeg encode]
+  D --> F[Causal zoom seed plus full-shot sampled-constrained pan]
+  F --> C[Validate optimum geometry and motion]
+  C -->|valid| R[Per-frame crop resize and fixed-frame FFmpeg encode]
+  C -->|invalid| E[Terminal internal without analysis artifacts]
   R --> O[Lease-finalize output]
   O --> V[Optional telemetry and review]
   V --> T[Persist terminal state and JSON report then XACK]
@@ -55,15 +60,24 @@ gate; a miss or rejected candidate does not update the reference.
 Detection runs only on the immutable `planner.detection_sample_fps` time grid plus the exact selected
 frame. All source frames remain decoded and frame-aligned. Between samples, full-rate framing uses
 the last chronological sampled result; a real sampled miss clears the held box until reacquisition.
-Skipped frames are not detection failures. Missing or invalid sampling configuration is rejected,
-including before a cached crop path is reused.
-`framing` derives the profile-target crop, independently gates scale and center through `deterministic-v3` hysteresis, and advances
-speed/acceleration-limited log-height zoom and source-normalized pan using increasing frame
-timestamps. Retargeting preserves velocity; closed gates brake briefly before exact holds.
-Containment/source-aspect corrections override motion limits, containing the current box when
-possible and reporting `source_aspect_limited` otherwise. Misses bypass/reset the gates, cancel pan
-and inward zoom velocity, and widen without position extrapolation. See
-[Detection and Framing](measurements-and-planner.md) for thresholds, motion limits, and safety precedence.
+Skipped frames are not detection failures. `FrameMeasurement.detection_sampled` is true on accepted
+samples and actual sampled misses, false on skipped frames (held bounds or `None` after a miss).
+Before any cached crop replay, one immutable planner parser checks the exact key set, types,
+finite numbers, controller/seed/optimizer/scope/policy strings, and all constants against the
+[planner contract](../backend/http-api.md). Missing, extra, or incompatible settings fail
+terminally with `internal` and a user-safe planner-configuration message.
+
+`framing` preserves `deterministic-v3` seed width/height exactly, including causal zoom hysteresis,
+timestamp-based zoom limits, and miss widening. `lookahead-v1` replaces centers with full-shot,
+sparse per-axis optimization. Only accepted fresh sampled boxes impose containment constraints;
+held targets may leave the crop. Future observed boxes allow early camera movement but never
+interpolate/extrapolate an athlete position. Source/aspect bounds remain hard, impossible sampled
+containment is explicit, and unavoidable speed then acceleration excess is minimized and reported.
+Every solver optimum and reconstructed crop/kinematic path is validated; there is no post-plan
+snap or causal fallback. `PlannerError` becomes terminal analyzing `internal`,
+`"Video framing could not be planned."`, retaining only sanitized internal solver diagnostics.
+Do not commit `analysis-report.json`, `crop-path.jsonl`, or debug analysis trace on this failure.
+See [Detection and Framing](measurements-and-planner.md#full-shot-look-ahead-pan).
 `rendering` reads display-normalized BGR frames,
 applies every planned crop once with OpenCV, resizes each crop to the fixed 1080p output surface, and
 streams the fixed-size frames to FFmpeg for H.264/AAC encoding and muxing. Source, crop, written, and
@@ -73,7 +87,7 @@ after the same strict media and exact decoded-frame-count validation, and only w
 matches the persisted crop-path digest, output aspect ratio, and `fixed-output-v1` renderer version.
 `uploading` heads and lease-finalizes the deterministic output object before completion.
 
-The `w0.2.4` pipeline and immutable planner controller/threshold/motion-limit/sampling-rate hash create distinct jobs for the
+The `w0.2.5` pipeline and entire immutable planner map hash create distinct jobs for the
 same input and settings under the new controller. Old jobs must drain on old workers before the
 [version cutover](../../dev/development.md#start-modules), because claim-time compatibility checks
 cover model version, not pipeline version. Never carry old job scratch or crop paths into a new job.
@@ -109,13 +123,21 @@ The current producer includes:
   adjacent crop-height ratio minus one. Steps include safety overrides, not just smooth motion.
   Planner traces additionally supply `action_counts`, `containment_override_frames`, and
   `source_aspect_limited_frames`; these are absent for planners without traces.
+  Look-ahead framing also includes `planner_controller`, `optimizer`, `lookahead_scope`,
+  `containment_policy`, `sampled_detection_constraint_frames`,
+  `sampled_detection_uncontained_frames` (only source/aspect-impossible boxes are valid),
+  `held_target_outside_crop_frames`, `max_pan_axis_speed_source_fraction_per_second`,
+  `max_pan_axis_acceleration_source_fraction_per_second2`, `pan_speed_limit_exceeded_frames`,
+  `pan_acceleration_limit_exceeded_frames`, `pan_speed_limit_excess_source_fraction_per_second`,
+  and `pan_acceleration_limit_excess_source_fraction_per_second2`. Kinematic metrics are recomputed
+  from the validated path, including start/end rest transitions for acceleration limits.
 
 Analysis summaries are computed without debug capture and atomically cached in job-local
 `analysis-report.json` before committing the crop path. Analysis, rendering, and upload handlers
 return the cached summary through the existing terminal-report merge, including resumed jobs.
 Legacy crop caches without a summary omit these metrics rather than inventing zero counts.
 Failures before analysis finishes do not supply a partial detection summary. Completed jobs are not
-backfilled, and these metrics do not change detection, planning, rendering, or the pipeline version.
+backfilled; the look-ahead report additions accompany the immutable `w0.2.5` cutover.
 
 ```mermaid
 flowchart LR
@@ -138,3 +160,8 @@ manifest; available phase MP4s are only `detection.mp4`, `framing.mp4`, and `ren
 as roles `debug_detection`, `debug_framing`, and `debug_render`. `finalize_review` atomically replaces
 these roles and removes stale current-review roles. Debug failures clean up newly uploaded objects
 where possible and never alter the required output result.
+
+Look-ahead review summaries retain bounded sampled/held containment and motion-limit counts.
+Warning intervals distinguish unavoidable motion-limit excess from held-target-outside-crop:
+the latter is sampling-policy evidence, not a fresh detector containment failure. Debug headers use
+the validated immutable planner map, never a hardcoded seed controller.

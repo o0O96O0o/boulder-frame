@@ -20,17 +20,17 @@ an H.264/AAC MP4.
 ## Framing Contract
 
 The W0.2 worker is detector-only. It runs the pinned ONNX SSD-MobilenetV1-12 person detector on the
-selected frame and associates the tap with a containing or nearest person box. Every analyzed frame
-uses its current person detection. The selected box seeds separate forward and backward association
+selected frame and associates the tap with a containing or nearest person box. Each sampled frame
+uses its actual person detection. The selected box seeds separate forward and backward association
 passes, so no frame is associated before the user selection is resolved. A later candidate must remain
 within 1.5 times the last accepted detector-box diagonal of that actual box; rejected candidates
 and detector misses widen framing without changing that reference. No former target position is extrapolated.
 
 Detection runs at a configurable sampled rate (default 10 fps; `0` means every frame), always
-including the exact selected frame. The camera advances at full frame rate toward the last sampled
-box. Skipped inference is not a miss; an actual sampled miss clears that target and widens until
-reacquisition. No future boxes or predicted athlete positions fill gaps. Brief loss of containment
-between samples is accepted; decoding and output frame rate are unchanged.
+including the exact selected frame. Planning/rendering remain full-rate. Skipped inference holds
+the latest chronological sampled box as guidance, not a hard containment constraint; an actual
+sampled miss clears it and widens causal zoom until reacquisition. Held targets may leave the crop.
+Future observed boxes constrain camera planning, never fill gaps with predicted athlete positions.
 
 | Profile | Detected athlete height / crop height |
 | --- | --- |
@@ -39,30 +39,30 @@ between samples is accepted; decoding and output frame rate are unchanged.
 | `safe` | `.40` |
 | `full_movement` | `.33` |
 
-The `deterministic-v3` planner derives a profile-target aspect-ratio crop on the detection center,
-clamps it to the source, then applies independent scale and center hysteresis against the previous
-final crop. Scale enters adjustment beyond 5% relative target-height error and closes its gate at
-2%; center enters beyond 1% of either crop dimension and closes within 0.4% on both axes.
-Strictly increasing measurement timestamps drive speed/acceleration-limited log-height zoom and
-source-normalized pan, with braking near targets and preserved velocity when a detection retargets
-motion. Closing a gate allows a short braking/settling interval, not an instant stop. Idle crops at
-rest hold exactly. The first detected frame without a previous crop uses the desired crop directly.
-Profile fractions remain centerlines, while small detector jitter leaves settled crops unchanged
-when no safety constraint intervenes.
+The default `lookahead-v1` planner optimizes pan over the full normalized shot. It composes the
+`deterministic-v3` causal seed, preserving every crop width/height exactly: profile sizing,
+5%/2% scale hysteresis, timestamp-based log-height zoom (speed `0.5`, acceleration `1.0`), miss
+widening, and source/aspect-limited dimensions are unchanged. Seed center hysteresis (1%/0.4%)
+remains only as an objective reference, not final pan gates. Zoom is not optimized in `w0.2.5`.
 
-Decision order is desired crop/source clamp, independent scale/center gates, timestamp-based motion
-or settling, candidate clamp, then containment. Containment may immediately expand or shift a crop
-and overrides deadbands and motion limits. Corrections reset velocity only for affected components.
-If source bounds or the requested aspect cannot contain a detection, the planner centers the largest
-valid crop as far as bounds permit and records `source_aspect_limited` rather than claiming
-containment. These safety results remain separate from gate diagnostics.
+Only accepted sampled detector boxes, including the selected frame, impose hard containment
+constraints. Source bounds are always hard; source/aspect-impossible boxes are recorded as
+uncontained rather than claimed safe. The optimizer may start panning before a large later
+sampled displacement or reacquisition. This is full-shot camera optimization, not athlete
+trajectory interpolation or extrapolation inside detector gaps.
 
-A missed detection bypasses/resets both gates, cancels pan and inward zoom velocity, and widens the
-previous crop with timestamp-based zoom limits toward the full valid source-aspect height. Outward
-zoom velocity is retained; center changes only for necessary clamping, never position extrapolation.
-A first-frame miss uses the full crop. Reacquisition compares against the widened previous crop,
-not the previous detection. The planner remains behind an interface for future replacement without
-changing API or storage contracts. Formulas, limits, and diagnostics are specified in
+SciPy `1.15.3` `linprog(method="highs-ds")` solves sparse source-normalized axes independently,
+with fixed ordering. Timestamp-based per-axis speed `0.25` and acceleration `0.5` limits include
+rest before/after the shot. Four lexicographic passes minimize speed excess, acceleration excess,
+duration-weighted L1 distance from seed centers, then total absolute velocity change.
+Containment remains authoritative if motion limits conflict; report minimum required excess,
+never snap after optimization. Earlier optima are fixed within tolerance `1e-8`.
+
+Every optimum is checked for finite values, legal centers, crop geometry, feasible sampled
+containment, and recomputed kinematics. Non-optimal or invalid output fails analyzing terminally
+with `internal`, `"Video framing could not be planned."`, without causal fallback or committing
+analysis reports, crop paths, or debug analysis traces. The `CropPlanner` interface, rendering,
+storage, and public API remain unchanged. Formulas, limits, and diagnostics are specified in
 [Detection and Framing](../specs/worker/measurements-and-planner.md).
 
 ## Architecture
@@ -79,8 +79,10 @@ flowchart LR
   K -->|download source| S
   K --> V[FFprobe and optional VFR to CFR]
   V --> D[ONNX person detection]
-  D --> F[Detector-box crop planning]
-  F --> R[Display-normalized crop resize and fixed-frame FFmpeg encode]
+  D --> F[Causal zoom seed and full-shot sampled-constrained pan]
+  F --> C[Validate optimizer crop geometry and motion]
+  C -->|valid| R[Display-normalized crop resize and fixed-frame FFmpeg encode]
+  C -->|invalid| E[Terminal internal without analysis artifacts]
   R -->|output plus optional review artifacts| S
   K -->|state progress artifacts| P
   W -->|poll job and request download/review| A
@@ -101,11 +103,15 @@ from the active verified worker fails terminally with `model_unavailable` before
 Existing W0.1 jobs are incompatible with W0.2 and fail this check; users must create a new W0.2 job,
 not retry the old job.
 
-The default pipeline is `w0.2.4`. Immutable `planner` configuration contains
-`controller = deterministic-v3`, `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
+The default pipeline is `w0.2.5`. Immutable `planner` configuration contains
+`controller = lookahead-v1`, `seed_controller = deterministic-v3`, `optimizer = scipy-highs-ds`,
+`lookahead_scope = full_shot`, `containment_policy = sampled_detections`,
+`solver_feasibility_tolerance = 1e-8`, `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
 `center_enter_fraction = 0.01`, `center_exit_fraction = 0.004`, `zoom_max_speed = 0.5`,
 `zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, and `pan_max_acceleration = 0.5`,
 plus deployment-configurable `detection_sample_fps` (default `10`, `0` disables sampling).
+The worker validates the exact key set, types, finite numbers, policies, and constants before
+cached crop replay; mismatches are terminal `internal` with user-safe configuration details.
 These settings are not public job inputs. Pipeline version and planner configuration participate in the job hash,
 so an identical submission cannot reuse an older controller's job or cached crop path. Deploy API
 and worker together using the [drained cutover procedure](../dev/development.md#start-modules);
@@ -134,8 +140,9 @@ short-lived URLs only for terminal authorized jobs.
 ## Quality Gates
 
 - API/job-state, lease, artifact, and evaluation-projection tests.
-- Detector association, profile fractions, independent hysteresis, exact holds, accumulated changes,
-  containment precedence, and missed-detection widening/reacquisition tests.
+- Causal seed dimensions, scale hysteresis, miss widening/reacquisition, early look-ahead movement,
+  sampled-only containment, held-target exclusion, timestamp limits/minimal excess, deterministic
+  solves, and safe solver failure tests.
 - Output media validation for dimensions, codec, timing, decodability, and audio retention.
 - Browser workflow and phase-review contract tests.
 - Formatting, type checks, documentation links, and `git diff --check` before release.

@@ -85,11 +85,11 @@ MODEL_VERSION=w0.2-ssd-mobilenetv1-12-onnx-detector-only-1
 worker to exit before it can process jobs. Existing W0.1 jobs cannot be retried against W0.2: create
 new jobs after the backend is configured with the W0.2 version.
 
-Set one shared immutable processing-behavior version for the backend and worker. The configurable
-sampled-detection release, retaining the `deterministic-v3` smooth camera controller, uses:
+Set one shared immutable processing-behavior version for backend and worker. The pan-only full-shot
+`lookahead-v1` release, retaining `deterministic-v3` causal zoom and miss widening, uses:
 
 ```dotenv
-PIPELINE_VERSION=w0.2.4
+PIPELINE_VERSION=w0.2.5
 DETECTION_SAMPLE_FPS=10
 ```
 
@@ -98,7 +98,13 @@ environments. `DETECTION_SAMPLE_FPS` is a backend deployment option: finite nume
 through `1000`, default `10` when unset or empty; `0` detects every frame. Fractional rates are allowed.
 It is snapshotted as `planner.detection_sample_fps`, not read from the worker environment. Changing
 the rate affects new submissions only, changes the job hash, and cannot alter existing retries.
-The version, fixed controller, thresholds, and motion limits also enter the hash.
+The version and entire planner map (controller, seed, optimizer, scope, policy, tolerance, thresholds,
+motion limits, and sampling rate) enter the hash. No new environment controls are needed.
+
+Only accepted sampled detections constrain look-ahead containment. Held targets may leave the crop;
+future observed boxes guide camera movement without athlete-position interpolation or prediction.
+SciPy `1.15.3` supplies sparse deterministic `highs-ds` optimization. A non-optimal/invalid solver
+result fails analyzing safely with `internal` and no causal fallback or committed analysis artifacts.
 
 For a non-default host artifact directory, set `MODEL_DIR_HOST` both when preparing the artifact and
 in `.env`; Compose mounts it read-only at the in-container `MODEL_DIR` path.
@@ -127,11 +133,11 @@ deployment target is x86_64; Docker/Podman must have x86_64 emulation available.
 
 For an existing environment, deploy as a drained cutover: pause submissions, let the **old workers**
 finish every queued and leased old-version job, confirm the Redis consumer-group pending count is
-zero, and stop old workers. Set `PIPELINE_VERSION=w0.2.4` in the deployment `.env`, start backend
+zero, and stop old workers. Set `PIPELINE_VERSION=w0.2.5` in the deployment `.env`, start backend
 and worker together with the new code and shared version, verify both startup summaries, and only
-then resume submissions. The worker enforces model-version compatibility but not pipeline-version
-compatibility: replacing workers before the drain or overlapping versions could run new code under
-an old immutable configuration.
+then resume submissions. There is no generic claim-time pipeline-version compatibility check.
+The worker validates the exact immutable planner contract before cached replay and rejects old
+or malformed maps; this safety check does not replace the drained deployment protocol.
 
 Submit a new job for the new behavior. Never rewrite old job configuration, republish an old UUID,
 or copy an old job's scratch/crop paths into a new job. New version/configuration hashes create

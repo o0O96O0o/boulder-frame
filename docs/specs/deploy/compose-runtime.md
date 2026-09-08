@@ -60,7 +60,7 @@ behavior and changes the backend job-configuration hash. Because the worker curr
 version but not pipeline version when claiming work, do not use a rolling deployment across pipeline
 versions.
 
-For the configurable sampled-detection release, set `PIPELINE_VERSION=w0.2.4` explicitly in the
+For the pan-only full-shot look-ahead release, set `PIPELINE_VERSION=w0.2.5` explicitly in the
 deployment's private `.env`; the example file does not migrate it. Stop new submissions, let the old
 workers finish all queued and leased jobs, and confirm the Redis consumer group has no pending
 deliveries. Stop old workers, deploy backend and worker together with the new shared value, verify
@@ -69,9 +69,16 @@ both startup summaries, then reopen submissions. Never replace workers before th
 `DETECTION_SAMPLE_FPS` configures the backend's new-job sampling snapshot. It defaults to `10`;
 `0` runs inference on every frame. Finite fractional values from `0` through `1000` are accepted.
 The worker consumes `planner.detection_sample_fps` from the job, so changing deployment configuration
-never changes a retry. Old snapshots without this field are rejected; drain old jobs before upgrading.
+never changes a retry. The worker validates the exact `lookahead-v1` map, including seed controller,
+optimizer, scope, policy, tolerance, and unchanged hysteresis/motion constants before cached replay.
+Old or malformed snapshots fail safely with terminal `internal`; drain old jobs before upgrading.
 
-Pipeline version plus immutable planner controller, thresholds, motion limits, and detection sample rate produce a new job hash.
+`lookahead-v1` uses future accepted sampled boxes as camera constraints, not interpolated athlete
+positions. Held targets may leave the crop; zoom and miss widening remain causal. Sparse optimizer
+failure is terminal analyzing `internal`, with no fallback or committed analysis artifacts.
+No new environment controls are introduced.
+
+Pipeline version plus the entire immutable planner map produce a new job hash.
 Never rewrite a terminal job's configuration, republish its task UUID, or copy old scratch/crop paths
 into a new job; submit the same source and settings again to create a new versioned job instead.
 

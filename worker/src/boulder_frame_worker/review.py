@@ -553,6 +553,16 @@ def phase_annotations(record: Mapping[str, object], phase: str, index: int) -> t
             f"containment_override={decision.get('containment_override', False)} "
             f"source_aspect_limited={decision.get('source_aspect_limited', False)}"
         )
+        if "sampled_detection_constraint" in decision:
+            lines.append(
+                f"sampled_constraint={decision.get('sampled_detection_constraint')} "
+                f"sampled_contained={decision.get('sampled_detection_contained')} "
+                f"held_target_contained={decision.get('held_target_contained')}"
+            )
+            lines.append(
+                f"pan_speed_excess={decision.get('pan_speed_limit_exceeded')} "
+                f"pan_acceleration_excess={decision.get('pan_acceleration_limit_exceeded')}"
+            )
     else:
         render = _mapping(record.get("render"))
         lines.append(

@@ -2,13 +2,20 @@ from itertools import pairwise
 from math import log
 from struct import pack
 
+import numpy as np
 import pytest
+from scipy.optimize import OptimizeResult
 
+import boulder_frame_worker.planner as planner_module
 from boulder_frame_worker.measurement import Rect
 from boulder_frame_worker.planner import (
     PROFILE_TARGET_HEIGHT_FRACTIONS,
+    CropPlan,
     DeterministicCropPlanner,
     FrameMeasurement,
+    LookaheadCropPlanner,
+    LookaheadPlannerFrameTrace,
+    PlannerError,
 )
 from boulder_frame_worker.protocol import AspectRatio, FramingProfile
 
@@ -428,3 +435,294 @@ def test_source_limits_override_profile_scale_for_every_source_aspect(
         assert crop.contains(box) is not limited
         assert trace.source_aspect_limited is limited
         assert not trace.containment_override
+
+
+def lookahead() -> LookaheadCropPlanner:
+    return LookaheadCropPlanner(3840, 2160, AspectRatio.LANDSCAPE, FramingProfile.BALANCED)
+
+
+def lookahead_reacquisition(timestamps: list[int]) -> list[FrameMeasurement]:
+    first = centered_box(400, 1200, 700)
+    last = centered_box(400, 2800, 1500)
+    return [
+        FrameMeasurement(
+            last if index == len(timestamps) - 1 else first,
+            timestamp,
+            detection_sampled=index in (0, len(timestamps) - 1),
+        )
+        for index, timestamp in enumerate(timestamps)
+    ]
+
+
+def axis_motion(
+    result: CropPlan, sequence: list[FrameMeasurement], *, horizontal: bool
+) -> tuple[list[float], list[float]]:
+    centers = [crop.center.x / 3840 if horizontal else crop.center.y / 2160 for crop in result]
+    intervals = [
+        (right.timestamp_ms - left.timestamp_ms) / 1000 for left, right in pairwise(sequence)
+    ]
+    velocities = [
+        (right - left) / dt for (left, right), dt in zip(pairwise(centers), intervals, strict=True)
+    ]
+    accelerations = [2 * velocities[0] / intervals[0], -2 * velocities[-1] / intervals[-1]]
+    accelerations.extend(
+        2 * (velocities[index] - velocities[index - 1]) / (intervals[index] + intervals[index - 1])
+        for index in range(1, len(intervals))
+    )
+    return velocities, accelerations
+
+
+def test_lookahead_moves_before_reacquisition_and_can_leave_stale_held_box() -> None:
+    sequence = lookahead_reacquisition(list(range(0, 4001, 100)))
+    result = lookahead().plan(sequence)
+    seed = planner().plan(sequence)
+    assert any(
+        crop.center.x > causal.center.x + 1
+        for crop, causal in zip(result.crops[1:-1], seed.crops[1:-1], strict=True)
+    )
+    assert result[0].contains(sequence[0].detector_bounds)
+    assert result[-1].contains(sequence[-1].detector_bounds)
+    assert any(not crop.contains(sequence[0].detector_bounds) for crop in result[1:-1])
+    for index, (crop, trace) in enumerate(zip(result, result.trace, strict=True)):
+        assert isinstance(trace, LookaheadPlannerFrameTrace)
+        assert trace.sampled_detection_constraint is (index in (0, len(result) - 1))
+        if trace.sampled_detection_constraint:
+            assert trace.sampled_detection_contained is True
+            assert trace.held_target_contained is None
+        else:
+            assert trace.sampled_detection_contained is None
+            assert trace.held_target_contained is crop.contains(sequence[index].detector_bounds)
+        assert not trace.containment_override
+        assert not trace.pan_speed_limit_exceeded
+        assert not trace.pan_acceleration_limit_exceeded
+    assert any(trace.lookahead_center_adjusted for trace in result.trace[:-1])
+    assert any(trace.action == "lookahead_pan" for trace in result.trace[1:-1])
+    for horizontal in (True, False):
+        velocities, accelerations = axis_motion(result, sequence, horizontal=horizontal)
+        assert max(abs(value) for value in velocities) <= 0.25 + 1.1e-8
+        assert max(abs(value) for value in accelerations) <= 0.5 + 1.1e-8
+
+
+def test_lookahead_irregular_timestamps_obey_both_axis_limits_and_rest_boundaries() -> None:
+    timestamps = [0]
+    for interval in [40, 160, 75, 225] * 8:
+        timestamps.append(timestamps[-1] + interval)
+    sequence = lookahead_reacquisition(timestamps)
+    controller = lookahead()
+    result = controller.plan(sequence)
+    assert result[0].contains(sequence[0].detector_bounds)
+    assert result[-1].contains(sequence[-1].detector_bounds)
+    for horizontal in (True, False):
+        velocities, accelerations = axis_motion(result, sequence, horizontal=horizontal)
+        assert max(abs(value) for value in velocities) <= 0.25 + 1.1e-8
+        assert max(abs(value) for value in accelerations) <= 0.5 + 1.1e-8
+        for index, trace in enumerate(result.trace):
+            velocity = (
+                trace.pan_velocity_x_source_per_second
+                if horizontal
+                else trace.pan_velocity_y_source_per_second
+            )
+            acceleration = (
+                trace.pan_acceleration_x_source_per_second2
+                if horizontal
+                else trace.pan_acceleration_y_source_per_second2
+            )
+            if index:
+                assert velocity == pytest.approx(velocities[index - 1], abs=1e-12)
+            else:
+                assert velocity is None
+            if index >= 2:
+                expected = (
+                    2
+                    * (velocities[index - 1] - velocities[index - 2])
+                    / ((timestamps[index] - timestamps[index - 2]) / 1000)
+                )
+                assert acceleration == pytest.approx(expected, abs=1e-12)
+            else:
+                assert acceleration is None
+
+
+def test_lookahead_repeated_solves_and_timestamp_translation_are_deterministic() -> None:
+    sequence = lookahead_reacquisition(list(range(0, 4001, 100)))
+    controller = lookahead()
+    result = controller.plan(sequence)
+    assert controller.plan(sequence) == result
+    shifted = [
+        FrameMeasurement(
+            item.detector_bounds,
+            item.timestamp_ms + 123456,
+            item.confidence,
+            item.detection_sampled,
+        )
+        for item in sequence
+    ]
+    assert controller.plan(shifted) == result
+
+
+def test_lookahead_preserves_causal_dimensions_through_zoom_misses_and_reacquisition() -> None:
+    sequence = [
+        FrameMeasurement(centered_box(400), 0),
+        FrameMeasurement(centered_box(400), 100, detection_sampled=False),
+        FrameMeasurement(centered_box(650, 2200), 350),
+        FrameMeasurement(centered_box(650, 2200), 500, detection_sampled=False),
+        FrameMeasurement(None, 700),
+        FrameMeasurement(None, 1100, detection_sampled=False),
+        FrameMeasurement(centered_box(300, 1700), 1500),
+        FrameMeasurement(centered_box(300, 1700), 1700, detection_sampled=False),
+    ]
+    seed = planner().plan(sequence)
+    result = lookahead().plan(sequence)
+    assert [(crop.width, crop.height) for crop in result] == [
+        (crop.width, crop.height) for crop in seed
+    ]
+    assert result[5].height > result[3].height
+    for index in (4, 5):
+        trace = result.trace[index]
+        assert trace.detection_missed
+        assert not trace.sampled_detection_constraint
+        assert trace.sampled_detection_contained is None
+        assert trace.held_target_contained is None
+        assert trace.action == "widen_on_miss"
+    for crop, item in zip(result, sequence, strict=True):
+        if item.detection_sampled and item.detector_bounds is not None:
+            assert crop.contains(item.detector_bounds)
+
+
+@pytest.mark.parametrize(
+    ("displacement", "speed_excess", "acceleration_excess"),
+    [(600, 5.75, 119.5), (20, 0.0, 3.5)],
+)
+def test_lookahead_infeasible_motion_keeps_containment_with_minimum_excess(
+    displacement: int, speed_excess: float, acceleration_excess: float
+) -> None:
+    # Width equals the seed crop width, fixing the two X centers exactly. These
+    # analytic lower bounds distinguish unavoidable speed and rest-acceleration excess.
+    boxes = [Rect(0, 400, 400, 100), Rect(displacement, 400, 400, 100)]
+    sequence = measurements(boxes, 100)
+    controller = LookaheadCropPlanner(1000, 1000, AspectRatio.LANDSCAPE, FramingProfile.BALANCED)
+    result = controller.plan(sequence)
+    assert all(crop.contains(box) for crop, box in zip(result, boxes, strict=True))
+    velocity = (result[1].center.x - result[0].center.x) / 1000 / 0.1
+    assert max(0, abs(velocity) - 0.25) == pytest.approx(speed_excess, abs=1e-8)
+    assert max(0, 2 * abs(velocity) / 0.1 - 0.5) == pytest.approx(acceleration_excess, abs=1e-8)
+    assert result.trace[1].pan_speed_limit_exceeded is (speed_excess > 0)
+    assert all(trace.pan_acceleration_limit_exceeded for trace in result.trace)
+    assert all(trace.sampled_detection_contained for trace in result.trace)
+    assert all(trace.pan_acceleration_x_source_per_second2 is None for trace in result.trace)
+    assert all(not trace.containment_override for trace in result.trace)
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "aspect"),
+    [(3840, 2160, AspectRatio.PORTRAIT), (1080, 1920, AspectRatio.LANDSCAPE)],
+)
+def test_lookahead_reports_source_aspect_impossible_sample_without_claiming_containment(
+    width: int, height: int, aspect: AspectRatio
+) -> None:
+    box = Rect(0, 0, width, height)
+    controller = LookaheadCropPlanner(width, height, aspect, FramingProfile.BALANCED)
+    result = controller.plan(measurements([box, box], 100))
+    for crop, trace in zip(result, result.trace, strict=True):
+        assert 0 <= crop.x < crop.right <= width
+        assert 0 <= crop.y < crop.bottom <= height
+        assert crop.width / crop.height == pytest.approx(aspect.value_float)
+        assert not crop.contains(box)
+        assert trace.source_aspect_limited
+        assert trace.sampled_detection_constraint
+        assert trace.sampled_detection_contained is False
+        assert trace.action == "source_aspect_limited"
+        assert not trace.containment_override
+
+
+def test_lookahead_empty_and_single_frame_do_not_require_optimizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise AssertionError("No optimization is needed without frame intervals")
+
+    monkeypatch.setattr(planner_module, "linprog", unavailable)
+    assert lookahead().plan([]) == CropPlan((), ())
+    sequence = [FrameMeasurement(centered_box(400, 1900.123456789, 1070.987654321), 50)]
+    result = lookahead().plan(sequence)
+    assert result.crops == planner().plan(sequence).crops
+    assert result[0].contains(sequence[0].detector_bounds)
+    assert result.trace[0].action == "initial"
+    assert result.trace[0].pan_velocity_x_source_per_second is None
+    assert result.trace[0].pan_acceleration_y_source_per_second2 is None
+
+
+@pytest.mark.parametrize("timestamps", [[-1, 0], [0, 0], [100, 99], [0, 1.5], [0, True]])
+def test_lookahead_rejects_invalid_timestamps(timestamps: list[int]) -> None:
+    with pytest.raises(ValueError, match="timestamp"):
+        lookahead().plan(
+            [FrameMeasurement(centered_box(400), timestamp) for timestamp in timestamps]
+        )
+
+
+@pytest.mark.parametrize("failed_pass", range(4))
+def test_lookahead_rejects_nonoptimal_solver_pass_without_causal_fallback(
+    monkeypatch: pytest.MonkeyPatch, failed_pass: int
+) -> None:
+    real_linprog = planner_module.linprog
+    calls = 0
+
+    def fail_pass(*args: object, **kwargs: object) -> OptimizeResult:
+        nonlocal calls
+        current = calls
+        calls += 1
+        if current == failed_pass:
+            return OptimizeResult(success=False, status=4, message="numerical failure")
+        return real_linprog(*args, **kwargs)
+
+    monkeypatch.setattr(planner_module, "linprog", fail_pass)
+    with pytest.raises(PlannerError):
+        lookahead().plan(measurements([centered_box(400), centered_box(400)], 100))
+
+
+@pytest.mark.parametrize("corruption", ["nan_center", "nan_objective", "illegal_center", "motion"])
+def test_lookahead_rejects_invalid_successful_solver_output(
+    monkeypatch: pytest.MonkeyPatch, corruption: str
+) -> None:
+    real_linprog = planner_module.linprog
+
+    def corrupt(*args: object, **kwargs: object) -> OptimizeResult:
+        result = real_linprog(*args, **kwargs)
+        if corruption == "nan_center":
+            result.x[0] = np.nan
+        elif corruption == "nan_objective":
+            result.fun = np.nan
+        elif corruption == "illegal_center":
+            result.x[0] = 2
+        else:
+            # Still inside the box/source interval, but no longer motion-feasible
+            # under the reported optimized excess.
+            result.x[1] = result.x[0] + 0.1
+            result.x[2] = 0
+            result.x[3] = 0
+        return result
+
+    monkeypatch.setattr(planner_module, "linprog", corrupt)
+    with pytest.raises(PlannerError):
+        lookahead().plan(measurements([centered_box(400), centered_box(400)], 100))
+
+
+def test_lookahead_canonicalizes_sub_tolerance_bound_error_and_revalidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_linprog = planner_module.linprog
+
+    def rounded_bound(*args: object, **kwargs: object) -> OptimizeResult:
+        result = real_linprog(*args, **kwargs)
+        # X is fixed by a box exactly as wide as the crop. Identical perturbations
+        # introduce no motion and must be canonicalized before returning the crop.
+        bounds = kwargs["bounds"]
+        if bounds[0][0] == bounds[0][1]:
+            result.x[:2] -= 1e-10
+        return result
+
+    monkeypatch.setattr(planner_module, "linprog", rounded_bound)
+    box = Rect(0, 400, 400, 100)
+    controller = LookaheadCropPlanner(1000, 1000, AspectRatio.LANDSCAPE, FramingProfile.BALANCED)
+    result = controller.plan(measurements([box, box], 100))
+    assert all(crop.x == 0 and crop.contains(box) for crop in result)
+    assert all(not trace.pan_speed_limit_exceeded for trace in result.trace)

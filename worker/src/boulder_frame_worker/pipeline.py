@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
-from math import isfinite
+from math import isclose, isfinite
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -52,6 +52,9 @@ from .planner import (
     CropRect,
     DeterministicCropPlanner,
     FrameMeasurement,
+    LookaheadCropPlanner,
+    LookaheadPlannerFrameTrace,
+    PlannerError,
     PlannerFrameTrace,
 )
 from .protocol import AspectRatio, FramingProfile, OutputSettings, TargetSelection
@@ -112,7 +115,7 @@ class ProcessingPipeline:
         normalizer: CFRNormalizer | None = None,
         frame_reader: FrameReader | None = None,
         detector: PersonDetector | None = None,
-        planner_factory: PlannerFactory = DeterministicCropPlanner,
+        planner_factory: PlannerFactory = LookaheadCropPlanner,
         debug_capture: bool = False,
         debug_max_frames: int = 10_000,
         debug_max_bytes: int = 50 * 1024 * 1024,
@@ -256,18 +259,13 @@ class ProcessingPipeline:
                     "variable_frame_rate": False,
                 }
             )
-        planner_config = dict(configuration.planner)
-        planner_config.update(
-            planner_version="deterministic-v3",
-            scale_enter_fraction=DeterministicCropPlanner.scale_enter_fraction,
-            scale_exit_fraction=DeterministicCropPlanner.scale_exit_fraction,
-            center_enter_fraction=DeterministicCropPlanner.center_enter_fraction,
-            center_exit_fraction=DeterministicCropPlanner.center_exit_fraction,
-            zoom_max_speed=DeterministicCropPlanner.zoom_max_speed,
-            zoom_max_acceleration=DeterministicCropPlanner.zoom_max_acceleration,
-            pan_max_speed=DeterministicCropPlanner.pan_max_speed,
-            pan_max_acceleration=DeterministicCropPlanner.pan_max_acceleration,
-        )
+        try:
+            _planner_configuration(configuration)
+        except WorkerError:
+            planner_config: dict[str, object] = {"planner_version": "unavailable"}
+        else:
+            planner_config = dict(configuration.planner)
+            planner_config["planner_version"] = planner_config["controller"]
         if inputs is not None:
             planner_config.setdefault("profile", inputs.output_settings.profile.value)
             planner_config.setdefault("aspect_ratio", inputs.output_settings.aspect_ratio.value)
@@ -450,7 +448,7 @@ class ProcessingPipeline:
     def _inputs(self, record: JobRecord, scratch: Path) -> _Inputs:
         source_asset = self._source(record)
         configuration = self._configuration(record)
-        detection_sample_fps = _detection_sample_fps(configuration)
+        detection_sample_fps = _planner_configuration(configuration)
         if source_asset.upload_state != "uploaded":
             raise terminal(ErrorCode.INVALID_MEDIA, "The source video upload is not available.")
         if configuration.source_asset_id != source_asset.id:
@@ -563,9 +561,17 @@ class ProcessingPipeline:
         self._associate_from_selected(observations, detections, selected_index, 1, inputs.metadata)
         self._associate_from_selected(observations, detections, selected_index, -1, inputs.metadata)
         planner_measurements = _planner_measurements(observations)
-        plan = self.planner_factory(
-            width, height, inputs.output_settings.aspect_ratio, inputs.output_settings.profile
-        ).plan(planner_measurements)
+        try:
+            plan = self.planner_factory(
+                width, height, inputs.output_settings.aspect_ratio, inputs.output_settings.profile
+            ).plan(planner_measurements)
+        except PlannerError as error:
+            self.logger.error("crop_planning_failed", extra={"planner_error": str(error)})
+            raise terminal(
+                ErrorCode.INTERNAL,
+                "Video framing could not be planned.",
+                diagnostic=str(error),
+            ) from error
         report_path = inputs.source.parent / _ANALYSIS_REPORT
         temporary_report = report_path.with_suffix(".tmp")
         temporary_report.write_text(
@@ -992,16 +998,46 @@ def _output_settings(configuration: JobConfiguration) -> OutputSettings:
         ) from error
 
 
-def _detection_sample_fps(configuration: JobConfiguration) -> int | float:
-    value = configuration.planner.get("detection_sample_fps")
+def _planner_configuration(configuration: JobConfiguration) -> int | float:
+    settings = configuration.planner
+    expected: dict[str, str | float] = {
+        "controller": "lookahead-v1",
+        "seed_controller": "deterministic-v3",
+        "optimizer": "scipy-highs-ds",
+        "lookahead_scope": "full_shot",
+        "containment_policy": "sampled_detections",
+        "solver_feasibility_tolerance": LookaheadCropPlanner.solver_feasibility_tolerance,
+        "scale_enter_fraction": DeterministicCropPlanner.scale_enter_fraction,
+        "scale_exit_fraction": DeterministicCropPlanner.scale_exit_fraction,
+        "center_enter_fraction": DeterministicCropPlanner.center_enter_fraction,
+        "center_exit_fraction": DeterministicCropPlanner.center_exit_fraction,
+        "zoom_max_speed": DeterministicCropPlanner.zoom_max_speed,
+        "zoom_max_acceleration": DeterministicCropPlanner.zoom_max_acceleration,
+        "pan_max_speed": LookaheadCropPlanner.pan_max_speed,
+        "pan_max_acceleration": LookaheadCropPlanner.pan_max_acceleration,
+    }
+    invalid = set(settings) != {*expected, "detection_sample_fps"}
+    for key, required in expected.items():
+        value = settings.get(key)
+        if isinstance(required, str):
+            invalid |= not isinstance(value, str) or value != required
+        else:
+            invalid |= (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value != required
+                or not isfinite(value)
+            )
+    sample_fps = settings.get("detection_sample_fps")
     if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not 0 <= value <= 1000
-        or not isfinite(value)
+        invalid
+        or isinstance(sample_fps, bool)
+        or not isinstance(sample_fps, (int, float))
+        or not 0 <= sample_fps <= 1000
+        or not isfinite(sample_fps)
     ):
-        raise terminal(ErrorCode.INTERNAL, "The job detection sampling configuration is invalid.")
-    return value
+        raise terminal(ErrorCode.INTERNAL, "The job planner configuration is invalid.")
+    return sample_fps
 
 
 def _planner_measurements(observations: Sequence[RawFrameObservation]) -> list[FrameMeasurement]:
@@ -1016,6 +1052,9 @@ def _planner_measurements(observations: Sequence[RawFrameObservation]) -> list[F
                 None if held is None else held.bounds,
                 observation.timestamp_ms,
                 0 if held is None else held.confidence,
+                detection_sampled=(
+                    observation.selection_outcome is not SelectionOutcome.DETECTION_SKIPPED
+                ),
             )
         )
     return measurements
@@ -1137,6 +1176,11 @@ def _analysis_report(
     max_pan_step = max_zoom_step = 0.0
     max_pan_timestamp: int | None = None
     previous: CropRect | None = None
+    previous_timestamp = 0
+    previous_velocity = (0.0, 0.0)
+    previous_dt = 0.0
+    max_speed = max_acceleration = 0.0
+    source_width, source_height = metadata.display_dimensions
     for observation, crop in zip(observations, plan, strict=True):
         if previous is not None:
             pan_step = (
@@ -1146,8 +1190,49 @@ def _analysis_report(
                 max_pan_step = pan_step
                 max_pan_timestamp = observation.timestamp_ms
             max_zoom_step = max(max_zoom_step, abs(crop.height / previous.height - 1))
+            dt = (observation.timestamp_ms - previous_timestamp) / 1000
+            velocity = (
+                (crop.center.x - previous.center.x) / source_width / dt,
+                (crop.center.y - previous.center.y) / source_height / dt,
+            )
+            max_speed = max(max_speed, abs(velocity[0]), abs(velocity[1]))
+            max_acceleration = max(
+                max_acceleration,
+                2 * abs(velocity[0] - previous_velocity[0]) / (dt + previous_dt),
+                2 * abs(velocity[1] - previous_velocity[1]) / (dt + previous_dt),
+            )
+            previous_velocity, previous_dt = velocity, dt
         previous = crop
+        previous_timestamp = observation.timestamp_ms
+    if previous_dt:
+        max_acceleration = max(
+            max_acceleration,
+            2 * abs(previous_velocity[0]) / previous_dt,
+            2 * abs(previous_velocity[1]) / previous_dt,
+        )
+    speed_excess = max(0.0, max_speed - LookaheadCropPlanner.pan_max_speed)
+    acceleration_excess = max(0.0, max_acceleration - LookaheadCropPlanner.pan_max_acceleration)
+    tolerance = LookaheadCropPlanner.solver_feasibility_tolerance
+    if speed_excess <= tolerance or isclose(speed_excess, tolerance, rel_tol=0, abs_tol=1e-12):
+        speed_excess = 0.0
+    if acceleration_excess <= tolerance or isclose(
+        acceleration_excess, tolerance, rel_tol=0, abs_tol=1e-12
+    ):
+        acceleration_excess = 0.0
     framing: dict[str, object] = {
+        "planner_controller": "lookahead-v1",
+        "optimizer": "scipy-highs-ds",
+        "lookahead_scope": "full_shot",
+        "containment_policy": "sampled_detections",
+        "sampled_detection_constraint_frames": 0,
+        "sampled_detection_uncontained_frames": 0,
+        "held_target_outside_crop_frames": 0,
+        "max_pan_axis_speed_source_fraction_per_second": max_speed,
+        "max_pan_axis_acceleration_source_fraction_per_second2": max_acceleration,
+        "pan_speed_limit_exceeded_frames": 0,
+        "pan_acceleration_limit_exceeded_frames": 0,
+        "pan_speed_limit_excess_source_fraction_per_second": speed_excess,
+        "pan_acceleration_limit_excess_source_fraction_per_second2": acceleration_excess,
         "unavailable_target_frames": unavailable,
         "detection_gap_count": gap_count,
         "longest_detection_gap_ms": longest_gap_ms,
@@ -1157,9 +1242,21 @@ def _analysis_report(
     }
     if isinstance(plan, CropPlan):
         actions: dict[str, int] = {}
+        constrained = uncontained = held_outside = speed_exceeded = acceleration_exceeded = 0
         for trace in plan.trace:
             actions[trace.action] = actions.get(trace.action, 0) + 1
+            if isinstance(trace, LookaheadPlannerFrameTrace):
+                constrained += trace.sampled_detection_constraint
+                uncontained += trace.sampled_detection_contained is False
+                held_outside += trace.held_target_contained is False
+                speed_exceeded += trace.pan_speed_limit_exceeded
+                acceleration_exceeded += trace.pan_acceleration_limit_exceeded
         framing.update(
+            sampled_detection_constraint_frames=constrained,
+            sampled_detection_uncontained_frames=uncontained,
+            held_target_outside_crop_frames=held_outside,
+            pan_speed_limit_exceeded_frames=speed_exceeded,
+            pan_acceleration_limit_exceeded_frames=acceleration_exceeded,
             action_counts=actions,
             containment_override_frames=sum(trace.containment_override for trace in plan.trace),
             source_aspect_limited_frames=sum(trace.source_aspect_limited for trace in plan.trace),
@@ -1207,7 +1304,9 @@ def _load_crop_path(path: Path, metadata: MediaMetadata) -> list[CropRect]:
     return crops
 
 
-def _planner_decision(trace: PlannerFrameTrace | None) -> dict[str, object]:
+def _planner_decision(
+    trace: PlannerFrameTrace | LookaheadPlannerFrameTrace | None,
+) -> dict[str, object]:
     return {} if trace is None else {"decision": serialize_planner_trace(trace)}
 
 
@@ -1284,7 +1383,32 @@ def _review_summary(trace: Sequence[Mapping[str, object]], phase: str) -> dict[s
             )
             for record in trace
         )
+        counts = {
+            "sampled_detection_constraint_frames": 0,
+            "sampled_detection_uncontained_frames": 0,
+            "held_target_outside_crop_frames": 0,
+            "pan_speed_limit_exceeded_frames": 0,
+            "pan_acceleration_limit_exceeded_frames": 0,
+        }
+        for record in trace:
+            decision = _mapping(_mapping(record.get("framing")).get("decision"))
+            counts["sampled_detection_constraint_frames"] += (
+                decision.get("sampled_detection_constraint") is True
+            )
+            counts["sampled_detection_uncontained_frames"] += (
+                decision.get("sampled_detection_contained") is False
+            )
+            counts["held_target_outside_crop_frames"] += (
+                decision.get("held_target_contained") is False
+            )
+            counts["pan_speed_limit_exceeded_frames"] += (
+                decision.get("pan_speed_limit_exceeded") is True
+            )
+            counts["pan_acceleration_limit_exceeded_frames"] += (
+                decision.get("pan_acceleration_limit_exceeded") is True
+            )
         return {
+            **counts,
             "frames": len(trace),
             "containment_override_frames": risks,
             "unavailable_detection_frames": misses,
@@ -1300,52 +1424,61 @@ def _review_summary(trace: Sequence[Mapping[str, object]], phase: str) -> dict[s
 def _review_warning_intervals(
     trace: Sequence[Mapping[str, object]], phase: str
 ) -> list[dict[str, object]]:
-    def warning(record: Mapping[str, object]) -> tuple[str, str] | None:
+    def warnings(record: Mapping[str, object]) -> dict[str, str]:
         detection = _mapping(record.get("detection"))
-        if (
-            phase == "detection"
-            and detection.get("selection_outcome") != SelectionOutcome.DETECTION_SKIPPED.value
-            and _mapping(detection.get("detection")).get("bounds") is None
-        ):
-            return "Detection unavailable", "No detector bounds were recorded."
-        if phase == "framing" and bool(
-            _mapping(_mapping(record.get("framing")).get("decision")).get("detection_missed")
-        ):
-            return "Held detection unavailable", "Crop widened until a successful detection sample."
-        if phase == "framing" and bool(
-            _mapping(_mapping(record.get("framing")).get("decision")).get("source_aspect_limited")
-        ):
-            return (
-                "Source/aspect limited",
-                "The largest valid crop cannot contain this detector box.",
+        if phase == "detection":
+            if (
+                detection.get("selection_outcome") != SelectionOutcome.DETECTION_SKIPPED.value
+                and _mapping(detection.get("detection")).get("bounds") is None
+            ):
+                return {"Detection unavailable": "No detector bounds were recorded."}
+            return {}
+        if phase != "framing":
+            return {}
+        decision = _mapping(_mapping(record.get("framing")).get("decision"))
+        current: dict[str, str] = {}
+        if decision.get("detection_missed"):
+            current["Held detection unavailable"] = (
+                "Crop widened until a successful detection sample."
             )
-        return None
+        if decision.get("source_aspect_limited"):
+            current["Source/aspect limited"] = (
+                "The largest valid crop cannot contain this detector box."
+            )
+        if decision.get("pan_speed_limit_exceeded"):
+            current["Pan speed limit exceeded"] = (
+                "Sampled detection containment requires motion above the pan speed limit."
+            )
+        if decision.get("pan_acceleration_limit_exceeded"):
+            current["Pan acceleration limit exceeded"] = (
+                "Sampled detection containment requires motion above the pan acceleration limit."
+            )
+        if decision.get("held_target_contained") is False:
+            current["Held target outside crop"] = (
+                "A stale held target is guidance, not a fresh sampled containment constraint."
+            )
+        return current
 
     intervals: list[dict[str, object]] = []
-    active: tuple[int, str, str] | None = None
+    active: dict[str, tuple[int, str]] = {}
+    end = 0
     for record in trace:
-        current = warning(record)
         timestamp = record.get("timestamp_ms")
         if not isinstance(timestamp, int):
             continue
-        if current is None:
-            if active is not None:
-                start, label, detail = active
+        end = timestamp
+        current = warnings(record)
+        for label in tuple(active):
+            if label not in current:
+                start, detail = active.pop(label)
                 intervals.append(
                     {"start_ms": start, "end_ms": timestamp, "label": label, "detail": detail}
                 )
-                active = None
-        elif active is None or active[1:] != current:
-            if active is not None:
-                start, label, detail = active
-                intervals.append(
-                    {"start_ms": start, "end_ms": timestamp, "label": label, "detail": detail}
-                )
-            active = (timestamp, *current)
-    if active is not None:
-        start, label, detail = active
-        end = trace[-1].get("timestamp_ms", start) if trace else start
+        for label, detail in current.items():
+            active.setdefault(label, (timestamp, detail))
+    for label, (start, detail) in active.items():
         intervals.append({"start_ms": start, "end_ms": end, "label": label, "detail": detail})
+    intervals.sort(key=lambda interval: (int(str(interval["start_ms"])), str(interval["label"])))
     return intervals[:100]
 
 
