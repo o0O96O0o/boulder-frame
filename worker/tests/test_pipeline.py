@@ -81,7 +81,7 @@ class Renderer:
 
 
 PLANNER_SETTINGS = {
-    "controller": "lookahead-v1",
+    "controller": "lookahead-v2",
     "seed_controller": "deterministic-v3",
     "optimizer": "scipy-highs-ds",
     "lookahead_scope": "full_shot",
@@ -96,6 +96,7 @@ PLANNER_SETTINGS = {
     "zoom_max_acceleration": 1.0,
     "pan_max_speed": 0.25,
     "pan_max_acceleration": 0.5,
+    "pan_dead_zone_fraction": 0.05,
 }
 
 
@@ -108,7 +109,7 @@ def record(frame_time_ms: int = 0, *, detection_sample_fps: int | float = 0) -> 
             source_id,
             {"frame_time_ms": frame_time_ms, "normalized_x": 0.5, "normalized_y": 0.5},
             {"aspect_ratio": "16:9", "profile": "balanced"},
-            "w0.2.5",
+            "w0.2.7",
             "model",
             {**PLANNER_SETTINGS, "detection_sample_fps": detection_sample_fps},
         ),
@@ -404,7 +405,7 @@ def test_default_lookahead_moves_early_and_reports_stale_held_targets(tmp_path) 
         assert crop["x"] + crop["width"] >= box.x + box.width - 1e-5
         assert crop["y"] <= box.y + 1e-5
         assert crop["y"] + crop["height"] >= box.y + box.height - 1e-5
-    assert framing["planner_controller"] == "lookahead-v1"
+    assert framing["planner_controller"] == "lookahead-v2"
     assert framing["optimizer"] == "scipy-highs-ds"
     assert framing["lookahead_scope"] == "full_shot"
     assert framing["containment_policy"] == "sampled_detections"
@@ -423,7 +424,7 @@ def test_default_lookahead_moves_early_and_reports_stale_held_targets(tmp_path) 
         uuid4(),
         rows,
         {},
-        "w0.2.5",
+        "w0.2.7",
         "model",
         pipeline._inputs(job, tmp_path).metadata,
     )
@@ -534,11 +535,20 @@ def test_review_keeps_overlapping_sampling_and_motion_warnings() -> None:
             if not isinstance(value, str) and key != "detection_sample_fps"
         ],
         {**PLANNER_SETTINGS, "controller": "deterministic-v3"},
+        {**PLANNER_SETTINGS, "controller": "lookahead-v1"},
+        {
+            **{
+                key: value
+                for key, value in PLANNER_SETTINGS.items()
+                if key != "pan_dead_zone_fraction"
+            },
+            "controller": "lookahead-v1",
+        },
         {**PLANNER_SETTINGS, "detection_sample_fps": -1},
         {**PLANNER_SETTINGS, "detection_sample_fps": 1001},
     ],
 )
-def test_invalid_snapshot_sampling_is_rejected_before_cached_crop_replay(tmp_path, planner) -> None:
+def test_invalid_planner_snapshot_is_rejected_before_cached_crop_replay(tmp_path, planner) -> None:
     pipeline, job, calls = sampling_pipeline(Fraction(30), 6)
     pipeline.analyzing(job, tmp_path)
     cached = (tmp_path / "crop-path.jsonl").read_bytes()

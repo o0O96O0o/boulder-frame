@@ -14,10 +14,10 @@ The product boundary and algorithm contract remain authoritative in [../architec
 
 ## Component Specifications
 
-- [Backend](backend/README.md): Go process, API resources, immutable planner version/threshold hashing, PostgreSQL persistence, S3 URLs, and Redis Streams task distribution.
-- [Worker](worker/README.md): Python runtime, job state machine, media validation, independent crop hysteresis, [detection and framing report metrics](worker/runtime-and-pipeline.md#processing-report), and debug telemetry/evaluation contract.
+- [Backend](backend/README.md): Go process, API resources, exact immutable `lookahead-v2` planner-map hashing, PostgreSQL persistence, S3 URLs, and Redis Streams task distribution.
+- [Worker](worker/README.md): Python runtime, job state machine, media validation, full-shot six-pass pan with seed deadzone and causal zoom, [detection and framing report metrics](worker/runtime-and-pipeline.md#processing-report), and debug telemetry/evaluation contract.
 - [Frontend](frontend/README.md): Browser workflow, direct upload, target selection, polling, and download.
-- [Compose](deploy/README.md): module container startup and external dependency configuration.
+- [Compose](deploy/README.md): module container startup, external dependency configuration, and drained `w0.2.7` cutover/cache isolation.
 
 ## Cross-Service Flow
 

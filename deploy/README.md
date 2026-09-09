@@ -20,7 +20,7 @@ CPU-only FP32, batch 1, fixed 640x640, explicit `end2end=True` and `nms=False`.
 To install an already exported approved artifact without the export toolchain, use
 `./deploy/bin/local prepare-model /path/to/yolo26n.onnx`; it performs the same integrity checks.
 Platform-dependent export differences fail closed: copy the approved artifact, never loosen its pin.
-Set `MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1` and `PIPELINE_VERSION=w0.2.6` in `.env`
+Set `MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1` and `PIPELINE_VERSION=w0.2.7` in `.env`
 before starting the backend and worker. For a different artifact location, set
 `MODEL_DIR_HOST=/srv/boulder-frame-models` when provisioning and in `.env`; Compose mounts it
 read-only at `MODEL_DIR`.
@@ -33,7 +33,7 @@ and meet applicable corresponding-source and network-use obligations; see the
 For existing environments, pause submissions and drain all queued/leased old jobs on old workers,
 confirm no Redis consumer-group pending deliveries, then stop them and deploy backend and worker
 together with the new shared versions. Never rewrite/retry old jobs, republish old UUIDs, or reuse
-their scratch/crop paths for the new detector; submit new versioned jobs after the cutover.
+their scratch/crop paths for the new planner objective; submit new versioned jobs after the cutover.
 
 Useful commands:
 

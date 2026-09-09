@@ -9,7 +9,7 @@
 
 ## Development
 
-- [Development](dev/development.md): shared environment configuration, Docker Compose startup, external dependencies, detection sampling, and drained `w0.2.6` YOLO26n cutover with old-job/cache isolation.
+- [Development](dev/development.md): shared environment configuration, Docker Compose startup, external dependencies, detection sampling, and drained `w0.2.7` look-ahead objective cutover with old-job/cache isolation.
 
 ## References
 

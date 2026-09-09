@@ -21,7 +21,7 @@ is `OnnxYolo26Detector`; its local artifact, tensor contract, checksum, and AGPL
 
 ## Configurable Detection Sampling
 
-Pipeline `w0.2.6` snapshots `planner.detection_sample_fps` from the backend deployment setting
+Pipeline `w0.2.7` snapshots `planner.detection_sample_fps` from the backend deployment setting
 `DETECTION_SAMPLE_FPS` (default `10`). Values are finite numbers from `0` through `1000`;
 `0` disables sampling. A rate at or above the source frame rate also detects every frame.
 The worker requires this immutable setting; it never reads a live sampling environment variable.
@@ -133,10 +133,10 @@ crop and performs no additional subject-state or future-motion inference.
 
 ### Full-Shot Look-Ahead Pan
 
-The immutable controller is `lookahead-v1`, seed controller `deterministic-v3`, optimizer
+The immutable controller is `lookahead-v2`, seed controller `deterministic-v3`, optimizer
 `scipy-highs-ds` (pinned `scipy==1.15.3`, `linprog(method="highs-ds")`), scope `full_shot`,
-containment policy `sampled_detections`, and feasibility tolerance `1e-8`. These fields plus the
-eight constants above and `detection_sample_fps` form the exact planner key set; see the
+containment policy `sampled_detections`, and feasibility tolerance `1e-8`. These fields plus
+`pan_dead_zone_fraction=0.05`, the eight constants above, and `detection_sample_fps` form the exact planner key set; see the
 [complete JSON contract](../backend/http-api.md). The worker rejects missing/extra keys, wrong types,
 non-finite values, and mismatched constants before cached crop replay with terminal `internal`.
 
@@ -158,13 +158,28 @@ abs(v_i-v_(i-1)) <= (0.5 + a) * (dt_i+dt_(i-1)) / 2
 abs(v_last) <= (0.5 + a) * dt_last / 2
 ```
 
-Start/end constraints model rest immediately before/after the shot. Four lexicographic LP passes
-minimize (1) speed excess, (2) acceleration excess while fixing speed to its optimum plus tolerance,
-(3) duration-weighted L1 seed-center deviation with trapezoidal timestamp weights while fixing both
-excess optima plus tolerance, then (4) total absolute velocity change, including rest transitions,
-while fixing seed deviation to its optimum plus tolerance. Explicit L1 auxiliaries and deterministic
-`highs-ds` ordering avoid random tie-breaking. Release pass-local matrices/results before the next
-axis. Empty input returns the empty seed plan; one frame returns its legal seed crop without SciPy.
+Start/end constraints model rest immediately before/after the shot. The deadzone is centered on each
+seed center, with per-axis radius `r_i = 0.05 * seed_extent_i / source_extent`: 5% of that seed crop's
+width on x and height on y, not 5% of source dimensions or a full band width. It is a soft objective
+over the entire shot, never selective windows or a relaxation of sampled containment.
+
+Six lexicographic LP passes minimize:
+
+1. Global speed excess `s`.
+2. Global acceleration excess `a`.
+3. Trapezoidal duration-weighted L1 distance outside the seed deadzone:
+   `sum_i w_i * max(abs(c_i-seed_center_i)-r_i, 0)`.
+4. Total absolute center travel: `sum_i abs(c_i-c_(i-1))`.
+5. Total absolute velocity change, including start/end rest transitions.
+6. Duration-weighted exact seed deviation: `sum_i w_i * abs(c_i-seed_center_i)`, only as the
+   final composition tie-break.
+
+The timestamp weights are half the adjacent interval at each endpoint and half the sum of adjacent
+intervals at each interior frame. Every pass locks all earlier optima plus tolerance `1e-8`; the
+deadzone does not force exact seed chasing ahead of travel or velocity stability. Explicit L1
+auxiliaries and deterministic `highs-ds` ordering avoid random tie-breaking. Release pass-local
+matrices/results before the next axis. Empty input returns the empty seed plan; one frame returns its
+legal seed crop without SciPy.
 
 Require every solve to return a finite optimal result. Canonicalize centers outside an interval by
 at most tolerance onto its boundary; never repair a materially invalid solution with a snap.
@@ -199,7 +214,7 @@ See [telemetry](debug-telemetry-and-evaluation.md#telemetry-contract) and
 [processing reports](runtime-and-pipeline.md#processing-report).
 
 All settings except the deployment sampling rate are immutable algorithm constants, not frontend
-controls. Pipeline `w0.2.6` and the entire planner map participate in the job hash.
+controls. Pipeline `w0.2.7` and the entire planner map participate in the job hash.
 Deploy through a [drained cutover](../../dev/development.md#start-modules), not old-job retries.
 
 ```mermaid
@@ -207,9 +222,9 @@ flowchart LR
   S[Selected-frame tap] --> A[Sampled detector association]
   D[Time-grid detections plus selected frame] --> A
   A --> H[Full-rate measurements with fresh or held provenance]
-  H --> C[Causal seed dimensions and center reference]
+  H --> C[Causal seed dimensions center and 5 percent radius]
   H --> B[Hard bounds from accepted sampled boxes only]
-  C --> L[Full-shot sparse per-axis lexicographic LP]
+  C --> L[Full-shot sparse six-pass LP]
   B --> L
   L --> V[Validate optimum geometry and motion]
   V -->|valid| R[Final centers with unchanged seed dimensions]

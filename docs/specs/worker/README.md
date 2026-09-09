@@ -15,9 +15,9 @@ job state and object storage owns video assets.
 
 The worker consumes Redis Streams tasks under a PostgreSQL lease, downloads and validates the source,
 normalizes supported VFR input only in job scratch, detects the selected athlete, derives a
-`lookahead-v1` crop path with full-shot per-axis pan optimization and unchanged `deterministic-v3`
+`lookahead-v2` crop path with full-shot per-axis seed-deadzone/travel optimization and unchanged `deterministic-v3`
 causal seed dimensions, renders and validates 1080p H.264/AAC output, and finalizes under the lease.
-The default pipeline is `w0.2.6`, with YOLO26n CPU ONNX detection sampled at 10 fps by default and full-rate planning/rendering.
+The default pipeline is `w0.2.7`, with YOLO26n CPU ONNX detection sampled at 10 fps by default and full-rate planning/rendering.
 Only fresh accepted samples constrain containment. Held targets may leave the crop; future observed
 boxes guide the camera without athlete trajectory interpolation. Invalid optimizer output fails
 analyzing safely with `internal`, no causal fallback, and no committed analysis artifacts.

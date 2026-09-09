@@ -92,11 +92,13 @@ Retain the bundled [AGPL-3.0 license](../../worker/models/LICENSE) with redistri
 satisfy applicable corresponding-source and network-use obligations; the license file alone is not
 compliance. See [detector provisioning and license details](../specs/worker/models.md).
 
-Set one shared immutable processing-behavior version for backend and worker. The YOLO26n release
-retains the existing selection, sampling, pan-only `lookahead-v1` planner, causal zoom and miss widening:
+Set one shared immutable processing-behavior version for backend and worker. The `lookahead-v2`
+release changes the full-shot pan objective, retaining YOLO26n, selection, sampling, causal zoom,
+miss widening, and sampled containment. Its immutable `pan_dead_zone_fraction=0.05` supplies a
+5%-of-seed-width/height radius around each seed center; it is not an environment knob.
 
 ```dotenv
-PIPELINE_VERSION=w0.2.6
+PIPELINE_VERSION=w0.2.7
 DETECTION_SAMPLE_FPS=10
 ```
 
@@ -106,7 +108,7 @@ through `1000`, default `10` when unset or empty; `0` detects every frame. Fract
 It is snapshotted as `planner.detection_sample_fps`, not read from the worker environment. Changing
 the rate affects new submissions only, changes the job hash, and cannot alter existing retries.
 The version and entire planner map (controller, seed, optimizer, scope, policy, tolerance, thresholds,
-motion limits, and sampling rate) enter the hash. No new environment controls are needed.
+motion limits, deadzone fraction, and sampling rate) enter the hash. No new environment controls are needed.
 
 Only accepted sampled detections constrain look-ahead containment. Held targets may leave the crop;
 future observed boxes guide camera movement without athlete-position interpolation or prediction.
@@ -144,7 +146,7 @@ deployment target is x86_64; Docker/Podman must have x86_64 emulation available.
 
 For an existing environment, deploy as a drained cutover: pause submissions, let the **old workers**
 finish every queued and leased old-version job, confirm the Redis consumer-group pending count is
-zero, and stop old workers. Provision the verified artifact, then set `PIPELINE_VERSION=w0.2.6`
+zero, and stop old workers. Verify the pinned artifact, then set `PIPELINE_VERSION=w0.2.7`
 and `MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1` in the deployment `.env`. Start backend
 and worker together with the new code and shared versions, verify both startup summaries, and only
 then resume submissions. There is no generic claim-time pipeline-version compatibility check.

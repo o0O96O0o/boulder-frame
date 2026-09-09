@@ -23,8 +23,9 @@ flowchart LR
 ## Selected Detector
 
 **Ultralytics YOLO26n** supplies COCO person detections for the selected frame and every sampled
-frame. Pipeline `w0.2.6` changes only the detector; selection/association, detection sampling, crop
-planning, and rendering remain unchanged.
+frame. The historical `w0.2.6` release changed only the detector, leaving selection/association,
+detection sampling, crop planning, and rendering unchanged. Current pipeline `w0.2.7` retains this
+detector and changes only the full-shot pan objective to `lookahead-v2`.
 
 | Field | Value |
 | --- | --- |
@@ -102,7 +103,7 @@ terms, including applicable corresponding-source disclosure and network-use obli
 does not ensure compliance. Do not describe these weights or Ultralytics as MIT/Apache-licensed.
 Use the manifest's upstream license reference when reviewing distribution obligations.
 
-Backend and worker must use pipeline `w0.2.6` and the same pinned model version. Follow the
+Backend and worker must use pipeline `w0.2.7` and the same pinned model version. Follow the
 [drained cutover](../../dev/development.md#start-modules): finish old jobs on old workers, then
-start both services together. Never rewrite or retry old jobs to migrate them to YOLO26n, republish
+start both services together. Never rewrite or retry old jobs to migrate processing behavior, republish
 old task UUIDs, or reuse their scratch/crop paths; submit new versioned jobs instead.

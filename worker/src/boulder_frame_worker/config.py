@@ -86,7 +86,7 @@ class WorkerConfig:
 
     @classmethod
     def from_env(cls) -> WorkerConfig:
-        pipeline_version = os.environ.get("PIPELINE_VERSION", "w0.2.6").strip()
+        pipeline_version = os.environ.get("PIPELINE_VERSION", "w0.2.7").strip()
         model_version = os.environ.get("MODEL_VERSION", UNCONFIGURED_MODEL_VERSION).strip()
         if model_version == LOCAL_ENV_UNCONFIGURED_MODEL_VERSION:
             model_version = UNCONFIGURED_MODEL_VERSION

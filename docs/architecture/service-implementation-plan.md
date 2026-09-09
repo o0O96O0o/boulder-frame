@@ -25,10 +25,10 @@ flowchart LR
 ## Cross-Service Contract
 
 - Job configuration is immutable and includes source asset, target selection, output settings,
-  pipeline version, model version, and planner configuration. The current default is `w0.2.6` with
-  `lookahead-v1`, `deterministic-v3` seed, `scipy-highs-ds`, full-shot scope, sampled-detection
-  containment policy, tolerance `1e-8`, unchanged hysteresis/motion constants, and configurable
-  `detection_sample_fps`. Every key participates in the job hash.
+  pipeline version, model version, and planner configuration. The current default is `w0.2.7` with
+  `lookahead-v2`, `deterministic-v3` seed, `scipy-highs-ds`, full-shot scope, sampled-detection
+  containment policy, tolerance `1e-8`, immutable `pan_dead_zone_fraction=0.05`, unchanged
+  hysteresis/motion constants, and configurable `detection_sample_fps`. Every key participates in the job hash.
 - Profiles are `tight`, `balanced`, `safe`, `full_movement`, with target detected-athlete height
   fractions `.60`, `.50`, `.40`, `.33`. Zoom, scale hysteresis, miss widening, and source/aspect
   sizing remain causal; final dimensions exactly match the deterministic seed.
@@ -36,6 +36,10 @@ flowchart LR
   feasible and may move before a later displacement. Held targets are guidance only and may leave
   the crop. Future observations constrain the camera, never interpolate/predict athlete positions.
   Source bounds stay hard; unavoidable speed then acceleration excess is minimized and reported.
+  Six lexicographic objectives minimize speed excess, acceleration excess, trapezoidal duration-weighted
+  L1 distance outside the seed deadzone, total absolute center travel, total absolute velocity change
+  including rest, then duration-weighted exact seed deviation. Lock every previous optimum plus tolerance.
+  Deadzone radius is 5% of each seed crop's width/height around its center, source-normalized for the LP.
 - Validate the exact immutable planner contract before cached replay and validate every optimum,
   geometry, and kinematic result. Solver failure is terminal analyzing `internal` with
   `"Video framing could not be planned."`, no causal fallback, and no committed analysis artifacts.

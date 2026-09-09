@@ -1,5 +1,5 @@
 from itertools import pairwise
-from math import log
+from math import log, pi, sin
 from struct import pack
 
 import numpy as np
@@ -437,8 +437,8 @@ def test_source_limits_override_profile_scale_for_every_source_aspect(
         assert not trace.containment_override
 
 
-def lookahead() -> LookaheadCropPlanner:
-    return LookaheadCropPlanner(3840, 2160, AspectRatio.LANDSCAPE, FramingProfile.BALANCED)
+def lookahead(aspect: AspectRatio = AspectRatio.LANDSCAPE) -> LookaheadCropPlanner:
+    return LookaheadCropPlanner(3840, 2160, aspect, FramingProfile.BALANCED)
 
 
 def lookahead_reacquisition(timestamps: list[int]) -> list[FrameMeasurement]:
@@ -472,10 +472,13 @@ def axis_motion(
     return velocities, accelerations
 
 
-def test_lookahead_moves_before_reacquisition_and_can_leave_stale_held_box() -> None:
+@pytest.mark.parametrize("aspect", [AspectRatio.LANDSCAPE, AspectRatio.PORTRAIT])
+def test_lookahead_moves_before_reacquisition_and_can_leave_stale_held_box(
+    aspect: AspectRatio,
+) -> None:
     sequence = lookahead_reacquisition(list(range(0, 4001, 100)))
-    result = lookahead().plan(sequence)
-    seed = planner().plan(sequence)
+    result = lookahead(aspect).plan(sequence)
+    seed = DeterministicCropPlanner(3840, 2160, aspect, FramingProfile.BALANCED).plan(sequence)
     assert any(
         crop.center.x > causal.center.x + 1
         for crop, causal in zip(result.crops[1:-1], seed.crops[1:-1], strict=True)
@@ -501,6 +504,49 @@ def test_lookahead_moves_before_reacquisition_and_can_leave_stale_held_box() -> 
         velocities, accelerations = axis_motion(result, sequence, horizontal=horizontal)
         assert max(abs(value) for value in velocities) <= 0.25 + 1.1e-8
         assert max(abs(value) for value in accelerations) <= 0.5 + 1.1e-8
+
+
+@pytest.mark.parametrize("horizontal", [True, False])
+def test_portrait_small_oscillations_hold_camera_without_losing_athlete(
+    horizontal: bool,
+) -> None:
+    sequence = [
+        FrameMeasurement(
+            centered_box(
+                400,
+                1920 + (18 * sin(2 * pi * index / 20) if horizontal else 0),
+                1080 + (32 * sin(2 * pi * index / 20) if not horizontal else 0),
+            ),
+            index * 100,
+        )
+        for index in range(61)
+    ]
+    result = lookahead(AspectRatio.PORTRAIT).plan(sequence)
+    centers = [crop.center.x if horizontal else crop.center.y for crop in result]
+    # A stationary composition can contain every sample. Subpixel solver tolerance
+    # is acceptable; following the repeated body/box wobble is not.
+    assert max(centers) - min(centers) < 0.01
+    assert all(
+        crop.contains(item.detector_bounds) for crop, item in zip(result, sequence, strict=True)
+    )
+
+
+def test_dead_zone_scales_with_crop_width_and_does_not_freeze_sustained_motion() -> None:
+    sequence = [
+        FrameMeasurement(centered_box(400, 1920 if index < 20 else 1980), index * 100)
+        for index in range(61)
+    ]
+    portrait = lookahead(AspectRatio.PORTRAIT).plan(sequence)
+    landscape = lookahead().plan(sequence)
+    portrait_centers = [crop.center.x for crop in portrait]
+    landscape_centers = [crop.center.x for crop in landscape]
+    # The 60px displacement fits inside overlapping landscape composition bands,
+    # but not the narrower portrait bands. Neither aspect needs pan for containment.
+    assert max(landscape_centers) - min(landscape_centers) < 0.01
+    assert 14.9 < portrait_centers[-1] - portrait_centers[0] < 60.1
+    assert all(
+        crop.contains(item.detector_bounds) for crop, item in zip(portrait, sequence, strict=True)
+    )
 
 
 def test_lookahead_irregular_timestamps_obey_both_axis_limits_and_rest_boundaries() -> None:
@@ -659,7 +705,7 @@ def test_lookahead_rejects_invalid_timestamps(timestamps: list[int]) -> None:
         )
 
 
-@pytest.mark.parametrize("failed_pass", range(4))
+@pytest.mark.parametrize("failed_pass", range(6))
 def test_lookahead_rejects_nonoptimal_solver_pass_without_causal_fallback(
     monkeypatch: pytest.MonkeyPatch, failed_pass: int
 ) -> None:

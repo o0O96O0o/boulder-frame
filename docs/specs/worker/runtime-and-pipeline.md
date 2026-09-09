@@ -68,8 +68,8 @@ finite numbers, controller/seed/optimizer/scope/policy strings, and all constant
 terminally with `internal` and a user-safe planner-configuration message.
 
 `framing` preserves `deterministic-v3` seed width/height exactly, including causal zoom hysteresis,
-timestamp-based zoom limits, and miss widening. `lookahead-v1` replaces centers with full-shot,
-sparse per-axis optimization. Only accepted fresh sampled boxes impose containment constraints;
+timestamp-based zoom limits, and miss widening. `lookahead-v2` replaces centers with full-shot,
+sparse per-axis seed-deadzone/travel optimization. Only accepted fresh sampled boxes impose containment constraints;
 held targets may leave the crop. Future observed boxes allow early camera movement but never
 interpolate/extrapolate an athlete position. Source/aspect bounds remain hard, impossible sampled
 containment is explicit, and unavoidable speed then acceleration excess is minimized and reported.
@@ -87,8 +87,8 @@ after the same strict media and exact decoded-frame-count validation, and only w
 matches the persisted crop-path digest, output aspect ratio, and `fixed-output-v1` renderer version.
 `uploading` heads and lease-finalizes the deterministic output object before completion.
 
-The `w0.2.6` pipeline, YOLO26n model version, and entire immutable planner map hash create distinct jobs for the
-same input and settings under the new detector. Old jobs must drain on old workers before the
+The `w0.2.7` pipeline, YOLO26n model version, and entire immutable planner map hash create distinct jobs for the
+same input and settings under the new objective. Old jobs must drain on old workers before the
 [version cutover](../../dev/development.md#start-modules), because claim-time compatibility checks
 cover model version, not pipeline version. Never carry old job scratch or crop paths into a new job.
 
@@ -137,7 +137,7 @@ Analysis summaries are computed without debug capture and atomically cached in j
 return the cached summary through the existing terminal-report merge, including resumed jobs.
 Legacy crop caches without a summary omit these metrics rather than inventing zero counts.
 Failures before analysis finishes do not supply a partial detection summary. Completed jobs are not
-backfilled; the look-ahead report additions accompany the immutable `w0.2.5` cutover.
+backfilled; the look-ahead report additions originated in the historical `w0.2.5` cutover.
 
 ```mermaid
 flowchart LR

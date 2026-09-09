@@ -42,13 +42,16 @@ Detection summaries report `sampled_frames`, `skipped_frames`, `detected_frames`
 `missed_frames`. Framing summaries use `unavailable_detection_frames` for all frames with no held
 camera target, including skipped frames following a sampled miss.
 
-For pipeline `w0.2.6`, headers are built from the unchanged validated immutable planner map:
-`controller = lookahead-v1`, `seed_controller = deterministic-v3`, `optimizer = scipy-highs-ds`,
+For pipeline `w0.2.7`, headers are built from the validated immutable planner map:
+`controller = lookahead-v2`, `seed_controller = deterministic-v3`, `optimizer = scipy-highs-ds`,
 `lookahead_scope = full_shot`, `containment_policy = sampled_detections`,
-`solver_feasibility_tolerance = 1e-8`, the eight unchanged hysteresis/motion constants, and
-deployment-snapshotted `detection_sample_fps` (default `10`). See the
+`solver_feasibility_tolerance = 1e-8`, `pan_dead_zone_fraction = 0.05`, the eight unchanged
+hysteresis/motion constants, and deployment-snapshotted `detection_sample_fps` (default `10`). See the
 [exact map](../backend/http-api.md). Zoom limits use log-height per second/per second²; pan limits
 use source dimension per second/per second² independently on each axis.
+The deadzone is a per-axis radius of 5% of each seed crop's width/height around its center,
+source-normalized for the LP. After speed/acceleration excess, objectives prioritize duration-weighted
+deadzone deviation, center travel, velocity change including rest, then exact seed composition.
 
 `LookaheadPlannerFrameTrace` retains common framing fields (`target_height_fraction`,
 `desired_crop`, `detection_missed`, `smoothing_applied`, `containment_override`,
@@ -88,7 +91,7 @@ See [Detection and Framing](measurements-and-planner.md#full-shot-look-ahead-pan
 Invalid/non-optimal solver output fails analyzing terminally with `internal`,
 `"Video framing could not be planned."`; no causal fallback or analysis report/crop-path/debug
 analysis trace is committed. Backend and worker require the
-[drained `w0.2.6` cutover](../../dev/development.md#start-modules), not replay of old configurations.
+[drained `w0.2.7` cutover](../../dev/development.md#start-modules), not replay of old configurations.
 
 The sanitizer removes URLs, object keys, credentials, endpoints, command diagnostics, bytes, pixels,
 and media payloads. Human-reviewed annotations remain separate. Evaluation reports detector

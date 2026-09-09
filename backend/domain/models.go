@@ -353,7 +353,7 @@ func NewJobConfig(source uuid.UUID, selection TargetSelection, output OutputSett
 		SourceAssetID: source, TargetSelection: selection, Output: output,
 		PipelineVersion: pipeline, ModelVersion: model,
 		Planner: map[string]any{
-			"controller":                   "lookahead-v1",
+			"controller":                   "lookahead-v2",
 			"seed_controller":              "deterministic-v3",
 			"optimizer":                    "scipy-highs-ds",
 			"lookahead_scope":              "full_shot",
@@ -368,6 +368,7 @@ func NewJobConfig(source uuid.UUID, selection TargetSelection, output OutputSett
 			"zoom_max_acceleration":        1.0,
 			"pan_max_speed":                0.25,
 			"pan_max_acceleration":         0.5,
+			"pan_dead_zone_fraction":       0.05,
 		},
 	}, nil
 }

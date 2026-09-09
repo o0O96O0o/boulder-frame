@@ -70,14 +70,14 @@ The API rejects negative frame times, coordinates outside `[0, 1]`, unsupported 
 The stored configuration additionally contains:
 
 - `source_asset_id`
-- `pipeline_version = w0.2.6` by default
+- `pipeline_version = w0.2.7` by default
 - `model_version`
 - Immutable planner configuration (sampling rate comes from deployment configuration):
 
 ```json
 {
   "planner": {
-    "controller": "lookahead-v1",
+    "controller": "lookahead-v2",
     "seed_controller": "deterministic-v3",
     "optimizer": "scipy-highs-ds",
     "lookahead_scope": "full_shot",
@@ -91,6 +91,7 @@ The stored configuration additionally contains:
     "zoom_max_acceleration": 1.0,
     "pan_max_speed": 0.25,
     "pan_max_acceleration": 0.5,
+    "pan_dead_zone_fraction": 0.05,
     "detection_sample_fps": 10
   }
 }
@@ -102,6 +103,13 @@ the crop. Future observed boxes guide the camera without athlete trajectory inte
 Sampled containment stays authoritative when motion limits conflict, with minimum required
 speed/acceleration excess reported. These constants are not public controls; see
 [Detection and Framing](../worker/measurements-and-planner.md#full-shot-look-ahead-pan).
+
+After speed and acceleration excess, the full-shot lexicographic objective minimizes trapezoidal
+duration-weighted L1 distance outside the seed deadzone, total absolute center travel, total absolute
+velocity change including rest, then duration-weighted exact seed deviation as the last composition
+tie-break. Every earlier optimum is locked plus tolerance `1e-8`. The deadzone radius is 5% of each
+seed crop's width/height around its center, source-normalized for each LP axis; it is soft, not a
+relaxation of hard sampled containment.
 
 The worker validates this exact key set, types, finite values, strings, and constants before cached
 crop replay. A mismatch fails terminally with `internal` and a user-safe configuration message.
@@ -120,7 +128,7 @@ it changes the configuration hash and creates a distinct job for the same source
 retains the original job configuration and never upgrades that job to a newer pipeline behavior.
 The entire planner map also participates in the hash, preventing a new submission from reusing an
 older planner's cached job/output. Pause submissions and drain old jobs on old workers, stop them,
-then deploy backend and worker together with `w0.2.6` and the pinned YOLO26n model version before submitting new jobs. Claim-time checks
+then deploy backend and worker together with `w0.2.7` and the pinned YOLO26n model version before submitting new jobs. Claim-time checks
 do not enforce generic pipeline-version compatibility. Never retry, rewrite, or republish an old
 job UUID for the new behavior, or reuse its scratch/crop paths.
 

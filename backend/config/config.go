@@ -46,7 +46,7 @@ func Load() (Config, error) {
 		S3Bucket:          os.Getenv("S3_BUCKET"),
 		S3AccessKey:       os.Getenv("S3_ACCESS_KEY"),
 		S3SecretKey:       os.Getenv("S3_SECRET_KEY"),
-		PipelineVersion:   envOrDefault("PIPELINE_VERSION", "w0.2.6"),
+		PipelineVersion:   envOrDefault("PIPELINE_VERSION", "w0.2.7"),
 		ModelVersion:      os.Getenv("MODEL_VERSION"),
 		DevelopmentOwner:  envOrDefault("DEVELOPMENT_OWNER", "deployment"),
 		WebBaseURL:        os.Getenv("WEB_BASE_URL"),

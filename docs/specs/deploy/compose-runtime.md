@@ -60,8 +60,8 @@ immutable processing behavior and changes the backend job-configuration hash. Th
 the model version but not the pipeline version when claiming work. Do not use a rolling deployment
 across versions.
 
-For the YOLO26n detector release, provision the verified `yolo26n.onnx`, then explicitly set
-`PIPELINE_VERSION=w0.2.6` and `MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1` in the deployment's
+For the full-shot `lookahead-v2` objective release, retain the verified `yolo26n.onnx` and explicitly set
+`PIPELINE_VERSION=w0.2.7` and `MODEL_VERSION=w0.2-yolo26n-onnx-detector-only-1` in the deployment's
 private `.env`; the example file does not migrate it. Stop new submissions, let the old workers finish
 all queued and leased jobs, and confirm the Redis consumer group has no pending deliveries. Stop old
 workers, deploy backend and worker together with the new shared values, verify both startup summaries,
@@ -77,11 +77,12 @@ verified local-artifact installation. Never accept an export with a different ha
 `DETECTION_SAMPLE_FPS` configures the backend's new-job sampling snapshot. It defaults to `10`;
 `0` runs inference on every frame. Finite fractional values from `0` through `1000` are accepted.
 The worker consumes `planner.detection_sample_fps` from the job, so changing deployment configuration
-never changes a retry. The worker validates the exact `lookahead-v1` map, including seed controller,
-optimizer, scope, policy, tolerance, and unchanged hysteresis/motion constants before cached replay.
+never changes a retry. The worker validates the exact `lookahead-v2` map, including seed controller,
+optimizer, scope, policy, tolerance, `pan_dead_zone_fraction=0.05`, and unchanged hysteresis/motion
+constants before cached replay.
 Old or malformed snapshots fail safely with terminal `internal`; drain old jobs before upgrading.
 
-`lookahead-v1` uses future accepted sampled boxes as camera constraints, not interpolated athlete
+`lookahead-v2` uses future accepted sampled boxes as camera constraints, not interpolated athlete
 positions. Held targets may leave the crop; zoom and miss widening remain causal. Sparse optimizer
 failure is terminal analyzing `internal`, with no fallback or committed analysis artifacts.
 No new environment controls are introduced.

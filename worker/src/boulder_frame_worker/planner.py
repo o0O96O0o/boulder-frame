@@ -498,6 +498,7 @@ class LookaheadCropPlanner:
 
     pan_max_speed = 0.25
     pan_max_acceleration = 0.5
+    pan_dead_zone_fraction = 0.05
     solver_feasibility_tolerance = 1e-8
 
     def __init__(
@@ -673,8 +674,11 @@ class LookaheadCropPlanner:
             return (origin,)
 
         speed_index, acceleration_index = count, count + 1
-        deviation_start, variation_start = count + 2, 2 * count + 2
-        variable_count = 3 * count + 2
+        deadzone_start = count + 2
+        travel_start = deadzone_start + count
+        variation_start = travel_start + count - 1
+        deviation_start = variation_start + count
+        variable_count = deviation_start + count
         bounds: list[tuple[float, float | None]] = [
             (item.center_lower, item.center_upper) for item in legal
         ] + [(0.0, None)] * (variable_count - count)
@@ -701,6 +705,14 @@ class LookaheadCropPlanner:
                     ),
                     self.pan_max_speed,
                 )
+                add_row(
+                    (
+                        (index - 1, -sign),
+                        (index, sign),
+                        (travel_start + index - 1, -1.0),
+                    ),
+                    0.0,
+                )
         transitions = self._transitions(intervals)
         for index, (coefficients, duration) in enumerate(transitions):
             for sign in (1.0, -1.0):
@@ -716,7 +728,15 @@ class LookaheadCropPlanner:
                     + ((variation_start + index, -1.0),),
                     0.0,
                 )
-        for index, center in enumerate(seed_centers):
+        for index, (center, crop) in enumerate(zip(seed_centers, crops, strict=True)):
+            radius = (
+                self.pan_dead_zone_fraction * (crop.width if horizontal else crop.height) / source
+            )
+            # Exact deviation also defines the distance outside this crop's seed deadzone.
+            add_row(
+                ((deviation_start + index, 1.0), (deadzone_start + index, -1.0)),
+                radius,
+            )
             add_row(((index, 1.0), (deviation_start + index, -1.0)), float(center))
             add_row(((index, -1.0), (deviation_start + index, -1.0)), -float(center))
         matrix = coo_matrix(
@@ -733,16 +753,26 @@ class LookaheadCropPlanner:
             weights[index] = (intervals[index - 1] + intervals[index]) / 2
         tolerance = self.solver_feasibility_tolerance
         origins: tuple[float, ...] = ()
-        for pass_index in range(4):
-            objective = np.zeros(variable_count, dtype=np.float64)
+        objective = np.zeros(variable_count, dtype=np.float64)
+        # Preserve each optimum before considering deadzone composition, travel,
+        # velocity variation, and finally exact seed composition, in that order.
+        for pass_index in range(6):
+            objective.fill(0)
             if pass_index == 0:
                 objective[speed_index] = 1
             elif pass_index == 1:
                 objective[acceleration_index] = 1
             elif pass_index == 2:
-                objective[deviation_start:variation_start] = weights
+                objective_start, objective_stop = deadzone_start, travel_start
+                objective[objective_start:objective_stop] = weights
+            elif pass_index == 3:
+                objective_start, objective_stop = travel_start, variation_start
+                objective[objective_start:objective_stop] = 1
+            elif pass_index == 4:
+                objective_start, objective_stop = variation_start, deviation_start
+                objective[objective_start:objective_stop] = 1
             else:
-                objective[variation_start:] = 1
+                objective[deviation_start:] = weights
             try:
                 result = linprog(
                     objective,
@@ -788,21 +818,22 @@ class LookaheadCropPlanner:
                 bounds[speed_index] = (0.0, max(0.0, optimum) + tolerance)
             elif pass_index == 1:
                 bounds[acceleration_index] = (0.0, max(0.0, optimum) + tolerance)
-            elif pass_index == 2:
-                deviation_row = coo_matrix(
+            elif pass_index < 5:
+                objective_size = objective_stop - objective_start
+                objective_row = coo_matrix(
                     (
-                        weights,
+                        objective[objective_start:objective_stop],
                         (
-                            np.zeros(count, dtype=np.int32),
-                            np.arange(deviation_start, variation_start),
+                            np.zeros(objective_size, dtype=np.int32),
+                            np.arange(objective_start, objective_stop),
                         ),
                     ),
                     shape=(1, variable_count),
                 ).tocsr()
-                matrix = vstack((matrix, deviation_row), format="csr")
+                matrix = vstack((matrix, objective_row), format="csr")
                 rhs = np.append(rhs, max(0.0, optimum) + tolerance)
-                del deviation_row
-            del result, solution, objective
+                del objective_row
+            del result, solution
         return origins
 
     def _validate_axis_motion(

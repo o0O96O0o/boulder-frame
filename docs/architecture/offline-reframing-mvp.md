@@ -39,7 +39,7 @@ Future observed boxes constrain camera planning, never fill gaps with predicted 
 | `safe` | `.40` |
 | `full_movement` | `.33` |
 
-The default `lookahead-v1` planner optimizes pan over the full normalized shot. It composes the
+The default `lookahead-v2` planner optimizes pan over the full normalized shot. It composes the
 `deterministic-v3` causal seed, preserving every crop width/height exactly: profile sizing,
 5%/2% scale hysteresis, timestamp-based log-height zoom (speed `0.5`, acceleration `1.0`), miss
 widening, and source/aspect-limited dimensions are unchanged. Seed center hysteresis (1%/0.4%)
@@ -53,8 +53,12 @@ trajectory interpolation or extrapolation inside detector gaps.
 
 SciPy `1.15.3` `linprog(method="highs-ds")` solves sparse source-normalized axes independently,
 with fixed ordering. Timestamp-based per-axis speed `0.25` and acceleration `0.5` limits include
-rest before/after the shot. Four lexicographic passes minimize speed excess, acceleration excess,
-duration-weighted L1 distance from seed centers, then total absolute velocity change.
+rest before/after the shot. Six lexicographic passes minimize speed excess, acceleration excess,
+trapezoidal duration-weighted L1 distance outside the seed deadzone, total absolute center travel,
+total absolute velocity change including rest, then duration-weighted exact seed deviation as the
+last composition tie-break. The immutable deadzone radius is 5% of each seed crop's width/height
+around its center, source-normalized for the LP. It is a soft objective, not selective windows or a
+containment relaxation.
 Containment remains authoritative if motion limits conflict; report minimum required excess,
 never snap after optimization. Earlier optima are fixed within tolerance `1e-8`.
 
@@ -79,7 +83,7 @@ flowchart LR
   K -->|download source| S
   K --> V[FFprobe and optional VFR to CFR]
   V --> D[ONNX person detection]
-  D --> F[Causal zoom seed and full-shot sampled-constrained pan]
+  D --> F[Causal zoom seed and full-shot deadzone travel pan]
   F --> C[Validate optimizer crop geometry and motion]
   C -->|valid| R[Display-normalized crop resize and fixed-frame FFmpeg encode]
   C -->|invalid| E[Terminal internal without analysis artifacts]
@@ -103,12 +107,13 @@ from the active verified worker fails terminally with `model_unavailable` before
 Jobs created for previous model versions remain immutable: drain them on their original workers,
 then create new jobs for YOLO26n, never retry or rewrite old jobs as a migration.
 
-The default pipeline is `w0.2.6`. Immutable `planner` configuration remains unchanged and contains
-`controller = lookahead-v1`, `seed_controller = deterministic-v3`, `optimizer = scipy-highs-ds`,
+The default pipeline is `w0.2.7`. The exact immutable `planner` configuration contains
+`controller = lookahead-v2`, `seed_controller = deterministic-v3`, `optimizer = scipy-highs-ds`,
 `lookahead_scope = full_shot`, `containment_policy = sampled_detections`,
 `solver_feasibility_tolerance = 1e-8`, `scale_enter_fraction = 0.05`, `scale_exit_fraction = 0.02`,
 `center_enter_fraction = 0.01`, `center_exit_fraction = 0.004`, `zoom_max_speed = 0.5`,
-`zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, and `pan_max_acceleration = 0.5`,
+`zoom_max_acceleration = 1.0`, `pan_max_speed = 0.25`, `pan_max_acceleration = 0.5`,
+and `pan_dead_zone_fraction = 0.05`,
 plus deployment-configurable `detection_sample_fps` (default `10`, `0` disables sampling).
 The worker validates the exact key set, types, finite numbers, policies, and constants before
 cached crop replay; mismatches are terminal `internal` with user-safe configuration details.

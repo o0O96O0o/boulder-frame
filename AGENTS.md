@@ -37,12 +37,13 @@ Update the focused documentation and its index whenever an implementation decisi
 
 ## Framing Rules
 
-- Plan pan offline across the full normalized shot with `lookahead-v1` (`scipy-highs-ds`), using future accepted sampled boxes as crop constraints, never interpolating or predicting athlete positions.
+- Plan pan offline across the full normalized shot with `lookahead-v2` (`scipy-highs-ds`), using future accepted sampled boxes as crop constraints, never interpolating or predicting athlete positions.
 - Keep `DeterministicCropPlanner` (`deterministic-v3`) as the causal seed: final width/height are unchanged, including profile targets (`tight` .60, `balanced` .50, `safe` .40, `full_movement` .33), 5%/2% scale hysteresis, timestamp-based zoom limits, and miss widening. Its 1%/0.4% center hysteresis supplies the objective reference, not final pan gates.
 - Require strictly increasing non-negative integer timestamps. Optimize source-normalized pan per axis with speed `0.25`/second and acceleration `0.5`/second², including rest before/after the shot. If sampled containment conflicts with motion limits, minimize and report required speed then acceleration excess; never snap after optimization.
+- Use six lexicographic objectives: speed excess, acceleration excess, trapezoidal duration-weighted L1 distance outside the seed deadzone, total absolute center travel, total absolute velocity change including rest, then duration-weighted exact seed deviation as the final composition tie-break. Lock every prior optimum plus tolerance `1e-8`. Immutable `pan_dead_zone_fraction=0.05` means a per-axis radius of 5% of each seed crop's width/height around its center, normalized to source dimensions for the LP; it is a soft objective, never a containment relaxation or selective window.
 - Sample using immutable `planner.detection_sample_fps` (default 10 fps; 0 detects every frame), including the selected frame. Preserve `detection_sampled` provenance: only accepted fresh sampled boxes constrain containment. Skipped frames hold chronological camera guidance, not observed positions or hard bounds; held targets may leave the crop. Actual sampled misses clear the held target and cause causal widening.
 - Preserve source/aspect bounds on every crop. Contain every geometrically feasible sampled box; record source/aspect-impossible containment explicitly. Validate the optimum and final geometry/kinematics; solver failure is terminal analyzing `internal` with no causal fallback or committed analysis artifacts.
-- Keep `CropPlanner` API/storage contracts unchanged. Validate the exact immutable planner map before cached replay. Deploy backend/worker `w0.2.6` together after draining old jobs; never rewrite/retry old jobs or reuse old crop paths for the new detector.
+- Keep `CropPlanner` API/storage contracts unchanged. Validate the exact immutable planner map before cached replay. Deploy backend/worker `w0.2.7` together after draining old jobs; never rewrite/retry old jobs or reuse old crop paths for the new objective.
 
 ## Engineering Expectations
 

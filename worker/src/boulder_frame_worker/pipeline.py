@@ -1001,7 +1001,7 @@ def _output_settings(configuration: JobConfiguration) -> OutputSettings:
 def _planner_configuration(configuration: JobConfiguration) -> int | float:
     settings = configuration.planner
     expected: dict[str, str | float] = {
-        "controller": "lookahead-v1",
+        "controller": "lookahead-v2",
         "seed_controller": "deterministic-v3",
         "optimizer": "scipy-highs-ds",
         "lookahead_scope": "full_shot",
@@ -1015,6 +1015,7 @@ def _planner_configuration(configuration: JobConfiguration) -> int | float:
         "zoom_max_acceleration": DeterministicCropPlanner.zoom_max_acceleration,
         "pan_max_speed": LookaheadCropPlanner.pan_max_speed,
         "pan_max_acceleration": LookaheadCropPlanner.pan_max_acceleration,
+        "pan_dead_zone_fraction": LookaheadCropPlanner.pan_dead_zone_fraction,
     }
     invalid = set(settings) != {*expected, "detection_sample_fps"}
     for key, required in expected.items():
@@ -1220,7 +1221,7 @@ def _analysis_report(
     ):
         acceleration_excess = 0.0
     framing: dict[str, object] = {
-        "planner_controller": "lookahead-v1",
+        "planner_controller": "lookahead-v2",
         "optimizer": "scipy-highs-ds",
         "lookahead_scope": "full_shot",
         "containment_policy": "sampled_detections",

@@ -4,7 +4,7 @@ The backend is a Go HTTP process. It owns request validation, PostgreSQL metadat
 
 ## Documents
 
-- [HTTP API](http-api.md): routes, validation, ownership, lifecycle, opaque processing reports, exact immutable `lookahead-v1` planner map, configurable sampling, full-map hash separation, and drained `w0.2.6` cutover.
+- [HTTP API](http-api.md): routes, validation, ownership, lifecycle, opaque processing reports, exact immutable `lookahead-v2` planner map, configurable sampling, full-map hash separation, and drained `w0.2.7` cutover.
 - [Persistence](persistence.md): PostgreSQL entities, constraints, immutable configuration, nullable JSONB processing reports, and repository responsibilities.
 - [Redis Streams Task Distribution](redis-streams-task-distribution.md): stream/group configuration, task payload, idempotency, pending recovery, lease authority, and worker handoff.
 
@@ -40,7 +40,7 @@ migration `004` also requires draining workers that finalize retired review role
 [Persistence](persistence.md#phase-review-rollout). Apply migration `005` before deploying
 the report-aware API or worker; it leaves existing reports unset.
 
-Pipeline `w0.2.6` replaces the detector with YOLO26n and needs no database migration or new public controls. Its worker retains full-shot
+Pipeline `w0.2.7` changes the full-shot pan objective to seed-deadzone deviation, travel, velocity change, then exact seed composition, after speed/acceleration excess. It retains YOLO26n and needs no database migration or new public controls. Its worker retains full-shot
 pan with sampled-only hard containment, permits stale held targets outside the crop, and retains
 causal zoom. Future boxes constrain camera movement, not athlete trajectory interpolation.
 Invalid configuration/solver output fails safely without causal fallback. Deploy backend and worker
